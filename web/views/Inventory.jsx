@@ -44,6 +44,10 @@ function nodeSize(tier) {
   return 18;
 }
 
+function joinNames(hosts) {
+  return hosts.map(h => h.name).join(',');
+}
+
 function sortHosts(rows, sort) {
   const dir = SORT_DIRECTION[sort.dir] || 1;
   return [...rows].sort((a, b) => {
@@ -499,11 +503,9 @@ function InventoryYAML({ groups, hosts }) {
     <div className="yaml-wrap">
       <div className="code-pane">
         <div className="code-head">
-          <div className="mono mute" style={{ fontSize: 11.5 }}>inventory/production.yml</div>
+          <div className="mono mute" style={{ fontSize: 11.5 }}>inventory (rendered from the live ansible-inventory --list snapshot)</div>
           <div className="code-head-actions">
-            <button type="button" className="btn ghost small"><Icon name="refresh" size={11}/> Format</button>
-            <button type="button" className="btn ghost small"><Icon name="check" size={11}/> Validate</button>
-            <button type="button" className="btn small"><Icon name="download" size={11}/> Save</button>
+            <span className="mute mono" style={{ fontSize: 11 }}>read-only</span>
           </div>
         </div>
         <pre className="code-block"><code>{highlightYaml(tree)}</code></pre>
@@ -627,7 +629,6 @@ function InventoryView({ onOpenAdhoc }) {
           <button type="button" className="btn small" onClick={reload} disabled={refreshing}>
             <Icon name="refresh" size={12}/> {refreshing ? 'Reloading…' : 'Reload'}
           </button>
-          <button type="button" className="btn small"><Icon name="plus" size={12}/> Add host</button>
         </div>
       </div>
       {refreshError && <div className="cm-error mono" style={{ marginBottom: 12 }}>{refreshError}</div>}
@@ -678,21 +679,26 @@ function InventoryView({ onOpenAdhoc }) {
           </div>
           <div className="sel-bar-right">
             <button type="button" className="btn small" onClick={() => setSelectedIds(new Set())}>Clear</button>
-            <button type="button" className="btn small"><Icon name="hash" size={12}/> Gather facts</button>
-            <button type="button" className="btn small"><Icon name="playbooks" size={12}/> Run playbook…</button>
-            <button type="button" className="btn primary small" onClick={() => onOpenAdhoc({ target: `selection(${selectedIds.size})`, selectedHosts })}>
+            <button
+              type="button"
+              className="btn small"
+              onClick={() => onOpenAdhoc({ target: joinNames(selectedHosts), module: 'ansible.builtin.setup', selectedHosts })}
+            >
+              <Icon name="hash" size={12}/> Gather facts
+            </button>
+            <button type="button" className="btn primary small" onClick={() => onOpenAdhoc({ target: joinNames(selectedHosts), selectedHosts })}>
               <Icon name="terminal" size={12}/> Ad-hoc on selection
             </button>
           </div>
         </div>
       )}
 
-      <HostDrawer host={detail} onClose={() => setDetail(null)}/>
+      <HostDrawer host={detail} onClose={() => setDetail(null)} onOpenAdhoc={onOpenAdhoc}/>
     </div>
   );
 }
 
-function HostDrawer({ host, onClose }) {
+function HostDrawer({ host, onClose, onOpenAdhoc }) {
   const open = host != null;
   const dialogRef = globalThis.useDialog(open, onClose);
   if (!host) {
@@ -737,17 +743,29 @@ function HostDrawer({ host, onClose }) {
             {(host.groups || []).map(g => <span key={g} className="mini-tag mono">{g}</span>)}
           </div>
         </div>
-        <div className="drawer-section">
-          <div className="section-title">Tags</div>
-          <div className="tag-cluster" style={{ marginTop: 6 }}>
-            {(host.tags || []).map(t => <span key={t} className="chip on"><Icon name="tag" size={11}/><span className="mono">{t}</span></span>)}
-            <button type="button" className="chip"><Icon name="plus" size={10}/> add</button>
+        {(host.tags || []).length > 0 && (
+          <div className="drawer-section">
+            <div className="section-title">Tags</div>
+            <div className="tag-cluster" style={{ marginTop: 6 }}>
+              {host.tags.map(t => <span key={t} className="chip on"><Icon name="tag" size={11}/><span className="mono">{t}</span></span>)}
+            </div>
           </div>
-        </div>
+        )}
         <div className="drawer-foot">
-          <button type="button" className="btn small"><Icon name="terminal" size={12}/> SSH</button>
-          <button type="button" className="btn small"><Icon name="hash" size={12}/> Facts</button>
-          <button type="button" className="btn primary small"><Icon name="play" size={12}/> Run on this host</button>
+          <button
+            type="button"
+            className="btn small"
+            onClick={() => { onClose(); onOpenAdhoc?.({ target: host.name, module: 'ansible.builtin.setup', selectedHosts: [host] }); }}
+          >
+            <Icon name="hash" size={12}/> Facts
+          </button>
+          <button
+            type="button"
+            className="btn primary small"
+            onClick={() => { onClose(); onOpenAdhoc?.({ target: host.name, selectedHosts: [host] }); }}
+          >
+            <Icon name="play" size={12}/> Run ad-hoc on this host
+          </button>
         </div>
       </aside>
     </dialog>

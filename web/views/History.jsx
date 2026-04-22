@@ -66,7 +66,9 @@ function HistoryView() {
             <button type="button" className={filter === 'warn' ? 'on' : ''} onClick={() => setFilter('warn')}>Warn</button>
             <button type="button" className={filter === 'err' ? 'on' : ''} onClick={() => setFilter('err')}>Failed</button>
           </div>
-          <button type="button" className="btn small"><Icon name="download" size={12}/> Export</button>
+          <button type="button" className="btn small" onClick={() => exportRuns(RUNS)} disabled={RUNS.length === 0}>
+            <Icon name="download" size={12}/> Export
+          </button>
         </div>
       </div>
 
@@ -109,9 +111,11 @@ function HistoryView() {
               </div>
             </div>
             <div className="history-detail-actions">
-              {run.status === 'err' && <button type="button" className="btn small"><Icon name="refresh" size={12}/> Retry failed</button>}
-              <button type="button" className="btn small"><Icon name="code" size={12}/> View playbook</button>
-              <button type="button" className="btn primary small"><Icon name="play" size={12}/> Re-run</button>
+              {detail && (
+                <button type="button" className="btn small" onClick={() => exportOneRun(detail)}>
+                  <Icon name="download" size={12}/> Download log
+                </button>
+              )}
             </div>
           </div>
 
@@ -144,6 +148,32 @@ function HistoryView() {
       </div>
     </div>
   );
+}
+
+function exportRuns(runs) {
+  const blob = new Blob([JSON.stringify(runs, null, 2)], { type: 'application/json;charset=utf-8' });
+  triggerDownload(blob, `relay-runs-${timeStamp()}.json`);
+}
+
+function exportOneRun(run) {
+  const body = (run.log || []).map(l => l.text || '').join('\n');
+  const blob = new Blob([body || '(no log captured)'], { type: 'text/plain;charset=utf-8' });
+  triggerDownload(blob, `${run.id || 'run'}-${timeStamp()}.log`);
+}
+
+function triggerDownload(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+function timeStamp() {
+  return new Date().toISOString().replace(/[:]/g, '-').replace(/\..*/, '');
 }
 
 globalThis.HistoryView = HistoryView;

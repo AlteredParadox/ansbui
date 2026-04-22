@@ -202,7 +202,7 @@
 
       const ViewNode = (() => {
         switch (view) {
-          case 'dashboard': return <window.DashboardView onNavigate={setView} onOpenAdhoc={openAdhoc} onRunPlaybook={runPlaybook}/>;
+          case 'dashboard': return <window.DashboardView onNavigate={setView} onOpenAdhoc={openAdhoc}/>;
           case 'inventory': return <window.InventoryView onOpenAdhoc={openAdhoc}/>;
           case 'playbooks': return <window.PlaybooksView initialId={playbookId}/>;
           case 'adhoc': return <window.AdhocView prefill={adhocPrefill}/>;

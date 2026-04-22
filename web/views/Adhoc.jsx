@@ -87,6 +87,7 @@ function AdhocView({ prefill }) {
   const [become, setBecome] = useStateA(false);
   const [check, setCheck] = useStateA(false);
   const [forks, setForks] = useStateA(20);
+  const [timeout, setTimeoutState] = useStateA(30);
   const [running, setRunning] = useStateA(false);
   const [output, setOutput] = useStateA([]);
   const [hostStates, setHostStates] = useStateA({});
@@ -129,7 +130,7 @@ function AdhocView({ prefill }) {
       become,
       check,
       forks: Number(forks) || 0,
-      timeout: 30
+      timeout: Number(timeout) || 0
     };
 
     const stream = globalThis.RelayAPI.openStream('adhoc', payload);
@@ -201,8 +202,7 @@ function AdhocView({ prefill }) {
           <div className="view-sub mute">Fire a single module at a selection of hosts. Keyboard-first.</div>
         </div>
         <div className="view-actions">
-          <span className="mute mono" style={{ fontSize: 12 }}>history</span>
-          <button type="button" className="btn small"><Icon name="history" size={12}/> Recent commands</button>
+          <span className="mute mono" style={{ fontSize: 12 }}>runs persisted automatically</span>
         </div>
       </div>
 
@@ -269,7 +269,6 @@ function AdhocView({ prefill }) {
                     </div>
                   );
                 })}
-                <button type="button" className="chip"><Icon name="plus" size={10}/> extra arg</button>
               </div>
             </div>
           )}
@@ -291,7 +290,7 @@ function AdhocView({ prefill }) {
               </label>
               <label className="opt" htmlFor="adhoc-timeout">
                 <span className="mono">--timeout</span>
-                <input id="adhoc-timeout" className="input" defaultValue="30" style={{ width: 50, height: 22, padding: '0 6px' }}/>
+                <input id="adhoc-timeout" type="number" className="input" value={timeout} onChange={e => setTimeoutState(+e.target.value)} style={{ width: 60, height: 22, padding: '0 6px' }}/>
               </label>
             </div>
           </div>
@@ -327,9 +326,8 @@ function AdhocView({ prefill }) {
               {become && <span className="pill info" style={{ marginLeft: 6 }}>sudo</span>}
             </div>
             <div className="composer-run-actions">
-              <button type="button" className="btn small">Save as playbook…</button>
               <button type="button" className="btn primary" onClick={run} disabled={running}>
-                <Icon name="play" size={12}/> {running ? 'Running…' : 'Run'} <span className="kbd" style={{ marginLeft: 8 }}>⌘↵</span>
+                <Icon name="play" size={12}/> {running ? 'Running…' : 'Run'}
               </button>
             </div>
           </div>
@@ -344,8 +342,12 @@ function AdhocView({ prefill }) {
               </div>
             </div>
             <div style={{ display: 'flex', gap: 6 }}>
-              <button type="button" className="btn ghost small"><Icon name="download" size={11}/> Log</button>
-              <button type="button" className="btn ghost small"><Icon name="x" size={11}/> Clear</button>
+              <button type="button" className="btn ghost small" onClick={() => downloadLog(output, mod.name)} disabled={output.length === 0}>
+                <Icon name="download" size={11}/> Log
+              </button>
+              <button type="button" className="btn ghost small" onClick={() => setOutput([])} disabled={running || output.length === 0}>
+                <Icon name="x" size={11}/> Clear
+              </button>
             </div>
           </div>
 
@@ -403,6 +405,24 @@ const PLACEHOLDER_MAP = {
 
 function placeholderFor(modId, arg) {
   return PLACEHOLDER_MAP[`${modId}:${arg}`] || arg;
+}
+
+// downloadLog serialises the terminal buffer to a plain-text file and
+// triggers a browser download. We don't attempt ANSI colour fidelity —
+// operators usually paste log text into tickets or grep, and plain
+// text is what they want.
+function downloadLog(lines, moduleName) {
+  const body = lines.map(l => (l.text || '')).join('\n');
+  const blob = new Blob([body], { type: 'text/plain;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  const stamp = new Date().toISOString().replace(/[:]/g, '-').replace(/\..*/, '');
+  a.download = `adhoc-${moduleName.replaceAll(/[^A-Za-z0-9]+/g, '_')}-${stamp}.log`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
 }
 
 globalThis.AdhocView = AdhocView;

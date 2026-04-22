@@ -71,8 +71,12 @@
     ]);
     const GROUPS = buildGroups(inv.groups);
     const HOSTS = annotateHosts(inv.hosts);
-    const PLAYBOOKS = (pbs.playbooks || []).map(toPlaybookCard);
-    const RUNS = (runs.runs || []).map(toRunCard);
+    const rawRuns = runs.runs || [];
+    const RUNS = rawRuns.map(toRunCard);
+    const PLAYBOOKS = annotatePlaybooksWithRuns(
+      (pbs.playbooks || []).map(toPlaybookCard),
+      rawRuns
+    );
     const ACTIVITY = activityFromRuns(RUNS);
     globalThis.AnsibleData = {
       GROUPS,
@@ -85,6 +89,37 @@
     };
     return globalThis.AnsibleData;
   };
+
+  // annotatePlaybooksWithRuns walks the raw run records (before
+  // toRunCard's string friendlification) and picks the most recent
+  // run per playbook path/name. Populates lastRun, lastStatus, and a
+  // per-playbook run counter so the Playbooks library can show live
+  // "last ran 2h ago" / status dots without a second API call.
+  function annotatePlaybooksWithRuns(playbooks, rawRuns) {
+    const latest = {};
+    const counts = {};
+    for (const r of rawRuns) {
+      const key = r.playbook;
+      if (!key) continue;
+      counts[key] = (counts[key] || 0) + 1;
+      const current = latest[key];
+      const startedAt = r.startedAt || '';
+      if (!current || startedAt > current.startedAt) {
+        latest[key] = r;
+      }
+    }
+    return playbooks.map(p => {
+      const r = latest[p.path] || latest[p.name];
+      const runCount = counts[p.path] || counts[p.name] || 0;
+      if (!r) return { ...p, runs: runCount };
+      return {
+        ...p,
+        runs: runCount,
+        lastRun: friendly(r.startedAt),
+        lastStatus: r.status || 'ok'
+      };
+    });
+  }
 
   const BUILTIN_MODULES = [
     { id: 'ping', name: 'ansible.builtin.ping', desc: 'Try to connect, verify a usable Python', args: [] },
@@ -154,9 +189,7 @@
       tags: p.tags || [],
       lastRun: '',
       lastStatus: '',
-      author: '',
       runs: 0,
-      avgDuration: '',
       targets: p.targets || '',
       path: p.path,
       modified: p.modified || '',
