@@ -71,6 +71,9 @@ function VaultView() {
             </div>
             <div className="mute mono" style={{ fontSize: 11, marginTop: 4 }}>{f.path}</div>
             <div className="vault-tile-meta">
+              <span className={`mini-tag mono ${f.kind === 'inline' ? 'warn' : ''}`}>
+                {f.kind === 'inline' ? 'inline values' : 'whole-file'}
+              </span>
               {f.vaultId && <span className="mini-tag mono">id: {f.vaultId}</span>}
               <span className="mini-tag mono">{formatBytes(f.size || 0)}</span>
             </div>
@@ -166,6 +169,7 @@ function VaultUnlockDialog({ open, file, onClose }) {
   const [editing, setEditing] = useStateV(false);
   const [busy, setBusy] = useStateV(false);
   const [error, setError] = useStateV('');
+  const inlineKind = file?.kind === 'inline';
 
   useEffectV(() => {
     if (!open) {
@@ -204,19 +208,41 @@ function VaultUnlockDialog({ open, file, onClose }) {
 
   if (!file) return null;
   const unlocked = plaintext != null;
+  const subtitle = inlineKind
+    ? `${file.path} — uses !vault inline encryption; whole-file unlock isn't possible.`
+    : (unlocked ? `Unlocked · ${file.path}` : `Enter the vault password to decrypt ${file.path}.`);
 
   return (
     <globalThis.AnsbuiCenterDialog
       open={open}
       onClose={onClose}
       title={file.name}
-      subtitle={unlocked ? `Unlocked · ${file.path}` : `Enter the vault password to decrypt ${file.path}.`}
+      subtitle={subtitle}
       width="min(820px, 94vw)"
       maxHeight="86vh"
     >
       {error && <div className="cm-error mono">{error}</div>}
 
-      {!unlocked && (
+      {inlineKind && (
+        <div className="mute" style={{ fontSize: 12.5, lineHeight: 1.7 }}>
+          <div>
+            This file is <b>plain YAML with per-value <span className="mono">!vault |</span> encryption</b> — the common pattern for <span className="mono">group_vars/*/vault.yml</span>. <span className="mono">ansible-vault view</span> only works on whole-file vaults, so there's no single password to decrypt the whole thing.
+          </div>
+          <div style={{ marginTop: 10 }}>
+            To view or rotate individual values on the remote:
+            <pre className="code-block" style={HINT_CODE_STYLE}>{`# decrypt one value in place (writes plain YAML back)
+ansible-vault decrypt ${file.path} --ask-vault-pass
+# re-encrypt a specific key
+ansible-vault encrypt_string --ask-vault-pass 'new_value' --name 'var_name'`}</pre>
+            Per-key decrypt + edit inside ansbui is on the roadmap; for now the file will just show you which keys are encrypted when you pull it up in your editor.
+          </div>
+          <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+            <button type="button" className="btn small" onClick={onClose}>Close</button>
+          </div>
+        </div>
+      )}
+
+      {!inlineKind && !unlocked && (
         <form onSubmit={(e) => { e.preventDefault(); unlock(); }}>
           <label htmlFor="vault-pw" className="cm-field-label">Vault password</label>
           <input
@@ -238,7 +264,7 @@ function VaultUnlockDialog({ open, file, onClose }) {
         </form>
       )}
 
-      {unlocked && (
+      {!inlineKind && unlocked && (
         <>
           <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8 }}>
             {editing ? (

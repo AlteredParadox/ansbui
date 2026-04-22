@@ -24,12 +24,21 @@ type VaultFile struct {
 	// VaultID is the optional label encoded in the header of
 	// $ANSIBLE_VAULT;1.2;AES256;<id>. Empty for 1.1 headers.
 	VaultID string `json:"vaultId,omitempty"`
+	// Kind is "whole" for files encrypted end-to-end with
+	// `ansible-vault encrypt`, or "inline" for plain YAML files that
+	// embed `!vault |` per-value encryption (typical in group_vars /
+	// host_vars). ansible-vault view only works on whole-file vaults;
+	// the UI uses Kind to adjust the dialog copy and avoid calling
+	// view on an inline file.
+	Kind string `json:"kind,omitempty"`
 }
 
-// ListVaultFiles walks the server's workDir and returns any YAML/YML
-// (or extensionless) file whose first line starts with $ANSIBLE_VAULT.
-// We use a single grep invocation rather than a find+cat loop to avoid
-// a round-trip per candidate file.
+// ListVaultFiles walks the server's workDir and returns any file that
+// contains a $ANSIBLE_VAULT header — either at the start of a line
+// (whole-file encrypted) or on an indented line following `!vault |`
+// (per-value encrypted group_vars / host_vars). One grep invocation
+// catches both; annotateVaultFiles then looks at each match's first
+// line to decide the Kind.
 func ListVaultFiles(ctx context.Context, pool *sshpool.Pool, srv config.Server) ([]VaultFile, error) {
 	if srv.WorkDir == "" {
 		return nil, errors.New("server has no workDir configured")
@@ -38,11 +47,11 @@ func ListVaultFiles(ctx context.Context, pool *sshpool.Pool, srv config.Server) 
 	if err != nil {
 		return nil, err
 	}
-	// -l prints filenames; -r recurses; -m1 stops at first match per file;
-	// -- stops flag parsing. We read the first line of each match to
-	// grab the optional vault-id.
+	// -l prints filenames; -r recurses; -m1 stops at first match per file.
+	// Leading [[:space:]]* allows the $ANSIBLE_VAULT marker to appear
+	// indented (under `!vault |`), not only at column 0.
 	cmd := fmt.Sprintf(
-		"cd %s && grep -rlm1 -E '^\\$ANSIBLE_VAULT;[0-9]+\\.[0-9]+;' . 2>/dev/null || true",
+		"cd %s && grep -rlm1 -E '^[[:space:]]*\\$ANSIBLE_VAULT;[0-9]+\\.[0-9]+;' . 2>/dev/null || true",
 		shellQuote(srv.WorkDir),
 	)
 	stdout, _, err := sshpool.Run(cli, cmd)
@@ -78,7 +87,9 @@ func annotateVaultFiles(ctx context.Context, pool *sshpool.Pool, srv config.Serv
 	var b strings.Builder
 	fmt.Fprintf(&b, "cd %s && ", shellQuote(srv.WorkDir))
 	for _, f := range files {
-		fmt.Fprintf(&b, "printf '>>%s\\n'; stat -c '%%s\\t%%Y' %s 2>/dev/null; head -n1 %s 2>/dev/null; ",
+		// stat doesn't interpret \t in -c format strings, so use a
+		// space separator — unambiguous for "size mtime".
+		fmt.Fprintf(&b, "printf '>>%s\\n'; stat -c '%%s %%Y' %s 2>/dev/null; head -n1 %s 2>/dev/null; ",
 			f.Path, shellQuote(f.Path), shellQuote(f.Path))
 	}
 	stdout, _, err := sshpool.Run(cli, b.String())
@@ -106,17 +117,25 @@ func parseVaultAnnotations(stdout string, files []VaultFile) {
 		}
 		switch step {
 		case 0:
-			// stat line: size<TAB>mtime
-			parts := strings.SplitN(line, "\t", 2)
-			if len(parts) == 2 {
+			// stat line: "<size> <mtime>" — separator is a space
+			// because stat -c does not interpret backslash escapes.
+			parts := strings.SplitN(line, " ", 2)
+			if len(parts) >= 1 {
 				fmt.Sscanf(parts[0], "%d", &current.Size)
 			}
 			step = 1
 		case 1:
-			// header line: $ANSIBLE_VAULT;1.2;AES256;label
-			fields := strings.Split(line, ";")
-			if len(fields) >= 4 {
-				current.VaultID = fields[3]
+			// First line of the file. If it starts with the vault
+			// header we have a whole-file vault; otherwise the marker
+			// we matched was on an indented line, so this is an
+			// inline / per-value vault.
+			if strings.HasPrefix(line, "$ANSIBLE_VAULT;") {
+				current.Kind = "whole"
+				if fields := strings.Split(line, ";"); len(fields) >= 4 {
+					current.VaultID = fields[3]
+				}
+			} else {
+				current.Kind = "inline"
 			}
 			step = 2
 		}
