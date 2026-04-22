@@ -108,7 +108,7 @@ function detectModule(lines) {
   return '';
 }
 
-function VisualStructure({ yaml, playbook }) {
+function VisualStructure({ yaml, playbook, editing, onReorder }) {
   const tasks = useMemoP(() => parseYamlTasks(yaml), [yaml]);
   const grouped = {
     pre_tasks: tasks.filter(t => t.section === 'pre_tasks'),
@@ -127,28 +127,25 @@ function VisualStructure({ yaml, playbook }) {
         <div className="vs-meta">
           <div className="vs-meta-item">
             <span className="section-title">hosts</span>
-            <span className="mono">{playbook.targets}</span>
+            <span className="mono">{playbook.targets || '—'}</span>
           </div>
           <div className="vs-meta-item">
-            <span className="section-title">become</span>
-            <span className="mono">true</span>
-          </div>
-          <div className="vs-meta-item">
-            <span className="section-title">strategy</span>
-            <span className="mono">linear</span>
+            <span className="section-title">tasks</span>
+            <span className="mono">{tasks.length}</span>
           </div>
         </div>
       </div>
-      <TaskGroup label="Pre-tasks" items={grouped.pre_tasks} tone="pre"/>
-      <TaskGroup label="Tasks" items={grouped.tasks} tone="main"/>
-      <TaskGroup label="Post-tasks" items={grouped.post_tasks} tone="post"/>
-      <TaskGroup label="Handlers" items={grouped.handlers} tone="handlers"/>
+      <TaskGroup label="Pre-tasks" items={grouped.pre_tasks} section="pre_tasks" tone="pre" editing={editing} onReorder={onReorder}/>
+      <TaskGroup label="Tasks" items={grouped.tasks} section="tasks" tone="main" editing={editing} onReorder={onReorder}/>
+      <TaskGroup label="Post-tasks" items={grouped.post_tasks} section="post_tasks" tone="post" editing={editing} onReorder={onReorder}/>
+      <TaskGroup label="Handlers" items={grouped.handlers} section="handlers" tone="handlers" editing={editing} onReorder={onReorder}/>
     </div>
   );
 }
 
-function TaskGroup({ label, items, tone }) {
+function TaskGroup({ label, items, section, tone, editing, onReorder }) {
   if (!items.length) return null;
+  const last = items.length - 1;
   return (
     <div className={`vs-group vs-${tone}`}>
       <div className="vs-group-head">
@@ -163,34 +160,91 @@ function TaskGroup({ label, items, tone }) {
               <div className="vs-task-name">{t.name}</div>
               <div className="vs-task-mod mono mute">{t.module || '—'}</div>
             </div>
-            <button type="button" className="vs-task-drag" title="drag to reorder"><Icon name="more" size={14}/></button>
+            {editing && (
+              <div className="vs-task-reorder">
+                <button
+                  type="button"
+                  className="btn ghost small"
+                  aria-label={`Move ${t.name} up`}
+                  disabled={i === 0}
+                  onClick={() => onReorder?.(section, i, -1)}
+                >
+                  <Icon name="chevron-up" size={12}/>
+                </button>
+                <button
+                  type="button"
+                  className="btn ghost small"
+                  aria-label={`Move ${t.name} down`}
+                  disabled={i === last}
+                  onClick={() => onReorder?.(section, i, +1)}
+                >
+                  <Icon name="chevron-down" size={12}/>
+                </button>
+              </div>
+            )}
           </div>
         ))}
-        <button type="button" className="vs-add"><Icon name="plus" size={12}/> Add task</button>
       </div>
     </div>
   );
 }
 
-function YamlEditor({ value, onSave }) {
+// moveTask splices two adjacent task-block ranges in the YAML so the
+// UI reorder buttons result in a real text change, not just a reparse.
+// Blocks come from parseYamlTasks which tracks each block's startLine
+// and owns every line up to (but not including) the next block or
+// top-level entry.
+function moveTask(yaml, section, indexInSection, direction) {
+  if (!yaml || !section) return yaml;
+  const lines = yaml.split('\n');
+  const blocks = parseYamlTasks(yaml);
+  const sectionBlocks = blocks.filter(b => b.section === section);
+  const a = sectionBlocks[indexInSection];
+  const b = sectionBlocks[indexInSection + direction];
+  if (!a || !b) return yaml;
+  const aRange = [a.startLine, a.startLine + a.lines.length];
+  const bRange = [b.startLine, b.startLine + b.lines.length];
+  const [first, second] = aRange[0] < bRange[0] ? [a, b] : [b, a];
+  const fStart = first.startLine;
+  const fEnd = fStart + first.lines.length;
+  const sStart = second.startLine;
+  const sEnd = sStart + second.lines.length;
+  const before = lines.slice(0, fStart);
+  const between = lines.slice(fEnd, sStart);
+  const after = lines.slice(sEnd);
+  return [...before, ...second.lines, ...between, ...first.lines, ...after].join('\n');
+}
+
+function YamlEditor({ path, value, onChange, editing }) {
   const lines = value.split('\n');
   return (
     <div className="code-pane flex-1">
       <div className="code-head">
-        <div className="mono mute" style={{ fontSize: 11.5 }}>playbooks/edit.yml</div>
+        <div className="mono mute" style={{ fontSize: 11.5 }}>{path || 'playbook.yml'}</div>
         <div className="code-head-actions">
           <span className="pill ok"><Icon name="check" size={10}/> syntax ok</span>
-          <button type="button" className="btn ghost small"><Icon name="refresh" size={11}/> Format</button>
-          <button type="button" className="btn small" onClick={onSave}><Icon name="download" size={11}/> Save</button>
+          {editing && (
+            <span className="mute mono" style={{ fontSize: 11 }}>{lines.length} lines</span>
+          )}
         </div>
       </div>
       <div className="code-body">
         <div className="code-gutter mono">
           <pre style={{ margin: 0 }}>{Array.from({ length: lines.length }, (_, i) => i + 1).join('\n')}</pre>
         </div>
-        <pre className="code-block code-block-edit">
-          <code>{highlightYamlFull(value)}</code>
-        </pre>
+        {editing ? (
+          <textarea
+            className="code-block code-block-edit yaml-textarea"
+            aria-label="Edit playbook YAML"
+            spellCheck="false"
+            value={value}
+            onChange={(e) => onChange(e.target.value)}
+          />
+        ) : (
+          <pre className="code-block code-block-edit">
+            <code>{highlightYamlFull(value)}</code>
+          </pre>
+        )}
       </div>
     </div>
   );
@@ -253,14 +307,21 @@ function PlaybooksView({ initialId }) {
   const PLAYBOOKS = data.PLAYBOOKS || [];
   const [selectedId, setSelectedId] = useStateP(initialId || PLAYBOOKS[0]?.id || '');
   const [yaml, setYaml] = useStateP('');
+  const [draft, setDraft] = useStateP('');
+  const [editing, setEditing] = useStateP(false);
+  const [saving, setSaving] = useStateP(false);
   const [error, setError] = useStateP('');
   const [runnerOpen, setRunnerOpen] = useStateP(false);
+  const [historyOpen, setHistoryOpen] = useStateP(false);
+  const [importOpen, setImportOpen] = useStateP(false);
 
   const pb = PLAYBOOKS.find(p => p.id === selectedId) || PLAYBOOKS[0];
 
   useEffectP(() => {
-    if (!pb) { setYaml(''); return; }
-    if (pb.yaml) { setYaml(pb.yaml); return; }
+    setEditing(false);
+    setError('');
+    if (!pb) { setYaml(''); setDraft(''); return; }
+    if (pb.yaml) { setYaml(pb.yaml); setDraft(pb.yaml); return; }
     if (!pb.path || !globalThis.RelayAPI) return;
     let alive = true;
     globalThis.RelayAPI.getPlaybook(pb.path)
@@ -268,20 +329,32 @@ function PlaybooksView({ initialId }) {
         if (!alive) return;
         pb.yaml = res.yaml || '';
         setYaml(pb.yaml);
+        setDraft(pb.yaml);
       })
-      .catch(e => { if (alive) { setError(e.message); setYaml(''); } });
+      .catch(e => { if (alive) { setError(e.message); setYaml(''); setDraft(''); } });
     return () => { alive = false; };
   }, [pb?.id]);
 
   useEffectP(() => { if (initialId) setSelectedId(initialId); }, [initialId]);
 
+  const startEdit = () => { setDraft(yaml); setEditing(true); setError(''); };
+  const cancelEdit = () => { setDraft(yaml); setEditing(false); setError(''); };
+
   const savePlaybook = async () => {
     if (!pb?.path || !globalThis.RelayAPI) return;
-    setError('');
+    setSaving(true); setError('');
     try {
-      await globalThis.RelayAPI.savePlaybook(pb.path, yaml);
-      pb.yaml = yaml;
+      await globalThis.RelayAPI.savePlaybook(pb.path, draft);
+      pb.yaml = draft;
+      setYaml(draft);
+      setEditing(false);
     } catch (e) { setError(e.message); }
+    finally { setSaving(false); }
+  };
+
+  const reorderTask = (section, sectionIndex, direction) => {
+    const next = moveTask(draft, section, sectionIndex, direction);
+    if (next !== draft) setDraft(next);
   };
 
   if (!pb) {
@@ -305,57 +378,89 @@ function PlaybooksView({ initialId }) {
           <div className="view-sub mute">{PLAYBOOKS.length} playbooks</div>
         </div>
         <div className="view-actions">
-          <button type="button" className="btn small"><Icon name="download" size={12}/> Import</button>
-          <button type="button" className="btn small"><Icon name="code" size={12}/> History</button>
-          <button type="button" className="btn primary small" onClick={() => setRunnerOpen(true)}><Icon name="play" size={12}/> Run…</button>
+          <button type="button" className="btn small" onClick={() => setImportOpen(true)}>
+            <Icon name="download" size={12}/> Import
+          </button>
+          <button type="button" className="btn small" onClick={() => setHistoryOpen(true)}>
+            <Icon name="history" size={12}/> History
+          </button>
+          {editing ? (
+            <>
+              <button type="button" className="btn small" onClick={cancelEdit} disabled={saving}>Cancel</button>
+              <button type="button" className="btn primary small" onClick={savePlaybook} disabled={saving}>
+                <Icon name="check" size={12}/> {saving ? 'Saving…' : 'Save'}
+              </button>
+            </>
+          ) : (
+            <>
+              <button type="button" className="btn small" onClick={startEdit}>
+                <Icon name="code" size={12}/> Edit
+              </button>
+              <button type="button" className="btn primary small" onClick={() => setRunnerOpen(true)}>
+                <Icon name="play" size={12}/> Run…
+              </button>
+            </>
+          )}
         </div>
       </div>
 
       {error && <div className="cm-error mono">{error}</div>}
 
       <div className="pb-body">
-        <PlaybookLibrary playbooks={PLAYBOOKS} selectedId={selectedId} onSelect={setSelectedId} onNew={() => {}}/>
+        <PlaybookLibrary playbooks={PLAYBOOKS} selectedId={selectedId} onSelect={setSelectedId} onNew={() => setImportOpen(true)}/>
 
         <main className="pb-main">
           <div className="pb-head card">
             <div className="pb-head-top">
               <div>
                 <div className="section-title">Playbook</div>
-                <h2 className="pb-title">{pb.title} <span className="mono mute" style={{ fontWeight: 400, fontSize: 14, marginLeft: 8 }}>{pb.name}</span></h2>
+                <h2 className="pb-title">{pb.title} <span className="mono mute" style={{ fontWeight: 400, fontSize: 14, marginLeft: 8 }}>{pb.path || pb.name}</span></h2>
                 <div className="mute">{pb.description}</div>
               </div>
               <div className="pb-head-stats">
-                <div><span className="section-title">Targets</span><div className="mono">{pb.targets}</div></div>
-                <div><span className="section-title">Last run</span><div>{pb.lastRun} <span className={`dot ${pb.lastStatus}`} style={{ marginLeft: 6 }}/></div></div>
-                <div><span className="section-title">Avg duration</span><div className="mono">{pb.avgDuration}</div></div>
-                <div><span className="section-title">Runs</span><div className="mono">{pb.runs}</div></div>
+                <div><span className="section-title">Targets</span><div className="mono">{pb.targets || '—'}</div></div>
+                <div><span className="section-title">Last run</span><div>{pb.lastRun || '—'} {pb.lastStatus && <span className={`dot ${pb.lastStatus}`} style={{ marginLeft: 6 }}/>}</div></div>
+                <div><span className="section-title">Modified</span><div className="mono" style={{ fontSize: 12 }}>{pb.modified ? new Date(pb.modified).toLocaleString() : '—'}</div></div>
               </div>
             </div>
-            <div className="pb-head-tags">
-              {(pb.tags || []).map(t => <span key={t} className="chip on"><Icon name="tag" size={10}/><span className="mono">{t}</span></span>)}
-              <span className="mute mono" style={{ marginLeft: 'auto', fontSize: 11 }}>by {pb.author}</span>
-            </div>
+            {(pb.tags || []).length > 0 && (
+              <div className="pb-head-tags">
+                {(pb.tags || []).map(t => <span key={t} className="chip on"><Icon name="tag" size={10}/><span className="mono">{t}</span></span>)}
+              </div>
+            )}
           </div>
 
           <div className="pb-split">
             <div className="pb-split-pane pb-visual card">
               <div className="pb-split-head">
                 <span className="section-title">Structure</span>
-                <span className="mute mono" style={{ fontSize: 11 }}>drag to reorder</span>
+                <span className="mute mono" style={{ fontSize: 11 }}>
+                  {editing ? 'click ↑ / ↓ to reorder' : 'read-only — click Edit to change'}
+                </span>
               </div>
-              <VisualStructure yaml={yaml} playbook={pb}/>
+              <VisualStructure yaml={editing ? draft : yaml} playbook={pb} editing={editing} onReorder={reorderTask}/>
             </div>
             <div className="pb-split-pane pb-yaml card">
               <div className="pb-split-head">
                 <span className="section-title">YAML</span>
-                <span className="mute mono" style={{ fontSize: 11 }}>{yaml.split('\n').length} lines</span>
+                <span className="mute mono" style={{ fontSize: 11 }}>{(editing ? draft : yaml).split('\n').length} lines</span>
               </div>
-              <YamlEditor value={yaml} onSave={savePlaybook}/>
+              <YamlEditor
+                path={pb.path}
+                value={editing ? draft : yaml}
+                onChange={setDraft}
+                editing={editing}
+              />
             </div>
           </div>
         </main>
       </div>
       <PlaybookRunner open={runnerOpen} pb={pb} onClose={() => setRunnerOpen(false)}/>
+      <PlaybookHistoryDialog open={historyOpen} pb={pb} onClose={() => setHistoryOpen(false)}/>
+      <PlaybookImportDialog open={importOpen} onClose={() => setImportOpen(false)} onImported={(newPath) => {
+        setImportOpen(false);
+        globalThis.RelayAPI?.bootstrap().catch(() => {});
+      }}/>
     </div>
   );
 }
@@ -670,6 +775,197 @@ function collectExtraVars(rows) {
     }
   });
   return out;
+}
+
+// ---------- History dialog ----------
+
+function PlaybookHistoryDialog({ open, pb, onClose }) {
+  const dialogRef = globalThis.useDialog(open, onClose);
+  const [runs, setRuns] = useStateP([]);
+  const [loading, setLoading] = useStateP(false);
+  const [error, setError] = useStateP('');
+
+  useEffectP(() => {
+    if (!open || !pb || !globalThis.RelayAPI) return;
+    setLoading(true); setError('');
+    let alive = true;
+    globalThis.RelayAPI.listRuns()
+      .then(res => {
+        if (!alive) return;
+        const all = res.runs || [];
+        const mine = all.filter(r => r.playbook === pb.path || r.playbook === pb.name);
+        setRuns(mine);
+      })
+      .catch(e => { if (alive) setError(e.message); })
+      .finally(() => { if (alive) setLoading(false); });
+    return () => { alive = false; };
+  }, [open, pb?.id]);
+
+  if (!pb) return <dialog ref={dialogRef} className="relay-dialog relay-dialog-center" aria-hidden="true"/>;
+
+  return (
+    <dialog
+      ref={dialogRef}
+      className="relay-dialog relay-dialog-center"
+      aria-label={`Run history for ${pb.name}`}
+      onClick={(e) => { if (e.target === dialogRef.current) onClose(); }}
+    >
+      <div className="cm" style={{ width: 'min(720px, 94vw)', maxHeight: '70vh' }}>
+        <div className="cm-head">
+          <div>
+            <div className="section-title">Run history</div>
+            <div className="mono" style={{ marginTop: 2 }}>{pb.name}</div>
+          </div>
+          <button type="button" className="btn ghost small" onClick={onClose}><Icon name="x" size={14}/></button>
+        </div>
+        <div className="cm-body cm-single">
+          <div className="cm-pane">
+            {error && <div className="cm-error mono">{error}</div>}
+            {loading && <div className="mute mono" style={{ fontSize: 12 }}>loading…</div>}
+            {!loading && runs.length === 0 && <div className="mute" style={{ fontSize: 12 }}>No runs recorded for this playbook yet.</div>}
+            {runs.length > 0 && (
+              <table className="t" style={{ width: '100%' }}>
+                <thead>
+                  <tr>
+                    <th style={{ cursor: 'default', width: 22 }}></th>
+                    <th style={{ cursor: 'default' }}>When</th>
+                    <th style={{ cursor: 'default' }}>Duration</th>
+                    <th style={{ cursor: 'default' }}>ok</th>
+                    <th style={{ cursor: 'default' }}>changed</th>
+                    <th style={{ cursor: 'default' }}>failed</th>
+                    <th style={{ cursor: 'default' }}>By</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {runs.map(r => (
+                    <tr key={r.id}>
+                      <td><span className={`dot ${r.status}`}/></td>
+                      <td className="mono" style={{ fontSize: 12 }}>{r.startedAt ? new Date(r.startedAt).toLocaleString() : '—'}</td>
+                      <td className="mono">{r.duration || '—'}</td>
+                      <td className="mono" style={{ color: 'var(--ok)' }}>{r.ok || 0}</td>
+                      <td className="mono" style={{ color: 'var(--warn)' }}>{r.changed || 0}</td>
+                      <td className="mono" style={{ color: r.failed ? 'var(--err)' : undefined }}>{r.failed || 0}</td>
+                      <td className="mute">{r.who || ''}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+        </div>
+      </div>
+    </dialog>
+  );
+}
+
+// ---------- Import dialog ----------
+
+const PATH_SEGMENT_RE = /^[A-Za-z0-9._-]+$/;
+
+function PlaybookImportDialog({ open, onClose, onImported }) {
+  const dialogRef = globalThis.useDialog(open, onClose);
+  const [filename, setFilename] = useStateP('');
+  const [yaml, setYaml] = useStateP('');
+  const [busy, setBusy] = useStateP(false);
+  const [error, setError] = useStateP('');
+
+  useEffectP(() => {
+    if (!open) { setFilename(''); setYaml(''); setError(''); }
+  }, [open]);
+
+  const validPath = (raw) => {
+    const trimmed = (raw || '').trim();
+    if (!trimmed) return false;
+    return trimmed.split('/').every(seg => PATH_SEGMENT_RE.test(seg));
+  };
+
+  const pickFile = async (file) => {
+    if (!file) return;
+    try {
+      const text = await file.text();
+      setYaml(text);
+      if (!filename) setFilename(file.name);
+    } catch (e) { setError(e.message); }
+  };
+
+  const submit = async () => {
+    setError('');
+    const trimmed = filename.trim();
+    if (!validPath(trimmed)) {
+      setError('Filename must be alphanumeric with ._- and an optional subdir prefix.');
+      return;
+    }
+    if (!yaml) { setError('YAML content is empty.'); return; }
+    setBusy(true);
+    try {
+      await globalThis.RelayAPI.savePlaybook(trimmed, yaml);
+      onImported?.(trimmed);
+    } catch (e) { setError(e.message); }
+    finally { setBusy(false); }
+  };
+
+  return (
+    <dialog
+      ref={dialogRef}
+      className="relay-dialog relay-dialog-center"
+      aria-label="Import playbook"
+      onClick={(e) => { if (e.target === dialogRef.current) onClose(); }}
+    >
+      <div className="cm" style={{ width: 'min(720px, 94vw)', maxHeight: '82vh' }}>
+        <div className="cm-head">
+          <div>
+            <div className="section-title">Import playbook</div>
+            <div className="mute" style={{ fontSize: 12, marginTop: 2 }}>
+              Upload a .yml/.yaml file or paste content below. It will be written to your server's workDir.
+            </div>
+          </div>
+          <button type="button" className="btn ghost small" onClick={onClose}><Icon name="x" size={14}/></button>
+        </div>
+        <div className="cm-body cm-single">
+          <div className="cm-pane">
+            {error && <div className="cm-error mono">{error}</div>}
+
+            <label htmlFor="pb-import-file" className="cm-field-label">File</label>
+            <input
+              id="pb-import-file"
+              type="file"
+              accept=".yml,.yaml,text/yaml"
+              onChange={(e) => pickFile(e.target.files?.[0])}
+              className="input"
+              style={{ padding: '4px 6px' }}
+            />
+
+            <label htmlFor="pb-import-name" className="cm-field-label" style={{ marginTop: 10 }}>Target filename (relative to workDir)</label>
+            <input
+              id="pb-import-name"
+              className="input mono"
+              placeholder="deploy-app.yml or plays/deploy-app.yml"
+              value={filename}
+              onChange={(e) => setFilename(e.target.value)}
+            />
+
+            <label htmlFor="pb-import-yaml" className="cm-field-label" style={{ marginTop: 10 }}>YAML</label>
+            <textarea
+              id="pb-import-yaml"
+              className="yaml-textarea"
+              spellCheck="false"
+              style={{ minHeight: 240, fontFamily: 'var(--font-mono)', fontSize: 12 }}
+              value={yaml}
+              onChange={(e) => setYaml(e.target.value)}
+              placeholder="---&#10;- hosts: all&#10;  tasks:&#10;    - name: …"
+            />
+
+            <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+              <button type="button" className="btn primary small" disabled={busy} onClick={submit}>
+                <Icon name="check" size={12}/> {busy ? 'Saving…' : 'Save'}
+              </button>
+              <button type="button" className="btn small" disabled={busy} onClick={onClose}>Cancel</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </dialog>
+  );
 }
 
 globalThis.PlaybooksView = PlaybooksView;

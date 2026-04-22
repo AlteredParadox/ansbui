@@ -153,12 +153,13 @@
       description: p.description || '',
       tags: p.tags || [],
       lastRun: '',
-      lastStatus: 'ok',
+      lastStatus: '',
       author: '',
       runs: 0,
       avgDuration: '',
       targets: p.targets || '',
       path: p.path,
+      modified: p.modified || '',
       yaml: p.yaml || ''
     };
   }

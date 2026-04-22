@@ -220,3 +220,35 @@ dialog.relay-dialog-runner[open] {
   font-size: 12px;
   padding: 0 8px;
 }
+
+/* Inline YAML textarea editor for the Playbooks edit mode. Matches the
+   surrounding <pre>.code-block styling so switching between read-only
+   and edit modes doesn't reflow the pane. */
+.yaml-textarea {
+  appearance: none;
+  border: 0;
+  outline: none;
+  resize: none;
+  background: transparent;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.65;
+  padding: 10px 14px;
+  width: 100%;
+  flex: 1;
+  min-height: 420px;
+  white-space: pre;
+  overflow: auto;
+}
+.yaml-textarea:focus {
+  box-shadow: inset 0 0 0 1px var(--accent-line);
+}
+
+/* Up / down reorder stack on each task card in edit mode. */
+.vs-task-reorder {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.vs-task-reorder .btn { height: 18px; padding: 0 4px; }
