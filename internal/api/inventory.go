@@ -5,53 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"net"
 	"net/http"
-	"sync"
-	"time"
 
 	"github.com/AlteredParadox/relay/internal/ansible"
 	"github.com/AlteredParadox/relay/internal/config"
 	"github.com/AlteredParadox/relay/internal/prom"
 )
-
-// dnsCache memoises hostname → []IP lookups so the DNS fallback in
-// applyMetrics stays cheap when an inventory has many hosts and
-// /api/inventory is polled. Entries are valid for 60s.
-type dnsCache struct {
-	mu      sync.Mutex
-	entries map[string]dnsCacheEntry
-}
-
-type dnsCacheEntry struct {
-	ips    []string
-	expiry time.Time
-}
-
-var sharedDNS = &dnsCache{entries: map[string]dnsCacheEntry{}}
-
-func (c *dnsCache) lookup(ctx context.Context, host string) []string {
-	c.mu.Lock()
-	e, ok := c.entries[host]
-	c.mu.Unlock()
-	if ok && time.Now().Before(e.expiry) {
-		return e.ips
-	}
-	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
-	defer cancel()
-	addrs, err := net.DefaultResolver.LookupIPAddr(ctx, host)
-	var ips []string
-	if err == nil {
-		ips = make([]string, 0, len(addrs))
-		for _, a := range addrs {
-			ips = append(ips, a.IP.String())
-		}
-	}
-	c.mu.Lock()
-	c.entries[host] = dnsCacheEntry{ips: ips, expiry: time.Now().Add(60 * time.Second)}
-	c.mu.Unlock()
-	return ips
-}
 
 func (s *Server) resolveServer(r *http.Request) (config.Server, error) {
 	id := r.URL.Query().Get("server")
@@ -80,7 +39,7 @@ func (s *Server) inventory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if result, ok := s.tryMetrics(r.Context()); ok {
-		applyMetrics(r.Context(), &inv, result.Metrics)
+		applyMetrics(&inv, result.Metrics)
 	}
 	writeJSON(w, http.StatusOK, inv)
 }
@@ -119,7 +78,7 @@ func (s *Server) metrics(w http.ResponseWriter, r *http.Request) {
 	// didn't, and list any Prom hosts that had no inventory entry.
 	if srv, err := s.resolveServer(r); err == nil {
 		if inv, err := ansible.FetchInventory(r.Context(), s.Pool, srv); err == nil {
-			matched, unmatchedInv, unmatchedProm := diffMetrics(r.Context(), inv, result.Metrics)
+			matched, unmatchedInv, unmatchedProm := diffMetrics(inv, result.Metrics)
 			diagnosis["matched"] = matched
 			diagnosis["unmatchedInventory"] = unmatchedInv
 			diagnosis["unmatchedPrometheus"] = unmatchedProm
@@ -130,16 +89,18 @@ func (s *Server) metrics(w http.ResponseWriter, r *http.Request) {
 
 // diffMetrics returns (matched, inventory-only, prometheus-only)
 // hostname slices so the UI can show the operator exactly where names
-// are diverging. Match order mirrors applyMetrics: inventory name →
-// ansible_host → DNS-resolved IPs of the inventory name. The last rule
-// covers Tailscale / WireGuard setups where Prometheus stores the
-// scrape IP but the inventory uses FQDNs.
-func diffMetrics(ctx context.Context, inv ansible.Inventory, metrics map[string]prom.HostMetric) (matched, invOnly, promOnly []string) {
+// are diverging.
+func diffMetrics(inv ansible.Inventory, metrics map[string]prom.HostMetric) (matched, invOnly, promOnly []string) {
 	seen := make(map[string]bool, len(metrics))
 	for _, h := range inv.Hosts {
-		if key, ok := matchHost(ctx, h, metrics); ok {
+		if _, ok := metrics[h.Name]; ok {
 			matched = append(matched, h.Name)
-			seen[key] = true
+			seen[h.Name] = true
+			continue
+		}
+		if _, ok := metrics[h.IP]; ok {
+			matched = append(matched, h.Name)
+			seen[h.IP] = true
 			continue
 		}
 		invOnly = append(invOnly, h.Name)
@@ -150,31 +111,6 @@ func diffMetrics(ctx context.Context, inv ansible.Inventory, metrics map[string]
 		}
 	}
 	return
-}
-
-// matchHost returns the metrics map key that matched (so diffMetrics
-// can mark it used) and whether a match was found. Lookup order:
-//
-//  1. inventory host name
-//  2. ansible_host (often an IP)
-//  3. any IP the host name resolves to via the system resolver — this
-//     lets Prometheus label samples with e.g. Tailscale 100.x addresses
-//     while the inventory uses FQDNs.
-func matchHost(ctx context.Context, h ansible.Host, metrics map[string]prom.HostMetric) (string, bool) {
-	if _, ok := metrics[h.Name]; ok {
-		return h.Name, true
-	}
-	if h.IP != "" {
-		if _, ok := metrics[h.IP]; ok {
-			return h.IP, true
-		}
-	}
-	for _, ip := range sharedDNS.lookup(ctx, h.Name) {
-		if _, ok := metrics[ip]; ok {
-			return ip, true
-		}
-	}
-	return "", false
 }
 
 func (s *Server) tryMetrics(ctx context.Context) (prom.MetricsResult, bool) {
@@ -200,14 +136,16 @@ func (s *Server) tryMetrics(ctx context.Context) (prom.MetricsResult, bool) {
 	return result, true
 }
 
-func applyMetrics(ctx context.Context, inv *ansible.Inventory, metrics map[string]prom.HostMetric) {
+func applyMetrics(inv *ansible.Inventory, metrics map[string]prom.HostMetric) {
 	for i := range inv.Hosts {
 		h := &inv.Hosts[i]
-		key, ok := matchHost(ctx, *h, metrics)
+		m, ok := metrics[h.Name]
+		if !ok {
+			m, ok = metrics[h.IP]
+		}
 		if !ok {
 			continue
 		}
-		m := metrics[key]
 		h.CPU = m.CPU
 		h.Mem = m.Mem
 		h.Load = m.Load
