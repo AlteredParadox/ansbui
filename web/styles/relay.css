@@ -134,8 +134,12 @@ dialog.relay-dialog::backdrop {
 /* Command palette + connection manager: the dialog spans the viewport
    so that clicks on empty space (which land on the dialog itself) can
    close it via the onClick handler in the component. The actual modal
-   content is a flex child sized by its own class (.cp / .cm). */
-dialog.relay-dialog-center {
+   content is a flex child sized by its own class (.cp / .cm).
+
+   IMPORTANT: layout rules are scoped to [open] so a closed dialog stays
+   at its user-agent display:none. Otherwise the dialog sits on top of
+   the page even when not shown. */
+dialog.relay-dialog-center[open] {
   position: fixed;
   inset: 0;
   width: 100vw;
@@ -148,12 +152,14 @@ dialog.relay-dialog-center {
   box-sizing: border-box;
 }
 
-/* Host drawer: the dialog itself is the 460px right-hand panel. */
-dialog.relay-dialog-drawer {
+/* Host drawer: the dialog itself is the 460px right-hand panel.
+   Same [open] scoping as above. */
+dialog.relay-dialog-drawer[open] {
   position: fixed;
   inset: 0 0 0 auto;
   width: 460px;
   height: 100vh;
   margin: 0;
+  display: block;
 }
-dialog.relay-dialog-drawer > * { height: 100%; }
+dialog.relay-dialog-drawer[open] > * { height: 100%; }
