@@ -56,10 +56,43 @@ function sortHosts(rows, sort) {
   });
 }
 
+// descendantsByGroup maps each group id → Set of that group's id + all
+// transitive descendants. Ansible's `ansible-inventory --list` output
+// only lists a host under its immediate group, so to answer "is this
+// host under 'vps_servers'?" we need to walk the tree.
+function descendantsByGroup(groups) {
+  const childrenOf = {};
+  for (const g of groups) {
+    const key = g.parent ?? '__root__';
+    (childrenOf[key] ||= []).push(g.id);
+  }
+  const cache = {};
+  const walk = (id) => {
+    if (cache[id]) return cache[id];
+    const set = new Set([id]);
+    for (const child of childrenOf[id] || []) {
+      for (const d of walk(child)) set.add(d);
+    }
+    cache[id] = set;
+    return set;
+  };
+  for (const g of groups) walk(g.id);
+  return cache;
+}
+
+function hostMatchesGroup(host, descendants) {
+  if (!descendants) return true;
+  return (host.groups || []).some(g => descendants.has(g));
+}
+
 // ---------- Tree ----------
-function InventoryTree({ expanded, setExpanded, selectedGroup, setSelectedGroup, hosts, groups }) {
+function InventoryTree({ expanded, setExpanded, selectedGroup, setSelectedGroup, hosts, groups, descendants }) {
   const childrenOf = (parent) => groups.filter(g => g.parent === parent);
-  const countHosts = (groupId) => hosts.filter(h => (h.groups || []).includes(groupId)).length;
+  const countHosts = (groupId) => {
+    const set = descendants[groupId];
+    if (!set) return 0;
+    return hosts.filter(h => hostMatchesGroup(h, set)).length;
+  };
 
   const Node = ({ g, depth }) => {
     const kids = childrenOf(g.id);
@@ -539,8 +572,11 @@ function InventoryView({ onOpenAdhoc }) {
     }
   };
 
+  const descendants = useMemoI(() => descendantsByGroup(GROUPS), [GROUPS]);
+
   const filtered = useMemoI(() => {
-    let rows = HOSTS.filter(h => selectedGroup === 'all' || (h.groups || []).includes(selectedGroup));
+    const matchSet = selectedGroup === 'all' ? null : descendants[selectedGroup];
+    let rows = HOSTS.filter(h => hostMatchesGroup(h, matchSet));
     if (search) {
       const s = search.toLowerCase();
       rows = rows.filter(h =>
@@ -550,7 +586,7 @@ function InventoryView({ onOpenAdhoc }) {
       );
     }
     return sortHosts(rows, sort);
-  }, [HOSTS, selectedGroup, search, sort]);
+  }, [HOSTS, selectedGroup, search, sort, descendants]);
 
   const toggleSelect = (id) => {
     const s = new Set(selectedIds);
@@ -608,7 +644,7 @@ function InventoryView({ onOpenAdhoc }) {
             <InventoryTree
               expanded={expanded} setExpanded={setExpanded}
               selectedGroup={selectedGroup} setSelectedGroup={setSelectedGroup}
-              hosts={HOSTS} groups={GROUPS}
+              hosts={HOSTS} groups={GROUPS} descendants={descendants}
             />
           </aside>
         )}
