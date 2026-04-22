@@ -3,7 +3,44 @@
 
 const { useState: useStateA, useEffect: useEffectA, useRef: useRefA, useMemo: useMemoA } = React;
 
-const SUGGESTED_TARGETS = ['all', 'production', 'webservers', 'appservers', 'dbservers', 'cache', 'staging', 'edge'];
+// buildTargetDescendants walks the inventory group tree to produce
+// id → Set of that id + all transitive children, mirroring the logic
+// in Inventory.jsx so that selecting a parent group (e.g. vps_servers)
+// includes all hosts under its descendants.
+function buildTargetDescendants(groups) {
+  const childrenOf = {};
+  for (const g of groups) (childrenOf[g.parent ?? '__root__'] ||= []).push(g.id);
+  const cache = {};
+  const walk = (id) => {
+    if (cache[id]) return cache[id];
+    const set = new Set([id]);
+    for (const c of childrenOf[id] || []) for (const d of walk(c)) set.add(d);
+    cache[id] = set;
+    return set;
+  };
+  for (const g of groups) walk(g.id);
+  return cache;
+}
+
+// suggestedTargets returns 'all' plus the inventory groups that have
+// at least one host, sorted by host count descending. Empty groups and
+// the synthetic 'ungrouped' bucket are elided to keep the chip row
+// focused on things you'd actually want to target.
+function suggestedTargets(hosts, groups, descendants) {
+  const counts = {};
+  for (const g of groups) {
+    if (g.id === 'all' || g.id === 'ungrouped') continue;
+    const set = descendants[g.id];
+    if (!set) continue;
+    let n = 0;
+    for (const h of hosts) {
+      if ((h.groups || []).some(x => set.has(x))) n += 1;
+    }
+    if (n > 0) counts[g.id] = n;
+  }
+  const sorted = Object.entries(counts).sort((a, b) => b[1] - a[1]).map(([id, n]) => ({ id, count: n }));
+  return [{ id: 'all', count: hosts.length }, ...sorted];
+}
 
 const EVENT_MAPPING = {
   ok: { t: 'ok', state: 'ok' },
@@ -34,6 +71,13 @@ function AdhocView({ prefill }) {
   const data = globalThis.AnsibleData || {};
   const MODULES = data.MODULES || [];
   const HOSTS = data.HOSTS || [];
+  const GROUPS = data.GROUPS || [];
+
+  const descendants = useMemoA(() => buildTargetDescendants(GROUPS), [GROUPS]);
+  const targetChips = useMemoA(
+    () => suggestedTargets(HOSTS, GROUPS, descendants),
+    [HOSTS, GROUPS, descendants]
+  );
 
   const [target, setTarget] = useStateA(prefill?.target || 'all');
   const [moduleName, setModuleName] = useStateA(prefill?.module || 'ansible.builtin.ping');
@@ -55,8 +99,11 @@ function AdhocView({ prefill }) {
   const resolvedHosts = useMemoA(() => {
     if (prefill?.selectedHosts) return prefill.selectedHosts;
     if (target === 'all') return HOSTS;
-    return HOSTS.filter(h => (h.groups || []).includes(target.split(':')[0]));
-  }, [target, HOSTS, prefill]);
+    const groupId = target.split(':')[0];
+    const set = descendants[groupId];
+    if (!set) return HOSTS.filter(h => (h.groups || []).includes(groupId));
+    return HOSTS.filter(h => (h.groups || []).some(g => set.has(g)));
+  }, [target, HOSTS, prefill, descendants]);
 
   const mod = MODULES.find(m => m.name === moduleName) || MODULES[0] || { id: '', name: moduleName, desc: '', args: [] };
 
@@ -148,12 +195,15 @@ function AdhocView({ prefill }) {
             <div className="composer-chip-wrap">
               <span className="chip on lg"><Icon name="inventory" size={11}/> <span className="mono">{target}</span> <span className="mute-2 mono">· {hostCount} hosts</span></span>
               <div className="composer-suggest">
-                {SUGGESTED_TARGETS.map(t => (
-                  <button type="button" key={t} className={`chip ${target === t ? 'on' : ''}`} onClick={() => setTarget(t)}>
-                    <span className="mono">{t}</span>
+                {targetChips.length === 0 && (
+                  <span className="mute" style={{ fontSize: 12 }}>No groups in inventory yet.</span>
+                )}
+                {targetChips.map(t => (
+                  <button type="button" key={t.id} className={`chip ${target === t.id ? 'on' : ''}`} onClick={() => setTarget(t.id)}>
+                    <span className="mono">{t.id}</span>
+                    <span className="mute-2 mono" style={{ marginLeft: 4 }}>{t.count}</span>
                   </button>
                 ))}
-                <button type="button" className="chip"><Icon name="filter" size={10}/> selector…</button>
               </div>
             </div>
           </div>
