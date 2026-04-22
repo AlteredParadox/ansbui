@@ -204,7 +204,7 @@
         switch (view) {
           case 'dashboard': return <window.DashboardView onNavigate={setView} onOpenAdhoc={openAdhoc} onRunPlaybook={runPlaybook}/>;
           case 'inventory': return <window.InventoryView onOpenAdhoc={openAdhoc}/>;
-          case 'playbooks': return <window.PlaybooksView initialId={playbookId} onRun={(id) => openAdhoc({ target: 'all', module: 'ansible.builtin.ping' })}/>;
+          case 'playbooks': return <window.PlaybooksView initialId={playbookId}/>;
           case 'adhoc': return <window.AdhocView prefill={adhocPrefill}/>;
           case 'history': return <window.HistoryView/>;
           case 'vault': return <window.VaultView/>;

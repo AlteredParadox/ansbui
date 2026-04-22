@@ -107,7 +107,8 @@ function AdhocView({ prefill }) {
     return HOSTS.filter(h => (h.groups || []).some(g => set.has(g)));
   }, [target, HOSTS, prefill, descendants]);
 
-  const mod = MODULES.find(m => m.name === moduleName) || MODULES[0] || { id: '', name: moduleName, desc: '', args: [] };
+  const mod = MODULES.find(m => m.name === moduleName)
+    || { id: moduleName.split('.').pop() || 'custom', name: moduleName, desc: '', args: [] };
 
   const run = () => {
     if (running || !globalThis.RelayAPI) return;
@@ -235,9 +236,16 @@ function AdhocView({ prefill }) {
                     <span className="mono">{m.id}</span>
                   </button>
                 ))}
-                <button type="button" className="chip"><Icon name="search" size={10}/> browse…</button>
               </div>
-              <div className="mute" style={{ marginTop: 6, fontSize: 12 }}>{mod.desc}</div>
+              <input
+                className="input mono"
+                aria-label="Module name (any ansible module, e.g. community.general.haproxy)"
+                placeholder="Or type any module name — e.g. community.general.haproxy"
+                value={moduleName}
+                onChange={(e) => { setModuleName(e.target.value); setArgs({}); }}
+                style={{ marginTop: 6 }}
+              />
+              <div className="mute" style={{ marginTop: 6, fontSize: 12 }}>{mod.desc || 'Custom module — args are free-form.'}</div>
             </div>
           </div>
 

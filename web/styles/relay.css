@@ -163,3 +163,44 @@ dialog.relay-dialog-drawer[open] {
   display: block;
 }
 dialog.relay-dialog-drawer[open] > * { height: 100%; }
+
+/* Playbook run dialog — large panel with a live terminal. */
+dialog.relay-dialog-runner[open] {
+  position: fixed;
+  inset: 5vh 5vw;
+  width: 90vw;
+  height: 90vh;
+  margin: 0;
+  display: block;
+}
+.pb-runner {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  padding: 16px 18px;
+  gap: 12px;
+  overflow: hidden;
+}
+.pb-runner-head {
+  display: flex; justify-content: space-between; align-items: flex-start;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--line-soft);
+}
+.pb-runner-form {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px 14px;
+  align-items: center;
+}
+.pb-runner-form .cm-field-label { grid-column: 1 / -1; margin-top: 4px; }
+.pb-runner-form .input { grid-column: 1 / -1; }
+.pb-runner-opts {
+  grid-column: 1 / -1;
+  display: flex; gap: 16px; flex-wrap: wrap;
+  margin-top: 4px;
+}
+.pb-runner .terminal {
+  border-radius: var(--r-2);
+  border: 1px solid var(--line-soft);
+  overflow-y: auto;
+}

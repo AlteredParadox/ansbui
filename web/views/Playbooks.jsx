@@ -1,6 +1,18 @@
 // Playbooks view — library (left) + split editor (visual tasks ↔ YAML).
 
-const { useState: useStateP, useMemo: useMemoP, useEffect: useEffectP } = React;
+const { useState: useStateP, useMemo: useMemoP, useEffect: useEffectP, useRef: useRefP } = React;
+
+const PB_EVENT_MAPPING = {
+  ok: 'ok',
+  changed: 'changed',
+  fail: 'fail',
+  recap: 'recap',
+  'recap-warn': 'recap-warn',
+  'recap-fail': 'recap-fail',
+  meta: 'meta',
+  line: 'meta',
+  error: 'fail'
+};
 
 // Bounded regexes — each anchors to a single YAML line and avoids
 // nested quantifiers / overlapping alternation, keeping them linear
@@ -236,12 +248,13 @@ function colorizeValue(rest) {
   return <span className="yml-v">{rest}</span>;
 }
 
-function PlaybooksView({ initialId, onRun }) {
+function PlaybooksView({ initialId }) {
   const data = globalThis.AnsibleData || {};
   const PLAYBOOKS = data.PLAYBOOKS || [];
   const [selectedId, setSelectedId] = useStateP(initialId || PLAYBOOKS[0]?.id || '');
   const [yaml, setYaml] = useStateP('');
   const [error, setError] = useStateP('');
+  const [runnerOpen, setRunnerOpen] = useStateP(false);
 
   const pb = PLAYBOOKS.find(p => p.id === selectedId) || PLAYBOOKS[0];
 
@@ -294,7 +307,7 @@ function PlaybooksView({ initialId, onRun }) {
         <div className="view-actions">
           <button type="button" className="btn small"><Icon name="download" size={12}/> Import</button>
           <button type="button" className="btn small"><Icon name="code" size={12}/> History</button>
-          <button type="button" className="btn primary small" onClick={() => onRun(pb.id)}><Icon name="play" size={12}/> Run…</button>
+          <button type="button" className="btn primary small" onClick={() => setRunnerOpen(true)}><Icon name="play" size={12}/> Run…</button>
         </div>
       </div>
 
@@ -342,7 +355,145 @@ function PlaybooksView({ initialId, onRun }) {
           </div>
         </main>
       </div>
+      <PlaybookRunner open={runnerOpen} pb={pb} onClose={() => setRunnerOpen(false)}/>
     </div>
+  );
+}
+
+function PlaybookRunner({ open, pb, onClose }) {
+  const dialogRef = globalThis.useDialog(open, onClose);
+  const [limit, setLimit] = useStateP('');
+  const [tagsRaw, setTagsRaw] = useStateP('');
+  const [check, setCheck] = useStateP(false);
+  const [become, setBecome] = useStateP(false);
+  const [running, setRunning] = useStateP(false);
+  const [output, setOutput] = useStateP([]);
+  const streamRef = useRefP(null);
+  const outRef = useRefP(null);
+
+  useEffectP(() => {
+    if (!open) {
+      // close any stream when dialog is dismissed
+      if (streamRef.current) { streamRef.current.close(); streamRef.current = null; }
+      setOutput([]);
+      setRunning(false);
+    }
+  }, [open]);
+
+  useEffectP(() => () => { if (streamRef.current) streamRef.current.close(); }, []);
+
+  useEffectP(() => {
+    outRef.current?.scrollTo({ top: outRef.current.scrollHeight });
+  }, [output]);
+
+  const run = () => {
+    if (running || !pb || !globalThis.RelayAPI) return;
+    setOutput([]); setRunning(true);
+    const start = Date.now();
+    const log = [];
+    const appendLog = (entry) => { log.push(entry); setOutput([...log]); };
+
+    const tags = tagsRaw.split(',').map(t => t.trim()).filter(Boolean);
+    const payload = { path: pb.path, limit: limit.trim(), tags, check, become };
+
+    const stream = globalThis.RelayAPI.openStream('playbook', payload);
+    streamRef.current = stream;
+
+    let finished = false;
+    const finish = (text) => {
+      if (finished) return;
+      finished = true;
+      appendLog({ t: 'done', text });
+      setRunning(false);
+      stream.close();
+      streamRef.current = null;
+    };
+
+    stream.onEvent((evt) => {
+      const kind = PB_EVENT_MAPPING[evt.type];
+      if (kind) { appendLog({ t: kind, text: evt.text || '' }); return; }
+      if (evt.type === 'done') {
+        finish(evt.text || `completed in ${((Date.now() - start) / 1000).toFixed(1)}s`);
+        return;
+      }
+      if (evt.type === 'run-complete') {
+        finish(`completed in ${((Date.now() - start) / 1000).toFixed(1)}s`);
+      }
+    });
+    stream.onClose(() => { setRunning(false); streamRef.current = null; });
+    stream.onError(() => {
+      appendLog({ t: 'fail', text: 'WebSocket error — check backend logs.' });
+      setRunning(false);
+    });
+  };
+
+  if (!pb) return <dialog ref={dialogRef} className="relay-dialog relay-dialog-runner" aria-hidden="true"/>;
+
+  return (
+    <dialog
+      ref={dialogRef}
+      className="relay-dialog relay-dialog-runner"
+      aria-label={`Run ${pb.name}`}
+      onClick={(e) => { if (e.target === dialogRef.current) onClose(); }}
+    >
+      <div className="pb-runner card">
+        <div className="pb-runner-head">
+          <div>
+            <div className="section-title">Run playbook</div>
+            <h3 className="mono" style={{ margin: '4px 0 0' }}>{pb.name}</h3>
+            <div className="mute" style={{ fontSize: 12 }}>
+              hosts: <span className="mono">{pb.targets || 'all'}</span>
+            </div>
+          </div>
+          <button type="button" className="btn ghost small" onClick={onClose}><Icon name="x" size={14}/></button>
+        </div>
+
+        <div className="pb-runner-form">
+          <label htmlFor="pb-limit" className="cm-field-label">Limit (optional — overrides hosts:)</label>
+          <input id="pb-limit" className="input mono" placeholder={pb.targets || 'e.g. webservers, host1.example.com'} value={limit} onChange={e => setLimit(e.target.value)}/>
+
+          <label htmlFor="pb-tags" className="cm-field-label">Tags (comma-separated, optional)</label>
+          <input id="pb-tags" className="input mono" placeholder="deploy, config" value={tagsRaw} onChange={e => setTagsRaw(e.target.value)}/>
+
+          <div className="pb-runner-opts">
+            <label className="opt" htmlFor="pb-check">
+              <input id="pb-check" type="checkbox" checked={check} onChange={e => setCheck(e.target.checked)}/>
+              <span className="mono">--check</span> <span className="mute">(dry run)</span>
+            </label>
+            <label className="opt" htmlFor="pb-become">
+              <input id="pb-become" type="checkbox" checked={become} onChange={e => setBecome(e.target.checked)}/>
+              <span className="mono">--become</span> <span className="mute">(sudo)</span>
+            </label>
+          </div>
+
+          <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+            <button type="button" className="btn primary small" onClick={run} disabled={running}>
+              <Icon name="play" size={12}/> {running ? 'Running…' : 'Run'}
+            </button>
+            <button type="button" className="btn small" onClick={() => { setOutput([]); }} disabled={running}>
+              Clear output
+            </button>
+          </div>
+        </div>
+
+        <div className="terminal" ref={outRef} style={{ flex: 1, minHeight: 320 }}>
+          {output.length === 0 && (
+            <div className="terminal-empty mute-2 mono">
+              <div># fill in any overrides and press Run</div>
+              <div># output from ansible-playbook will stream here</div>
+            </div>
+          )}
+          {output.map((line, i) => (
+            <div key={`${i}-${line.t}`} className={`term-line term-${line.t}`}>
+              {line.t === 'ok' && <span className="term-prefix">ok</span>}
+              {line.t === 'changed' && <span className="term-prefix">changed</span>}
+              {line.t === 'fail' && <span className="term-prefix">fail</span>}
+              <span className="term-text">{line.text}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    </dialog>
   );
 }
 
