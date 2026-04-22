@@ -10,10 +10,12 @@ const { useState: useStateV, useEffect: useEffectV, useMemo: useMemoV } = React;
 
 function VaultView() {
   const [files, setFiles] = useStateV([]);
+  const [workDir, setWorkDir] = useStateV('');
   const [loading, setLoading] = useStateV(false);
   const [error, setError] = useStateV('');
   const [selected, setSelected] = useStateV(null); // { path, name, ... }
   const [newOpen, setNewOpen] = useStateV(false);
+  const [openPathOpen, setOpenPathOpen] = useStateV(false);
 
   const reload = async () => {
     if (!globalThis.RelayAPI) return;
@@ -21,15 +23,14 @@ function VaultView() {
     try {
       const res = await globalThis.RelayAPI.listVaultFiles();
       setFiles(res.files || []);
+      setWorkDir(res.workDir || '');
     } catch (e) { setError(e.message); }
     finally { setLoading(false); }
   };
 
   useEffectV(() => { reload(); }, []);
 
-  const subtitle = loading
-    ? 'Scanning workDir…'
-    : `${files.length} vault-encrypted ${pluralise('file', files.length)} found in the active server's workDir.`;
+  const subtitle = buildSubtitle(loading, files.length, workDir);
 
   return (
     <div className="view view-vault">
@@ -42,6 +43,9 @@ function VaultView() {
           <button type="button" className="btn small" onClick={reload} disabled={loading}>
             <Icon name="refresh" size={12}/> Reload
           </button>
+          <button type="button" className="btn small" onClick={() => setOpenPathOpen(true)}>
+            <Icon name="search" size={12}/> Open by path…
+          </button>
           <button type="button" className="btn primary small" onClick={() => setNewOpen(true)}>
             <Icon name="plus" size={12}/> New vault file…
           </button>
@@ -52,9 +56,7 @@ function VaultView() {
 
       <div className="vault-grid">
         {files.length === 0 && !loading && (
-          <div className="mute" style={{ padding: 24, fontSize: 12.5 }}>
-            No vault-encrypted files found. Create one with <span className="mono">ansible-vault create path/to/file.yml</span> on the remote, or click <b>New vault file…</b> above.
-          </div>
+          <EmptyVaultHint workDir={workDir} onOpenByPath={() => setOpenPathOpen(true)}/>
         )}
         {files.map(f => (
           <button
@@ -86,8 +88,56 @@ function VaultView() {
         onClose={() => setNewOpen(false)}
         onCreated={() => { setNewOpen(false); reload(); }}
       />
+      <VaultOpenByPathDialog
+        open={openPathOpen}
+        workDir={workDir}
+        onClose={() => setOpenPathOpen(false)}
+        onOpen={(path) => {
+          setOpenPathOpen(false);
+          setSelected({ path, name: path.split('/').pop() || path });
+        }}
+      />
     </div>
   );
+}
+
+// EmptyVaultHint points at the real workDir so the operator can paste
+// the exact path into their ansible-vault command, and offers an
+// inline shortcut to open a file the scanner didn't pick up.
+function EmptyVaultHint({ workDir, onOpenByPath }) {
+  return (
+    <div className="mute" style={{ padding: 24, fontSize: 12.5, lineHeight: 1.7 }}>
+      <div>
+        No vault-encrypted files under the active server's workDir.
+      </div>
+      {workDir && (
+        <div style={{ marginTop: 8 }}>
+          Scanner looked at <span className="mono" style={{ color: 'var(--text-2)' }}>{workDir}</span>.
+          Create one with:
+          <pre className="code-block" style={{
+            background: 'var(--bg-inset)',
+            border: '1px solid var(--line-soft)',
+            borderRadius: 'var(--r-2)',
+            padding: '8px 10px',
+            margin: '6px 0',
+            fontSize: 12,
+            color: 'var(--text-2)',
+            whiteSpace: 'pre-wrap',
+            wordBreak: 'break-all'
+          }}>{`cd ${workDir}\nansible-vault create group_vars/all/vault.yml`}</pre>
+        </div>
+      )}
+      <div style={{ marginTop: 6 }}>
+        Or <button type="button" className="btn ghost small" onClick={onOpenByPath}>open an existing file by path</button> if it lives outside the scan (symlinked, custom header, etc.).
+      </div>
+    </div>
+  );
+}
+
+function buildSubtitle(loading, count, workDir) {
+  if (loading) return 'Scanning workDir…';
+  const suffix = workDir ? ` under ${workDir}` : '';
+  return `${count} vault-encrypted ${pluralise('file', count)} found${suffix}.`;
 }
 
 function pluralise(noun, n) {
@@ -312,6 +362,53 @@ function VaultNewDialog({ open, onClose, onCreated }) {
         </button>
         <button type="button" className="btn small" disabled={busy} onClick={onClose}>Cancel</button>
       </div>
+    </globalThis.RelayCenterDialog>
+  );
+}
+
+// VaultOpenByPathDialog lets the operator unlock a file the scanner
+// missed. The submitted path is still resolved relative to workDir
+// on the backend (validateRelPath blocks '..' traversal), so this
+// doesn't give the UI any new reach into the remote filesystem — it
+// just widens the set of already-reachable paths a user can target.
+function VaultOpenByPathDialog({ open, workDir, onClose, onOpen }) {
+  const [path, setPath] = useStateV('');
+
+  useEffectV(() => { if (!open) setPath(''); }, [open]);
+
+  const submit = () => {
+    const trimmed = path.trim().replace(/^\/+/, '');
+    if (!trimmed) return;
+    onOpen(trimmed);
+  };
+
+  return (
+    <globalThis.RelayCenterDialog
+      open={open}
+      onClose={onClose}
+      title="Open vault file by path"
+      subtitle={workDir ? `Relative to ${workDir}.` : 'Relative to the active server\'s workDir.'}
+    >
+      <form onSubmit={(e) => { e.preventDefault(); submit(); }}>
+        <label htmlFor="vault-openpath" className="cm-field-label">Path</label>
+        <input
+          id="vault-openpath"
+          className="input mono"
+          autoFocus
+          placeholder="group_vars/prod/vault.yml"
+          value={path}
+          onChange={(e) => setPath(e.target.value)}
+        />
+        <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+          <button type="submit" className="btn primary small" disabled={!path.trim()}>
+            <Icon name="key" size={12}/> Open
+          </button>
+          <button type="button" className="btn small" onClick={onClose}>Cancel</button>
+        </div>
+        <div className="mute" style={{ fontSize: 11.5, marginTop: 10 }}>
+          You'll be prompted for the vault password on the next screen. The path must live inside the server's workDir — '..' traversal is rejected by the backend.
+        </div>
+      </form>
     </globalThis.RelayCenterDialog>
   );
 }

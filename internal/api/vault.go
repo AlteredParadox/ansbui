@@ -10,7 +10,9 @@ import (
 )
 
 // /api/vault — list vault-encrypted files discovered in the active
-// server's workDir. Metadata only; no plaintext is read.
+// server's workDir. Metadata only; no plaintext is read. The response
+// also echoes the workDir so the UI can tell the operator where we
+// looked (and where new files should land).
 func (s *Server) listVault(w http.ResponseWriter, r *http.Request) {
 	srv, err := s.resolveServer(r)
 	if err != nil {
@@ -22,7 +24,10 @@ func (s *Server) listVault(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"files": files})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"files":   files,
+		"workDir": srv.WorkDir,
+	})
 }
 
 // viewVaultBody carries both the path and the caller-supplied vault
