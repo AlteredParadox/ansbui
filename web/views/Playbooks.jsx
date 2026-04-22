@@ -368,8 +368,15 @@ function PlaybookRunner({ open, pb, onClose }) {
   const [become, setBecome] = useStateP(false);
   const [running, setRunning] = useStateP(false);
   const [output, setOutput] = useStateP([]);
+  // vars are stored as an ordered list of {key, value} rows so empty
+  // rows remain in the UI while the user is typing.
+  const [vars, setVars] = useStateP([{ key: '', value: '' }]);
   const streamRef = useRefP(null);
   const outRef = useRefP(null);
+
+  const setVarAt = (i, patch) => setVars(prev => prev.map((row, j) => (j === i ? { ...row, ...patch } : row)));
+  const addVar = () => setVars(prev => [...prev, { key: '', value: '' }]);
+  const removeVar = (i) => setVars(prev => prev.filter((_, j) => j !== i));
 
   useEffectP(() => {
     if (!open) {
@@ -394,7 +401,20 @@ function PlaybookRunner({ open, pb, onClose }) {
     const appendLog = (entry) => { log.push(entry); setOutput([...log]); };
 
     const tags = tagsRaw.split(',').map(t => t.trim()).filter(Boolean);
-    const payload = { path: pb.path, limit: limit.trim(), tags, check, become };
+    const extraVars = {};
+    for (const { key, value } of vars) {
+      const k = key.trim();
+      if (!k) continue;
+      extraVars[k] = value;
+    }
+    const payload = {
+      path: pb.path,
+      limit: limit.trim(),
+      tags,
+      extraVars,
+      check,
+      become
+    };
 
     const stream = globalThis.RelayAPI.openStream('playbook', payload);
     streamRef.current = stream;
@@ -454,6 +474,41 @@ function PlaybookRunner({ open, pb, onClose }) {
 
           <label htmlFor="pb-tags" className="cm-field-label">Tags (comma-separated, optional)</label>
           <input id="pb-tags" className="input mono" placeholder="deploy, config" value={tagsRaw} onChange={e => setTagsRaw(e.target.value)}/>
+
+          <div className="cm-field-label" style={{ marginTop: 8 }}>Extra variables (--extra-vars)</div>
+          <div className="pb-vars">
+            {vars.map((row, i) => (
+              <div className="pb-var-row" key={i}>
+                <input
+                  className="input mono"
+                  aria-label={`Variable ${i + 1} name`}
+                  placeholder="var_name"
+                  value={row.key}
+                  onChange={e => setVarAt(i, { key: e.target.value })}
+                />
+                <span className="mute-2 mono" aria-hidden="true">=</span>
+                <input
+                  className="input mono"
+                  aria-label={`Variable ${i + 1} value`}
+                  placeholder="value"
+                  value={row.value}
+                  onChange={e => setVarAt(i, { value: e.target.value })}
+                />
+                <button
+                  type="button"
+                  className="btn ghost small"
+                  onClick={() => removeVar(i)}
+                  disabled={vars.length === 1 && !row.key && !row.value}
+                  title="Remove variable"
+                >
+                  <Icon name="x" size={12}/>
+                </button>
+              </div>
+            ))}
+            <button type="button" className="btn ghost small" onClick={addVar} style={{ justifySelf: 'start' }}>
+              <Icon name="plus" size={11}/> Add variable
+            </button>
+          </div>
 
           <div className="pb-runner-opts">
             <label className="opt" htmlFor="pb-check">

@@ -3,6 +3,7 @@ package ansible
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -28,11 +29,12 @@ type AdhocRequest struct {
 
 // PlaybookRequest is a request to run `ansible-playbook <path>`.
 type PlaybookRequest struct {
-	Path    string   `json:"path"`
-	Limit   string   `json:"limit,omitempty"`
-	Tags    []string `json:"tags,omitempty"`
-	Check   bool     `json:"check"`
-	Become  bool     `json:"become"`
+	Path      string            `json:"path"`
+	Limit     string            `json:"limit,omitempty"`
+	Tags      []string          `json:"tags,omitempty"`
+	ExtraVars map[string]string `json:"extraVars,omitempty"`
+	Check     bool              `json:"check"`
+	Become    bool              `json:"become"`
 }
 
 // Event is a single message streamed to the UI while a run is in flight.
@@ -203,6 +205,12 @@ func buildPlaybookCmd(srv config.Server, req PlaybookRequest) (string, error) {
 		b.WriteString(" --tags ")
 		b.WriteString(shellQuote(strings.Join(req.Tags, ",")))
 	}
+	if extra, err := buildExtraVarsArg(req.ExtraVars); err != nil {
+		return "", err
+	} else if extra != "" {
+		b.WriteString(" --extra-vars ")
+		b.WriteString(shellQuote(extra))
+	}
 	if req.Check {
 		b.WriteString(" --check")
 	}
@@ -214,6 +222,34 @@ func buildPlaybookCmd(srv config.Server, req PlaybookRequest) (string, error) {
 }
 
 var argKeyRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+// buildExtraVarsArg serialises a key/value map to the JSON form that
+// ansible-playbook accepts with `--extra-vars`. Keys are validated the
+// same way as module args so we don't splice arbitrary shell tokens;
+// values go through json.Marshal which handles quoting safely.
+func buildExtraVarsArg(vars map[string]string) (string, error) {
+	if len(vars) == 0 {
+		return "", nil
+	}
+	clean := make(map[string]string, len(vars))
+	for k, v := range vars {
+		if !argKeyRE.MatchString(k) {
+			return "", fmt.Errorf("invalid extra-var name %q (must match %s)", k, argKeyRE)
+		}
+		if v == "" {
+			continue
+		}
+		clean[k] = v
+	}
+	if len(clean) == 0 {
+		return "", nil
+	}
+	data, err := json.Marshal(clean)
+	if err != nil {
+		return "", fmt.Errorf("encode extra-vars: %w", err)
+	}
+	return string(data), nil
+}
 
 func buildArgString(args map[string]string) string {
 	if len(args) == 0 {
