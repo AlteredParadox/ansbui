@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/AlteredParadox/ansbui/internal/ansible"
@@ -21,10 +22,20 @@ import (
 
 // Server is the HTTP API + static bundle.
 type Server struct {
-	Config   *config.Manager
-	Pool     *sshpool.Pool
-	Runs     *ansible.Recorder
-	WebRoot  fs.FS
+	Config  *config.Manager
+	Pool    *sshpool.Pool
+	Runs    *ansible.Recorder
+	WebRoot fs.FS
+
+	// geo is constructed lazily on first use so apps that never turn
+	// on geoip enrichment don't pay the dns-cache + http client cost.
+	geoOnce sync.Once
+	geo     *geoResolver
+}
+
+func (s *Server) geoResolver() *geoResolver {
+	s.geoOnce.Do(func() { s.geo = newGeoResolver() })
+	return s.geo
 }
 
 // Handler returns the http.Handler for the whole app.

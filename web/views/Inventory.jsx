@@ -170,6 +170,7 @@ function HostTable({ rows, selectedIds, toggleSelect, toggleAll, onRowClick, sor
             {col('name', 'Host')}
             {col('ip', 'Address')}
             {col('os', 'OS')}
+            {col('region', 'Region')}
             <th>Groups</th>
             {col('cpu', 'CPU')}
             {col('mem', 'Mem')}
@@ -187,6 +188,7 @@ function HostTable({ rows, selectedIds, toggleSelect, toggleAll, onRowClick, sor
               <td className="mono" style={{ color: 'var(--text)' }}>{h.name}</td>
               <td className="mono mute">{h.ip}</td>
               <td className="mute" style={{ fontSize: 12 }}>{h.os}</td>
+              <td className="mute" style={{ fontSize: 12 }}>{h.region || ''}</td>
               <td>
                 <div className="tag-cluster">
                   {(h.groups || []).filter(g => g !== 'all').slice(0, 3).map(g => <span key={g} className="mini-tag mono">{g}</span>)}

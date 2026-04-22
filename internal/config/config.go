@@ -45,6 +45,10 @@ type Store struct {
 	// false, the drawer shows a [Gather facts] button instead so the
 	// operator opts in per-host.
 	AutoGatherFacts bool `json:"autoGatherFacts,omitempty"`
+	// GeoIPEnabled controls whether inventory enrichment sends public
+	// host IPs to ipinfo.io to populate the Region column. Off by
+	// default — IPs leave the local network to a third-party.
+	GeoIPEnabled bool `json:"geoIpEnabled,omitempty"`
 }
 
 // Manager loads, persists, and mutates the config store.
@@ -285,6 +289,14 @@ func (m *Manager) SetAutoGatherFacts(v bool) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.store.AutoGatherFacts = v
+	return m.persistLocked()
+}
+
+// SetGeoIPEnabled persists the geoip enrichment toggle.
+func (m *Manager) SetGeoIPEnabled(v bool) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.store.GeoIPEnabled = v
 	return m.persistLocked()
 }
 

@@ -97,6 +97,7 @@ type settingsBody struct {
 	PrometheusURL   string `json:"prometheusUrl"`
 	PrometheusLabel string `json:"prometheusHostLabel"`
 	AutoGatherFacts bool   `json:"autoGatherFacts"`
+	GeoIPEnabled    bool   `json:"geoIpEnabled"`
 }
 
 func (s *Server) getSettings(w http.ResponseWriter, _ *http.Request) {
@@ -105,6 +106,7 @@ func (s *Server) getSettings(w http.ResponseWriter, _ *http.Request) {
 		PrometheusURL:   snap.PrometheusURL,
 		PrometheusLabel: snap.PrometheusLabel,
 		AutoGatherFacts: snap.AutoGatherFacts,
+		GeoIPEnabled:    snap.GeoIPEnabled,
 	})
 }
 
@@ -119,6 +121,10 @@ func (s *Server) setSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.Config.SetAutoGatherFacts(body.AutoGatherFacts); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if err := s.Config.SetGeoIPEnabled(body.GeoIPEnabled); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}

@@ -33,6 +33,7 @@ function ConnectionManager({ open, onClose, onActivated, initialServers, initial
   const [promUrl, setPromUrl] = useStateCM('');
   const [promLabel, setPromLabel] = useStateCM('instance');
   const [autoGatherFacts, setAutoGatherFacts] = useStateCM(false);
+  const [geoIpEnabled, setGeoIpEnabled] = useStateCM(false);
   const [tab, setTab] = useStateCM('servers');
 
   const refreshServers = useCallbackCM(async () => {
@@ -48,6 +49,7 @@ function ConnectionManager({ open, onClose, onActivated, initialServers, initial
       setPromUrl(s.prometheusUrl || '');
       setPromLabel(s.prometheusHostLabel || 'instance');
       setAutoGatherFacts(!!s.autoGatherFacts);
+      setGeoIpEnabled(!!s.geoIpEnabled);
     }).catch(() => {});
   }, [open, refreshServers]);
 
@@ -124,13 +126,15 @@ function ConnectionManager({ open, onClose, onActivated, initialServers, initial
       await globalThis.AnsbuiAPI.setSettings({
         prometheusUrl: promUrl.trim(),
         prometheusHostLabel: promLabel.trim() || 'instance',
-        autoGatherFacts
+        autoGatherFacts,
+        geoIpEnabled
       });
       // Reflect the updated toggle in the in-memory cache so the host
       // drawer doesn't need to reload the page to see the change.
       globalThis.AnsbuiSettings = {
         ...(globalThis.AnsbuiSettings || {}),
-        autoGatherFacts
+        autoGatherFacts,
+        geoIpEnabled
       };
     } catch (e) { setError(e.message); }
     finally { setBusy(false); }
@@ -166,9 +170,11 @@ function ConnectionManager({ open, onClose, onActivated, initialServers, initial
           <SettingsTab
             promUrl={promUrl} promLabel={promLabel}
             autoGatherFacts={autoGatherFacts}
+            geoIpEnabled={geoIpEnabled}
             busy={busy}
             onChangeUrl={setPromUrl} onChangeLabel={setPromLabel}
             onChangeAutoGather={setAutoGatherFacts}
+            onChangeGeoIp={setGeoIpEnabled}
             onSave={saveSettings}
           />
         )}
@@ -221,7 +227,7 @@ function ServersTab(props) {
   );
 }
 
-function SettingsTab({ promUrl, promLabel, autoGatherFacts, busy, onChangeUrl, onChangeLabel, onChangeAutoGather, onSave }) {
+function SettingsTab({ promUrl, promLabel, autoGatherFacts, geoIpEnabled, busy, onChangeUrl, onChangeLabel, onChangeAutoGather, onChangeGeoIp, onSave }) {
   const [probe, setProbe] = useStateCM(null);
   const [probing, setProbing] = useStateCM(false);
 
@@ -263,6 +269,23 @@ function SettingsTab({ promUrl, promLabel, autoGatherFacts, busy, onChangeUrl, o
             onChange={(e) => onChangeAutoGather(e.target.checked)}
           />
           <span>Auto-gather facts when the host drawer opens</span>
+        </label>
+
+        <div className="divider" style={{ margin: '16px 0 12px' }}/>
+        <div className="section-title">Geo-IP enrichment</div>
+        <div className="mute" style={{ fontSize: 12, marginBottom: 8 }}>
+          Populates the <span className="mono">region</span> column by looking each host's public IP up on <span className="mono">ipinfo.io</span>. Private / loopback / CGNAT addresses are skipped. When <span className="mono">ansible_host</span> is a mesh address (Tailscale / Netbird / WireGuard), we resolve the host's FQDN through the local resolver first and use whichever public IP it returns.
+          <br/>
+          <b>Opt-in</b> — host IPs leave the network to a third party.
+        </div>
+        <label className="opt" htmlFor="geoip-enabled" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <input
+            id="geoip-enabled"
+            type="checkbox"
+            checked={geoIpEnabled}
+            onChange={(e) => onChangeGeoIp(e.target.checked)}
+          />
+          <span>Look up host regions via ipinfo.io</span>
         </label>
 
         <div style={{ display: 'flex', gap: 8, marginTop: 14 }}>

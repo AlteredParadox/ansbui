@@ -41,6 +41,9 @@ func (s *Server) inventory(w http.ResponseWriter, r *http.Request) {
 	if result, ok := s.tryMetrics(r.Context()); ok {
 		applyMetrics(&inv, result.Metrics)
 	}
+	if s.Config.Snapshot().GeoIPEnabled {
+		s.geoResolver().enrichInventory(r.Context(), &inv)
+	}
 	writeJSON(w, http.StatusOK, inv)
 }
 
