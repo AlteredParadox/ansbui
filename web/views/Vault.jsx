@@ -154,6 +154,14 @@ function pluralise(noun, n) {
   return n === 1 ? noun : `${noun}s`;
 }
 
+function unlockDialogSubtitle({ file, inlineKind, unlocked }) {
+  if (inlineKind) {
+    return `${file.path} — uses !vault inline encryption; whole-file unlock isn't possible.`;
+  }
+  if (unlocked) return `Unlocked · ${file.path}`;
+  return `Enter the vault password to decrypt ${file.path}.`;
+}
+
 function formatBytes(n) {
   if (n < 1024) return `${n} B`;
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
@@ -208,9 +216,7 @@ function VaultUnlockDialog({ open, file, onClose }) {
 
   if (!file) return null;
   const unlocked = plaintext != null;
-  const subtitle = inlineKind
-    ? `${file.path} — uses !vault inline encryption; whole-file unlock isn't possible.`
-    : (unlocked ? `Unlocked · ${file.path}` : `Enter the vault password to decrypt ${file.path}.`);
+  const subtitle = unlockDialogSubtitle({ file, inlineKind, unlocked });
 
   return (
     <globalThis.AnsbuiCenterDialog

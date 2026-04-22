@@ -115,30 +115,44 @@ func parseVaultAnnotations(stdout string, files []VaultFile) {
 		if current == nil {
 			continue
 		}
-		switch step {
-		case 0:
-			// stat line: "<size> <mtime>" — separator is a space
-			// because stat -c does not interpret backslash escapes.
-			parts := strings.SplitN(line, " ", 2)
-			if len(parts) >= 1 {
-				fmt.Sscanf(parts[0], "%d", &current.Size)
-			}
-			step = 1
-		case 1:
-			// First line of the file. If it starts with the vault
-			// header we have a whole-file vault; otherwise the marker
-			// we matched was on an indented line, so this is an
-			// inline / per-value vault.
-			if strings.HasPrefix(line, "$ANSIBLE_VAULT;") {
-				current.Kind = "whole"
-				if fields := strings.Split(line, ";"); len(fields) >= 4 {
-					current.VaultID = fields[3]
-				}
-			} else {
-				current.Kind = "inline"
-			}
-			step = 2
-		}
+		applyAnnotationLine(current, step, line)
+		step++
+	}
+}
+
+// applyAnnotationLine is dispatched from parseVaultAnnotations so the
+// outer loop stays flat (Sonar go:S3776). step 0 = stat output, step
+// 1 = first line of the file; anything beyond is ignored.
+func applyAnnotationLine(v *VaultFile, step int, line string) {
+	switch step {
+	case 0:
+		readStatLine(v, line)
+	case 1:
+		readFirstContentLine(v, line)
+	}
+}
+
+// readStatLine parses "<size> <mtime>" — stat -c doesn't interpret
+// backslash escapes, so the separator is a literal space.
+func readStatLine(v *VaultFile, line string) {
+	parts := strings.SplitN(line, " ", 2)
+	if len(parts) == 0 {
+		return
+	}
+	fmt.Sscanf(parts[0], "%d", &v.Size)
+}
+
+// readFirstContentLine classifies the file as whole-file vs inline
+// vault, and pulls the optional vault-id out of a whole-file header.
+func readFirstContentLine(v *VaultFile, line string) {
+	if !strings.HasPrefix(line, "$ANSIBLE_VAULT;") {
+		v.Kind = "inline"
+		return
+	}
+	v.Kind = "whole"
+	fields := strings.Split(line, ";")
+	if len(fields) >= 4 {
+		v.VaultID = fields[3]
 	}
 }
 
