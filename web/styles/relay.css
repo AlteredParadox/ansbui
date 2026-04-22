@@ -121,32 +121,34 @@
 dialog.relay-dialog {
   border: 0;
   padding: 0;
-  background: transparent;
   color: inherit;
-  max-width: 100vw;
-  max-height: 100vh;
-  overflow: visible;
+  background: transparent;
+  max-width: none;
+  max-height: none;
 }
 dialog.relay-dialog::backdrop {
   background: var(--scrim);
   animation: fadein 140ms var(--ease);
 }
 
-/* Command palette + connection manager: top-centred. */
+/* Command palette + connection manager: the dialog spans the viewport
+   so that clicks on empty space (which land on the dialog itself) can
+   close it via the onClick handler in the component. The actual modal
+   content is a flex child sized by its own class (.cp / .cm). */
 dialog.relay-dialog-center {
   position: fixed;
-  inset: 14vh 0 0 0;
+  inset: 0;
   width: 100vw;
-  height: auto;
+  height: 100vh;
   margin: 0;
   display: flex;
   justify-content: center;
   align-items: flex-start;
-  pointer-events: none;
+  padding-top: 14vh;
+  box-sizing: border-box;
 }
-dialog.relay-dialog-center > * { pointer-events: auto; }
 
-/* Host drawer: slides in from the right. */
+/* Host drawer: the dialog itself is the 460px right-hand panel. */
 dialog.relay-dialog-drawer {
   position: fixed;
   inset: 0 0 0 auto;

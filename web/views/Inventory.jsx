@@ -647,7 +647,6 @@ function HostDrawer({ host, onClose }) {
       ref={dialogRef}
       className="relay-dialog relay-dialog-drawer"
       aria-label={`Host ${host.name}`}
-      onClose={onClose}
       onClick={(e) => { if (e.target === dialogRef.current) onClose(); }}
     >
       <aside className="drawer">

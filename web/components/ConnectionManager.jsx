@@ -78,6 +78,10 @@ function ConnectionManager({ open, onClose, onActivated, initialServers, initial
       if (!activeId) {
         await globalThis.RelayAPI.activateServer(saved.id);
         await refreshServers();
+        // Tell the parent (Boot/App) a server is now active so it can
+        // transition from picker to ready. Without this the modal stays
+        // open even though the backend is configured.
+        onActivated?.(saved.id);
       }
     } catch (e) { setError(e.message); }
     finally { setBusy(false); }
@@ -130,7 +134,6 @@ function ConnectionManager({ open, onClose, onActivated, initialServers, initial
       ref={dialogRef}
       className="relay-dialog relay-dialog-center"
       aria-label="Connections and settings"
-      onClose={onClose}
       onClick={(e) => { if (e.target === dialogRef.current) onClose(); }}
     >
       <div className="cm">

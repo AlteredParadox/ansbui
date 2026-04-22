@@ -138,7 +138,6 @@ function CommandPalette({ open, onClose, onNavigate, onOpenAdhoc, onRunPlaybook 
       ref={dialogRef}
       className="relay-dialog relay-dialog-center"
       aria-label="Command palette"
-      onClose={onClose}
       onClick={(e) => { if (e.target === dialogRef.current) onClose(); }}
       onKeyDown={handleKey}
     >

@@ -6,21 +6,31 @@
 // target origin ('*') is a genuine vulnerability (Sonar S2819), so the
 // panel is intentionally not rendered here.
 
-const { useState, useEffect, useRef, useCallback, useMemo } = React;
+const { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo } = React;
 
 // useDialog binds a <dialog> element to a controlled `open` boolean.
-// When open flips true we call showModal(); when it flips false we call
-// close(). The onClose callback fires for both programmatic closes and
-// native dismissals (Escape, form method="dialog", etc.). Used by the
-// command palette, connection manager, and host drawer so we get the
-// native focus trap + ::backdrop rather than a hand-rolled scrim div.
+// - open true  → el.showModal() (adds to the top layer + backdrop)
+// - open false → el.close() (fires 'close' event)
+// - unmount    → close the dialog if still open, so we don't leak a
+//                top-layer element on route/phase transitions
+// - onClose    → fires when the dialog closes for any reason (Escape,
+//                our el.close() call, form method="dialog", etc.)
 function useDialog(open, onClose) {
   const ref = useRef(null);
-  useEffect(() => {
+  // useLayoutEffect so showModal / close runs before paint.
+  useLayoutEffect(() => {
     const el = ref.current;
-    if (!el) return;
-    if (open && !el.open) el.showModal();
-    else if (!open && el.open) el.close();
+    if (!el) return undefined;
+    if (open && !el.open) {
+      try { el.showModal(); } catch (_) { /* already open; ignore */ }
+    } else if (!open && el.open) {
+      el.close();
+    }
+    return () => {
+      // On unmount, if React is removing the element while it's still
+      // in the top layer, tear it down explicitly.
+      if (el.open) el.close();
+    };
   }, [open]);
   useEffect(() => {
     const el = ref.current;
