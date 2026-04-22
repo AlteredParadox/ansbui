@@ -759,14 +759,10 @@ function HostDrawer({ host, onClose, onOpenAdhoc }) {
             </div>
           </div>
         )}
+        <div className="drawer-section">
+          <FactsPanel host={host}/>
+        </div>
         <div className="drawer-foot">
-          <button
-            type="button"
-            className="btn small"
-            onClick={() => { onClose(); onOpenAdhoc?.({ target: host.name, module: 'ansible.builtin.setup', selectedHosts: [host] }); }}
-          >
-            <Icon name="hash" size={12}/> Facts
-          </button>
           <button
             type="button"
             className="btn primary small"
@@ -778,6 +774,108 @@ function HostDrawer({ host, onClose, onOpenAdhoc }) {
       </aside>
     </dialog>
   );
+}
+
+// FactsPanel renders the ansible `setup` output for a single host.
+// Behaviour is driven by the AnsbuiSettings.autoGatherFacts flag:
+//   - true  → fire the gather on mount, show the tree as soon as
+//             it lands (identical to the old "click Facts" flow but
+//             without a trip through the ad-hoc view).
+//   - false → sit on an explicit [Gather facts] button; the operator
+//             opts in per host.
+// State is intentionally local to the panel so toggling between
+// hosts in the inventory table doesn't leak facts across hosts.
+function FactsPanel({ host }) {
+  const settings = globalThis.AnsbuiSettings || {};
+  const autoGather = !!settings.autoGatherFacts;
+  const [facts, setFacts] = useStateI(null);
+  const [loading, setLoading] = useStateI(false);
+  const [error, setError] = useStateI('');
+  const [query, setQuery] = useStateI('');
+
+  const load = async () => {
+    if (!host?.name || !globalThis.AnsbuiAPI) return;
+    setLoading(true); setError('');
+    try {
+      const res = await globalThis.AnsbuiAPI.gatherFacts(host.name);
+      setFacts(res.facts || {});
+    } catch (e) { setError(e.message); }
+    finally { setLoading(false); }
+  };
+
+  useEffectI(() => {
+    // Reset whenever the selected host changes, then maybe auto-load.
+    setFacts(null); setError(''); setQuery('');
+    if (autoGather) load();
+    // We intentionally don't depend on `load` (stable enough for this
+    // component) — just the host identity.
+  }, [host?.name, autoGather]);
+
+  return (
+    <>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <div className="section-title">Facts</div>
+        <span className="mute mono" style={{ marginLeft: 'auto', fontSize: 11 }}>
+          {loading ? 'gathering…' : (facts ? `${Object.keys(facts).length} keys` : 'not gathered')}
+        </span>
+        <button
+          type="button"
+          className="btn ghost small"
+          onClick={load}
+          disabled={loading}
+        >
+          <Icon name="refresh" size={11}/> {facts ? 'Refresh' : 'Gather facts'}
+        </button>
+      </div>
+      {error && <div className="cm-error mono" style={{ marginTop: 6 }}>{error}</div>}
+      {facts && (
+        <>
+          <input
+            className="input"
+            aria-label="Filter facts"
+            placeholder="Filter (e.g. ipv4, distribution, eth0)"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            style={{ marginTop: 8 }}
+          />
+          <div className="facts-list" style={{ marginTop: 8 }}>
+            {filterFacts(facts, query).map(([k, v]) => (
+              <details key={k} className="fact-row">
+                <summary>
+                  <span className="mono fact-key">{k}</span>
+                  <span className="mute fact-preview mono">{factPreview(v)}</span>
+                </summary>
+                <pre className="fact-body mono">{JSON.stringify(v, null, 2)}</pre>
+              </details>
+            ))}
+            {filterFacts(facts, query).length === 0 && (
+              <div className="mute" style={{ fontSize: 12 }}>No keys match.</div>
+            )}
+          </div>
+        </>
+      )}
+    </>
+  );
+}
+
+function filterFacts(facts, query) {
+  const entries = Object.entries(facts);
+  const q = query.trim().toLowerCase();
+  if (!q) return entries.toSorted(([a], [b]) => a.localeCompare(b));
+  return entries
+    .filter(([k, v]) => k.toLowerCase().includes(q) || JSON.stringify(v).toLowerCase().includes(q))
+    .toSorted(([a], [b]) => a.localeCompare(b));
+}
+
+// factPreview returns a one-line rendering suited for the summary
+// row — scalar values show inline, collections show their shape.
+function factPreview(v) {
+  if (v == null) return '—';
+  if (typeof v === 'string') return v.length > 80 ? v.slice(0, 80) + '…' : v;
+  if (typeof v === 'number' || typeof v === 'boolean') return String(v);
+  if (Array.isArray(v)) return `[${v.length} items]`;
+  if (typeof v === 'object') return `{${Object.keys(v).length} keys}`;
+  return '';
 }
 
 globalThis.InventoryView = InventoryView;

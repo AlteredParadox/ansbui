@@ -49,6 +49,8 @@
     method: 'POST', body: JSON.stringify({ path, password, content })
   });
 
+  api.gatherFacts = (host) => json(`/api/facts?host=${encodeURIComponent(host)}`);
+
   // Open a WebSocket to stream ad-hoc / playbook output.
   api.openStream = (kind, request) => {
     const wsProto = globalThis.location.protocol === 'https:' ? 'wss' : 'ws';
@@ -125,11 +127,13 @@
 
   // Bootstrap globalThis.AnsibleData with the shape the views expect.
   api.bootstrap = async () => {
-    const [inv, pbs, runs] = await Promise.all([
+    const [inv, pbs, runs, settings] = await Promise.all([
       api.inventory().catch(() => ({ groups: [], hosts: [] })),
       api.listPlaybooks().catch(() => ({ playbooks: [] })),
-      api.listRuns().catch(() => ({ runs: [] }))
+      api.listRuns().catch(() => ({ runs: [] })),
+      api.getSettings().catch(() => ({}))
     ]);
+    globalThis.AnsbuiSettings = settings || {};
     const GROUPS = buildGroups(inv.groups);
     const HOSTS = annotateHosts(inv.hosts);
     const rawRuns = runs.runs || [];

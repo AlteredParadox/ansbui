@@ -221,6 +221,54 @@ dialog.ansbui-dialog-runner[open] {
   padding: 0 8px;
 }
 
+/* Facts panel in the host drawer. A list of collapsible key rows;
+   <details> gives us the expand-collapse behaviour for free. */
+.facts-list {
+  max-height: 42vh;
+  overflow-y: auto;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--r-2);
+  background: var(--bg-inset);
+}
+.fact-row {
+  border-bottom: 1px solid var(--line-soft);
+}
+.fact-row:last-child { border-bottom: 0; }
+.fact-row > summary {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  padding: 6px 10px;
+  cursor: pointer;
+  list-style: none;
+  font-size: 12px;
+}
+.fact-row > summary::-webkit-details-marker { display: none; }
+.fact-row > summary:hover { background: var(--bg-2); }
+.fact-key {
+  color: var(--text-2);
+  flex: 0 0 auto;
+  max-width: 45%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fact-preview {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11.5px;
+}
+.fact-body {
+  margin: 0;
+  padding: 6px 12px 10px 22px;
+  font-size: 11.5px;
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
 /* Vault tile grid — overview of all $ANSIBLE_VAULT files. */
 .vault-grid {
   display: grid;

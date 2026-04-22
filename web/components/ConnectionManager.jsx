@@ -32,6 +32,7 @@ function ConnectionManager({ open, onClose, onActivated, initialServers, initial
   const [error, setError] = useStateCM('');
   const [promUrl, setPromUrl] = useStateCM('');
   const [promLabel, setPromLabel] = useStateCM('instance');
+  const [autoGatherFacts, setAutoGatherFacts] = useStateCM(false);
   const [tab, setTab] = useStateCM('servers');
 
   const refreshServers = useCallbackCM(async () => {
@@ -46,6 +47,7 @@ function ConnectionManager({ open, onClose, onActivated, initialServers, initial
     globalThis.AnsbuiAPI.getSettings().then(s => {
       setPromUrl(s.prometheusUrl || '');
       setPromLabel(s.prometheusHostLabel || 'instance');
+      setAutoGatherFacts(!!s.autoGatherFacts);
     }).catch(() => {});
   }, [open, refreshServers]);
 
@@ -121,8 +123,15 @@ function ConnectionManager({ open, onClose, onActivated, initialServers, initial
     try {
       await globalThis.AnsbuiAPI.setSettings({
         prometheusUrl: promUrl.trim(),
-        prometheusHostLabel: promLabel.trim() || 'instance'
+        prometheusHostLabel: promLabel.trim() || 'instance',
+        autoGatherFacts
       });
+      // Reflect the updated toggle in the in-memory cache so the host
+      // drawer doesn't need to reload the page to see the change.
+      globalThis.AnsbuiSettings = {
+        ...(globalThis.AnsbuiSettings || {}),
+        autoGatherFacts
+      };
     } catch (e) { setError(e.message); }
     finally { setBusy(false); }
   };
@@ -155,8 +164,11 @@ function ConnectionManager({ open, onClose, onActivated, initialServers, initial
           />
         ) : (
           <SettingsTab
-            promUrl={promUrl} promLabel={promLabel} busy={busy}
+            promUrl={promUrl} promLabel={promLabel}
+            autoGatherFacts={autoGatherFacts}
+            busy={busy}
             onChangeUrl={setPromUrl} onChangeLabel={setPromLabel}
+            onChangeAutoGather={setAutoGatherFacts}
             onSave={saveSettings}
           />
         )}
@@ -209,7 +221,7 @@ function ServersTab(props) {
   );
 }
 
-function SettingsTab({ promUrl, promLabel, busy, onChangeUrl, onChangeLabel, onSave }) {
+function SettingsTab({ promUrl, promLabel, autoGatherFacts, busy, onChangeUrl, onChangeLabel, onChangeAutoGather, onSave }) {
   const [probe, setProbe] = useStateCM(null);
   const [probing, setProbing] = useStateCM(false);
 
@@ -237,6 +249,22 @@ function SettingsTab({ promUrl, promLabel, busy, onChangeUrl, onChangeLabel, onS
                value={promUrl} onChange={onChangeUrl}/>
         <Field id="prom-label" label="Host label" placeholder="instance"
                value={promLabel} onChange={onChangeLabel}/>
+
+        <div className="divider" style={{ margin: '16px 0 12px' }}/>
+        <div className="section-title">Host details</div>
+        <div className="mute" style={{ fontSize: 12, marginBottom: 8 }}>
+          Auto-gather runs <span className="mono">ansible &lt;host&gt; -m setup</span> whenever the host-detail drawer opens. Disable to require an explicit click per host.
+        </div>
+        <label className="opt" htmlFor="auto-gather" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <input
+            id="auto-gather"
+            type="checkbox"
+            checked={autoGatherFacts}
+            onChange={(e) => onChangeAutoGather(e.target.checked)}
+          />
+          <span>Auto-gather facts when the host drawer opens</span>
+        </label>
+
         <div style={{ display: 'flex', gap: 8, marginTop: 14 }}>
           <button type="button" className="btn primary small" disabled={busy} onClick={onSave}>Save</button>
           <button type="button" className="btn small" disabled={probing} onClick={runProbe}>

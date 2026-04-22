@@ -96,11 +96,16 @@ func (s *Server) testServer(w http.ResponseWriter, r *http.Request) {
 type settingsBody struct {
 	PrometheusURL   string `json:"prometheusUrl"`
 	PrometheusLabel string `json:"prometheusHostLabel"`
+	AutoGatherFacts bool   `json:"autoGatherFacts"`
 }
 
 func (s *Server) getSettings(w http.ResponseWriter, _ *http.Request) {
-	url, label := s.Config.Prometheus()
-	writeJSON(w, http.StatusOK, settingsBody{PrometheusURL: url, PrometheusLabel: label})
+	snap := s.Config.Snapshot()
+	writeJSON(w, http.StatusOK, settingsBody{
+		PrometheusURL:   snap.PrometheusURL,
+		PrometheusLabel: snap.PrometheusLabel,
+		AutoGatherFacts: snap.AutoGatherFacts,
+	})
 }
 
 func (s *Server) setSettings(w http.ResponseWriter, r *http.Request) {
@@ -110,6 +115,10 @@ func (s *Server) setSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.Config.SetPrometheus(body.PrometheusURL, body.PrometheusLabel); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if err := s.Config.SetAutoGatherFacts(body.AutoGatherFacts); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}

@@ -42,6 +42,7 @@ func (s *Server) Handler() http.Handler {
 
 	mux.HandleFunc("GET /api/inventory", s.inventory)
 	mux.HandleFunc("GET /api/metrics", s.metrics)
+	mux.HandleFunc("GET /api/facts", s.getFacts)
 
 	mux.HandleFunc("GET /api/playbooks", s.listPlaybooks)
 	mux.HandleFunc("GET /api/playbooks/content", s.getPlaybook)

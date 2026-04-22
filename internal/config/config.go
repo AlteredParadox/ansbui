@@ -40,6 +40,11 @@ type Store struct {
 	ActiveServerID  string   `json:"activeServerId,omitempty"`
 	PrometheusURL   string   `json:"prometheusUrl,omitempty"`
 	PrometheusLabel string   `json:"prometheusHostLabel,omitempty"`
+	// AutoGatherFacts controls whether the host-detail drawer fires a
+	// `setup` module call automatically when the drawer opens. When
+	// false, the drawer shows a [Gather facts] button instead so the
+	// operator opts in per-host.
+	AutoGatherFacts bool `json:"autoGatherFacts,omitempty"`
 }
 
 // Manager loads, persists, and mutates the config store.
@@ -273,6 +278,14 @@ func (m *Manager) Prometheus() (url, label string) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.store.PrometheusURL, m.store.PrometheusLabel
+}
+
+// SetAutoGatherFacts persists the auto-gather toggle.
+func (m *Manager) SetAutoGatherFacts(v bool) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.store.AutoGatherFacts = v
+	return m.persistLocked()
 }
 
 func validateServer(s Server) error {
