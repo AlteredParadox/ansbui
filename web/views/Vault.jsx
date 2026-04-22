@@ -13,9 +13,9 @@ function VaultView() {
         <div>
           <h1 className="view-title">Secrets</h1>
           <div className="view-sub mute">
-            Vault discovery isn't implemented yet. Once added, this view will list
-            <span className="mono"> $ANSIBLE_VAULT</span>-encrypted files found under the server's workDir,
-            their scopes, and the playbooks that reference them.
+            Vault discovery isn't implemented yet. Once added, this view will list{' '}
+            <span className="mono">$ANSIBLE_VAULT</span>
+            -encrypted files found under the server's workDir, their scopes, and the playbooks that reference them.
           </div>
         </div>
       </div>

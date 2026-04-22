@@ -134,7 +134,7 @@ function ConnectionManager({ open, onClose, onActivated, initialServers, initial
       ref={dialogRef}
       className="relay-dialog relay-dialog-center"
       aria-label="Connections and settings"
-      onClick={(e) => { if (e.target === dialogRef.current) onClose(); }}
+      {...globalThis.dialogBackdropHandlers(dialogRef, onClose)}
     >
       <div className="cm">
         <div className="cm-head">

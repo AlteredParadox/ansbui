@@ -8,18 +8,31 @@ const { useState: useStateA, useEffect: useEffectA, useRef: useRefA, useMemo: us
 // in Inventory.jsx so that selecting a parent group (e.g. vps_servers)
 // includes all hosts under its descendants.
 function buildTargetDescendants(groups) {
-  const childrenOf = {};
-  for (const g of groups) (childrenOf[g.parent ?? '__root__'] ||= []).push(g.id);
+  const childrenOf = groupChildrenIndex(groups);
   const cache = {};
-  const walk = (id) => {
-    if (cache[id]) return cache[id];
-    const set = new Set([id]);
-    for (const c of childrenOf[id] || []) for (const d of walk(c)) set.add(d);
-    cache[id] = set;
-    return set;
-  };
-  for (const g of groups) walk(g.id);
+  for (const g of groups) descendantSet(g.id, childrenOf, cache);
   return cache;
+}
+
+function groupChildrenIndex(groups) {
+  const children = {};
+  for (const g of groups) {
+    const key = g.parent ?? '__root__';
+    const list = children[key] || [];
+    list.push(g.id);
+    children[key] = list;
+  }
+  return children;
+}
+
+function descendantSet(id, childrenOf, cache) {
+  if (cache[id]) return cache[id];
+  const set = new Set([id]);
+  for (const child of childrenOf[id] || []) {
+    for (const d of descendantSet(child, childrenOf, cache)) set.add(d);
+  }
+  cache[id] = set;
+  return set;
 }
 
 // suggestedTargets returns 'all' plus the inventory groups that have
@@ -443,11 +456,11 @@ function downloadLog(lines, moduleName) {
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  const stamp = new Date().toISOString().replace(/[:]/g, '-').replace(/\..*/, '');
+  const stamp = new Date().toISOString().replaceAll(':', '-').replace(/\..*/, '');
   a.download = `adhoc-${moduleName.replaceAll(/[^A-Za-z0-9]+/g, '_')}-${stamp}.log`;
   document.body.appendChild(a);
   a.click();
-  document.body.removeChild(a);
+  a.remove();
   URL.revokeObjectURL(url);
 }
 
@@ -462,7 +475,7 @@ function AdhocRecentDialog({ open, onClose, onPick }) {
       ref={dialogRef}
       className="relay-dialog relay-dialog-center"
       aria-label="Recent ad-hoc commands"
-      onClick={(e) => { if (e.target === dialogRef.current) onClose(); }}
+      {...globalThis.dialogBackdropHandlers(dialogRef, onClose)}
     >
       <div className="cm" style={{ width: 'min(720px, 94vw)', maxHeight: '70vh' }}>
         <div className="cm-head">
@@ -556,7 +569,7 @@ function AdhocSavePlaybookDialog({ open, composition, onClose }) {
       ref={dialogRef}
       className="relay-dialog relay-dialog-center"
       aria-label="Save ad-hoc as playbook"
-      onClick={(e) => { if (e.target === dialogRef.current) onClose(); }}
+      {...globalThis.dialogBackdropHandlers(dialogRef, onClose)}
     >
       <div className="cm" style={{ width: 'min(680px, 94vw)', maxHeight: '82vh' }}>
         <div className="cm-head">

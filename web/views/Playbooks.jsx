@@ -491,9 +491,12 @@ function PlaybookRunner({ open, pb, seed, onClose }) {
   const [become, setBecome] = useStateP(false);
   const [running, setRunning] = useStateP(false);
   const [output, setOutput] = useStateP([]);
-  // vars are stored as an ordered list of {key, type, value} rows so
-  // empty rows remain in the UI while the user is typing.
-  const [vars, setVars] = useStateP([{ key: '', type: 'string', value: '' }]);
+  // vars are stored as an ordered list of {rid, key, type, value} rows.
+  // rid is a stable per-row id so React's reconciler doesn't shuffle
+  // DOM nodes (and their focus state) when rows are added or removed
+  // from the middle — Sonar S6479 flags naked-index keys for exactly
+  // that reason.
+  const [vars, setVars] = useStateP(() => [newVarRow()]);
   const [varsError, setVarsError] = useStateP('');
   const streamRef = useRefP(null);
   const outRef = useRefP(null);
@@ -512,7 +515,7 @@ function PlaybookRunner({ open, pb, seed, onClose }) {
   }, [open, seed]);
 
   const setVarAt = (i, patch) => setVars(prev => prev.map((row, j) => (j === i ? { ...row, ...patch } : row)));
-  const addVar = () => setVars(prev => [...prev, { key: '', type: 'string', value: '' }]);
+  const addVar = () => setVars(prev => [...prev, newVarRow()]);
   const removeVar = (i) => setVars(prev => prev.filter((_, j) => j !== i));
 
   useEffectP(() => {
@@ -594,7 +597,7 @@ function PlaybookRunner({ open, pb, seed, onClose }) {
       ref={dialogRef}
       className="relay-dialog relay-dialog-runner"
       aria-label={`Run ${pb.name}`}
-      onClick={(e) => { if (e.target === dialogRef.current) onClose(); }}
+      {...globalThis.dialogBackdropHandlers(dialogRef, onClose)}
     >
       <div className="pb-runner card">
         <div className="pb-runner-head">
@@ -624,7 +627,7 @@ function PlaybookRunner({ open, pb, seed, onClose }) {
           <div className="pb-vars">
             {vars.map((row, i) => (
               <PlaybookVarRow
-                key={i}
+                key={row.rid}
                 index={i}
                 row={row}
                 onChange={(patch) => setVarAt(i, patch)}
@@ -781,17 +784,23 @@ function PlaybookVarValue({ id, row, onChange }) {
   );
 }
 
+let varRowIdSeq = 0;
+function newVarRow(patch) {
+  varRowIdSeq += 1;
+  return { rid: `var-${varRowIdSeq}`, key: '', type: 'string', value: '', ...(patch || {}) };
+}
+
 // varsFromRecord converts a persisted extraVars map back into the row
 // model used by the editor. The persisted values preserve real JSON
 // types, so we pick the row type from each value's runtime type.
 function varsFromRecord(record) {
   const entries = Object.entries(record || {});
-  if (!entries.length) return [{ key: '', type: 'string', value: '' }];
+  if (!entries.length) return [newVarRow()];
   return entries.map(([k, v]) => {
-    if (typeof v === 'number') return { key: k, type: 'number', value: String(v) };
-    if (typeof v === 'boolean') return { key: k, type: 'bool', value: v ? 'true' : 'false' };
-    if (v !== null && typeof v === 'object') return { key: k, type: 'json', value: JSON.stringify(v) };
-    return { key: k, type: 'string', value: String(v ?? '') };
+    if (typeof v === 'number') return newVarRow({ key: k, type: 'number', value: String(v) });
+    if (typeof v === 'boolean') return newVarRow({ key: k, type: 'bool', value: v ? 'true' : 'false' });
+    if (v !== null && typeof v === 'object') return newVarRow({ key: k, type: 'json', value: JSON.stringify(v) });
+    return newVarRow({ key: k, type: 'string', value: String(v ?? '') });
   });
 }
 
@@ -812,7 +821,7 @@ function collectExtraVars(rows) {
       if (row.value === '' || row.value === null) return;
       const n = Number(row.value);
       if (!Number.isFinite(n)) {
-        throw new Error(`row ${idx + 1} (${key}): "${row.value}" is not a number`);
+        throw new TypeError(`row ${idx + 1} (${key}): "${row.value}" is not a number`);
       }
       out[key] = n;
       return;
@@ -826,7 +835,7 @@ function collectExtraVars(rows) {
       try {
         out[key] = JSON.parse(row.value);
       } catch (e) {
-        throw new Error(`row ${idx + 1} (${key}): invalid JSON — ${e.message}`);
+        throw new TypeError(`row ${idx + 1} (${key}): invalid JSON — ${e.message}`);
       }
     }
   });
@@ -849,6 +858,34 @@ function splitTokens(raw) {
     .filter(Boolean);
 }
 
+function buildLimitDescendants(groups) {
+  const childrenOf = limitChildrenIndex(groups);
+  const cache = {};
+  for (const g of groups) limitDescendantSet(g.id, childrenOf, cache);
+  return cache;
+}
+
+function limitChildrenIndex(groups) {
+  const children = {};
+  for (const g of groups) {
+    const key = g.parent ?? '__root__';
+    const list = children[key] || [];
+    list.push(g.id);
+    children[key] = list;
+  }
+  return children;
+}
+
+function limitDescendantSet(id, childrenOf, cache) {
+  if (cache[id]) return cache[id];
+  const set = new Set([id]);
+  for (const child of childrenOf[id] || []) {
+    for (const d of limitDescendantSet(child, childrenOf, cache)) set.add(d);
+  }
+  cache[id] = set;
+  return set;
+}
+
 function LimitPicker({ open, initialValue, onClose, onApply }) {
   const dialogRef = globalThis.useDialog(open, onClose);
   const data = globalThis.AnsibleData || {};
@@ -863,20 +900,7 @@ function LimitPicker({ open, initialValue, onClose, onApply }) {
     setQuery('');
   }, [open, initialValue]);
 
-  const descendants = useMemoP(() => {
-    const childrenOf = {};
-    for (const g of GROUPS) (childrenOf[g.parent ?? '__root__'] ||= []).push(g.id);
-    const cache = {};
-    const walk = (id) => {
-      if (cache[id]) return cache[id];
-      const set = new Set([id]);
-      for (const c of childrenOf[id] || []) for (const d of walk(c)) set.add(d);
-      cache[id] = set;
-      return set;
-    };
-    for (const g of GROUPS) walk(g.id);
-    return cache;
-  }, [GROUPS]);
+  const descendants = useMemoP(() => buildLimitDescendants(GROUPS), [GROUPS]);
 
   const groupRows = useMemoP(() => {
     const q = query.trim().toLowerCase();
@@ -915,7 +939,7 @@ function LimitPicker({ open, initialValue, onClose, onApply }) {
       ref={dialogRef}
       className="relay-dialog relay-dialog-center"
       aria-label="Pick limit targets"
-      onClick={(e) => { if (e.target === dialogRef.current) onClose(); }}
+      {...globalThis.dialogBackdropHandlers(dialogRef, onClose)}
     >
       <div className="cm" style={{ width: 'min(720px, 94vw)', maxHeight: '75vh' }}>
         <div className="cm-head">
@@ -1046,7 +1070,7 @@ function PlaybookHistoryDialog({ open, pb, onClose }) {
       ref={dialogRef}
       className="relay-dialog relay-dialog-center"
       aria-label={`Run history for ${pb.name}`}
-      onClick={(e) => { if (e.target === dialogRef.current) onClose(); }}
+      {...globalThis.dialogBackdropHandlers(dialogRef, onClose)}
     >
       <div className="cm" style={{ width: 'min(720px, 94vw)', maxHeight: '70vh' }}>
         <div className="cm-head">
@@ -1147,7 +1171,7 @@ function PlaybookImportDialog({ open, onClose, onImported }) {
       ref={dialogRef}
       className="relay-dialog relay-dialog-center"
       aria-label="Import playbook"
-      onClick={(e) => { if (e.target === dialogRef.current) onClose(); }}
+      {...globalThis.dialogBackdropHandlers(dialogRef, onClose)}
     >
       <div className="cm" style={{ width: 'min(720px, 94vw)', maxHeight: '82vh' }}>
         <div className="cm-head">

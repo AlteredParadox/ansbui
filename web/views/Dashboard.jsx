@@ -231,7 +231,7 @@ function topPlaybooksByRunCount(playbooks, runs, limit) {
   for (const key of Object.keys(counts)) {
     if (!seen.has(key)) out.push({ name: key, runs: counts[key] });
   }
-  return out.sort((a, b) => b.runs - a.runs).slice(0, limit);
+  return out.toSorted((a, b) => b.runs - a.runs).slice(0, limit);
 }
 
 function statusKey(status) {

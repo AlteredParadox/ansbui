@@ -65,23 +65,31 @@ function sortHosts(rows, sort) {
 // only lists a host under its immediate group, so to answer "is this
 // host under 'vps_servers'?" we need to walk the tree.
 function descendantsByGroup(groups) {
-  const childrenOf = {};
+  const childrenOf = buildChildrenIndex(groups);
+  const cache = {};
+  for (const g of groups) collectDescendants(g.id, childrenOf, cache);
+  return cache;
+}
+
+function buildChildrenIndex(groups) {
+  const children = {};
   for (const g of groups) {
     const key = g.parent ?? '__root__';
-    (childrenOf[key] ||= []).push(g.id);
+    const list = children[key] || [];
+    list.push(g.id);
+    children[key] = list;
   }
-  const cache = {};
-  const walk = (id) => {
-    if (cache[id]) return cache[id];
-    const set = new Set([id]);
-    for (const child of childrenOf[id] || []) {
-      for (const d of walk(child)) set.add(d);
-    }
-    cache[id] = set;
-    return set;
-  };
-  for (const g of groups) walk(g.id);
-  return cache;
+  return children;
+}
+
+function collectDescendants(id, childrenOf, cache) {
+  if (cache[id]) return cache[id];
+  const set = new Set([id]);
+  for (const child of childrenOf[id] || []) {
+    for (const d of collectDescendants(child, childrenOf, cache)) set.add(d);
+  }
+  cache[id] = set;
+  return set;
 }
 
 function hostMatchesGroup(host, descendants) {
@@ -709,7 +717,7 @@ function HostDrawer({ host, onClose, onOpenAdhoc }) {
       ref={dialogRef}
       className="relay-dialog relay-dialog-drawer"
       aria-label={`Host ${host.name}`}
-      onClick={(e) => { if (e.target === dialogRef.current) onClose(); }}
+      {...globalThis.dialogBackdropHandlers(dialogRef, onClose)}
     >
       <aside className="drawer">
         <div className="drawer-head">

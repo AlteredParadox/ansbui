@@ -138,7 +138,7 @@ function CommandPalette({ open, onClose, onNavigate, onOpenAdhoc, onRunPlaybook 
       ref={dialogRef}
       className="relay-dialog relay-dialog-center"
       aria-label="Command palette"
-      onClick={(e) => { if (e.target === dialogRef.current) onClose(); }}
+      {...globalThis.dialogBackdropHandlers(dialogRef, onClose)}
       onKeyDown={handleKey}
     >
       <div className="cp">

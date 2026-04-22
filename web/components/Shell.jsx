@@ -21,11 +21,11 @@ function useDialog(open, onClose) {
   useLayoutEffect(() => {
     const el = ref.current;
     if (!el) return undefined;
-    if (open && !el.open) {
-      try { el.showModal(); } catch (_) { /* already open; ignore */ }
-    } else if (!open && el.open) {
-      el.close();
-    }
+    // We guard every call with el.open so showModal() can't throw the
+    // InvalidStateError that would otherwise come from re-opening, and
+    // close() is a no-op on an already-closed dialog.
+    if (open && !el.open) el.showModal();
+    else if (!open && el.open) el.close();
     return () => {
       // On unmount, if React is removing the element while it's still
       // in the top layer, tear it down explicitly.
@@ -161,8 +161,21 @@ function TopLayoutNav({ view, setView }) {
   );
 }
 
+// dialogBackdropHandlers builds the onClick / onKeyDown pair that
+// every modal dialog in the app uses to close on backdrop click or
+// Escape. Native <dialog> already closes on Escape, but having an
+// explicit onKeyDown satisfies Sonar S1082 ("visible interactive
+// element with click must have at least one keyboard listener").
+function dialogBackdropHandlers(ref, onClose) {
+  return {
+    onClick: (e) => { if (e.target === ref.current) onClose(); },
+    onKeyDown: (e) => { if (e.key === 'Escape') onClose(); }
+  };
+}
+
 globalThis.Sidebar = Sidebar;
 globalThis.TopNav = TopNav;
 globalThis.TopLayoutNav = TopLayoutNav;
 globalThis.TWEAK_DEFAULTS = TWEAK_DEFAULTS;
 globalThis.useDialog = useDialog;
+globalThis.dialogBackdropHandlers = dialogBackdropHandlers;

@@ -203,12 +203,12 @@ function triggerDownload(blob, filename) {
   a.download = filename;
   document.body.appendChild(a);
   a.click();
-  document.body.removeChild(a);
+  a.remove();
   URL.revokeObjectURL(url);
 }
 
 function timeStamp() {
-  return new Date().toISOString().replace(/[:]/g, '-').replace(/\..*/, '');
+  return new Date().toISOString().replaceAll(':', '-').replace(/\..*/, '');
 }
 
 // findPlaybookFor resolves a run's playbook (stored as the relative
