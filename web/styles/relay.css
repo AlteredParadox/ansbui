@@ -1,0 +1,112 @@
+/* Relay-specific additions to the design bundle's app.css. Keep this
+   file small — new components only; no overrides of upstream tokens. */
+
+/* ===== Boot screen ===== */
+.boot-screen {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  background: var(--bg-0);
+  padding: 32px;
+}
+.boot-card {
+  width: min(560px, 100%);
+  background: var(--bg-1);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--r-3);
+  padding: 28px 28px 24px;
+  box-shadow: var(--shadow-1);
+}
+.boot-brand {
+  display: flex; align-items: center; gap: 12px; margin-bottom: 20px;
+}
+.boot-brand .brand-mark { width: 36px; height: 36px; border-radius: 9px; }
+.boot-title { font-size: 20px; font-weight: 600; letter-spacing: -0.01em; margin: 0; }
+.boot-sub { font-size: 12.5px; color: var(--text-3); margin-top: 2px; }
+.boot-error {
+  margin: 12px 0;
+  padding: 10px 12px;
+  background: oklch(0.66 0.21 25 / 0.12);
+  border: 1px solid oklch(0.66 0.21 25 / 0.35);
+  border-radius: var(--r-2);
+  font-size: 12px;
+  color: var(--err);
+  font-family: var(--font-mono);
+  white-space: pre-wrap;
+}
+
+/* ===== Connection manager (server + settings modal) ===== */
+.cm {
+  width: min(860px, 94vw);
+  max-height: 82vh;
+  background: var(--bg-1);
+  border: 1px solid var(--line);
+  border-radius: var(--r-4);
+  display: flex; flex-direction: column;
+  overflow: hidden;
+  box-shadow: var(--shadow-pop);
+  animation: cpin 180ms var(--ease);
+}
+.cm-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--line-soft);
+}
+.cm-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 18px;
+  padding: 16px 18px;
+  overflow: auto;
+}
+.cm-body.cm-single {
+  grid-template-columns: minmax(0, 1fr);
+}
+.cm-pane { min-width: 0; display: flex; flex-direction: column; gap: 8px; }
+.cm-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 10px;
+  align-items: center;
+  padding: 8px 10px;
+  background: var(--bg-2);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--r-2);
+  margin-bottom: 6px;
+}
+.cm-row.active { border-color: var(--accent-line); background: var(--accent-weak); }
+.cm-row-actions { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
+.cm-error {
+  margin: 0 18px 12px;
+  padding: 8px 12px;
+  background: oklch(0.66 0.21 25 / 0.12);
+  border: 1px solid oklch(0.66 0.21 25 / 0.35);
+  border-radius: var(--r-2);
+  font-size: 12px;
+  color: var(--err);
+}
+.cm-test { margin-top: 8px; padding: 6px 10px; border-radius: var(--r-2); }
+.cm-test.ok { background: oklch(0.75 0.16 150 / 0.12); color: var(--ok); border: 1px solid oklch(0.75 0.16 150 / 0.3); }
+.cm-test.err { background: oklch(0.66 0.21 25 / 0.12); color: var(--err); border: 1px solid oklch(0.66 0.21 25 / 0.3); }
+
+.cm-field { display: grid; gap: 4px; margin-bottom: 10px; }
+.cm-field-label {
+  font-size: 10.5px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-3);
+}
+.cm-field .input { height: 30px; }
+.cm-row-grid { display: grid; grid-template-columns: 1fr 100px; gap: 10px; }
+
+/* Make the topnav's settings button visually consistent with the
+   existing search button. */
+.tn-right .btn.small { height: 28px; }
+
+/* Busy / loading pulse for inventory while Prometheus is warming up. */
+.inv-loading {
+  padding: 20px;
+  text-align: center;
+  color: var(--text-3);
+  font-size: 12px;
+}

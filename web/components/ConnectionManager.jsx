@@ -1,0 +1,265 @@
+// Connection manager + settings dialog.
+//
+// Shown at startup when no active server is configured, and accessible
+// from the topbar once one is. Owns:
+//   - list of saved ansible server connections
+//   - add/edit/test/delete + activate
+//   - prometheus URL + host-label settings
+//
+// Talks to window.RelayAPI only — no direct fetches in here.
+
+const {
+  useState: useStateCM,
+  useEffect: useEffectCM,
+  useCallback: useCallbackCM
+} = React;
+
+const EMPTY_FORM = Object.freeze({
+  id: '',
+  name: '',
+  host: '',
+  port: 22,
+  user: '',
+  keyPath: '',
+  workDir: '',
+  inventory: ''
+});
+
+function ConnectionManager({ open, onClose, onActivated, initialServers, initialActiveId }) {
+  const [servers, setServers] = useStateCM(initialServers || []);
+  const [activeId, setActiveId] = useStateCM(initialActiveId || '');
+  const [form, setForm] = useStateCM(EMPTY_FORM);
+  const [busy, setBusy] = useStateCM(false);
+  const [testResult, setTestResult] = useStateCM(null);
+  const [error, setError] = useStateCM('');
+  const [promUrl, setPromUrl] = useStateCM('');
+  const [promLabel, setPromLabel] = useStateCM('instance');
+  const [tab, setTab] = useStateCM('servers');
+
+  const refreshServers = useCallbackCM(async () => {
+    const res = await window.RelayAPI.listServers();
+    setServers(res.servers || []);
+    setActiveId(res.activeServerId || '');
+  }, []);
+
+  useEffectCM(() => {
+    if (!open) return;
+    refreshServers();
+    window.RelayAPI.getSettings().then(s => {
+      setPromUrl(s.prometheusUrl || '');
+      setPromLabel(s.prometheusHostLabel || 'instance');
+    }).catch(() => {});
+  }, [open, refreshServers]);
+
+  const updateForm = (patch) => setForm(prev => ({ ...prev, ...patch }));
+
+  const startEdit = (s) => {
+    setForm({
+      id: s.id,
+      name: s.name || '',
+      host: s.host || '',
+      port: s.port || 22,
+      user: s.user || '',
+      keyPath: s.keyPath || '',
+      workDir: s.workDir || '',
+      inventory: s.inventory || ''
+    });
+    setTestResult(null);
+    setError('');
+  };
+
+  const resetForm = () => { setForm(EMPTY_FORM); setTestResult(null); setError(''); };
+
+  const save = async () => {
+    setBusy(true); setError('');
+    try {
+      const payload = { ...form, port: Number(form.port) || 22 };
+      const saved = await window.RelayAPI.upsertServer(payload);
+      await refreshServers();
+      setForm(EMPTY_FORM);
+      // Auto-activate if there was none.
+      if (!activeId) {
+        await window.RelayAPI.activateServer(saved.id);
+        await refreshServers();
+      }
+    } catch (e) { setError(e.message); }
+    finally { setBusy(false); }
+  };
+
+  const activate = async (id) => {
+    setBusy(true); setError('');
+    try {
+      await window.RelayAPI.activateServer(id);
+      await refreshServers();
+      onActivated && onActivated(id);
+    } catch (e) { setError(e.message); }
+    finally { setBusy(false); }
+  };
+
+  const remove = async (id) => {
+    if (!window.confirm('Delete this connection?')) return;
+    setBusy(true); setError('');
+    try {
+      await window.RelayAPI.deleteServer(id);
+      await refreshServers();
+    } catch (e) { setError(e.message); }
+    finally { setBusy(false); }
+  };
+
+  const testConnection = async (id) => {
+    setBusy(true); setError(''); setTestResult(null);
+    try {
+      const res = await window.RelayAPI.testServer(id);
+      setTestResult(res);
+    } catch (e) { setError(e.message); }
+    finally { setBusy(false); }
+  };
+
+  const saveSettings = async () => {
+    setBusy(true); setError('');
+    try {
+      await window.RelayAPI.setSettings({
+        prometheusUrl: promUrl.trim(),
+        prometheusHostLabel: promLabel.trim() || 'instance'
+      });
+    } catch (e) { setError(e.message); }
+    finally { setBusy(false); }
+  };
+
+  if (!open) return null;
+
+  return (
+    <div className="cp-scrim" onMouseDown={onClose}>
+      <div className="cm" onMouseDown={e => e.stopPropagation()}>
+        <div className="cm-head">
+          <div className="seg">
+            <button className={tab === 'servers' ? 'on' : ''} onClick={() => setTab('servers')}>Ansible servers</button>
+            <button className={tab === 'settings' ? 'on' : ''} onClick={() => setTab('settings')}>Settings</button>
+          </div>
+          <button className="btn ghost small" onClick={onClose}><Icon name="x" size={14}/></button>
+        </div>
+        {error && <div className="cm-error mono">{error}</div>}
+        {tab === 'servers' ? (
+          <ServersTab
+            servers={servers} activeId={activeId} form={form} busy={busy}
+            testResult={testResult}
+            onActivate={activate} onEdit={startEdit} onDelete={remove}
+            onTest={testConnection} onReset={resetForm}
+            onChangeForm={updateForm} onSubmit={save}
+          />
+        ) : (
+          <SettingsTab
+            promUrl={promUrl} promLabel={promLabel} busy={busy}
+            onChangeUrl={setPromUrl} onChangeLabel={setPromLabel}
+            onSave={saveSettings}
+          />
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ServersTab(props) {
+  const {
+    servers, activeId, form, busy, testResult,
+    onActivate, onEdit, onDelete, onTest, onReset,
+    onChangeForm, onSubmit
+  } = props;
+  return (
+    <div className="cm-body">
+      <div className="cm-pane">
+        <div className="section-title">Connections · {servers.length}</div>
+        {servers.length === 0 && <div className="mute" style={{ padding: '12px 0', fontSize: 12 }}>No connections yet. Add one on the right.</div>}
+        {servers.map(s => (
+          <div key={s.id} className={`cm-row ${s.id === activeId ? 'active' : ''}`}>
+            <div>
+              <div className="mono" style={{ fontSize: 13, fontWeight: 550 }}>{s.name}</div>
+              <div className="mute mono" style={{ fontSize: 11.5 }}>
+                {s.user}@{s.host}:{s.port || 22}
+                {s.workDir && <span> · {s.workDir}</span>}
+              </div>
+            </div>
+            <div className="cm-row-actions">
+              {s.id === activeId
+                ? <span className="pill ok">active</span>
+                : <button className="btn small" disabled={busy} onClick={() => onActivate(s.id)}>Activate</button>}
+              <button className="btn ghost small" disabled={busy} onClick={() => onTest(s.id)}>Test</button>
+              <button className="btn ghost small" disabled={busy} onClick={() => onEdit(s)}>Edit</button>
+              <button className="btn ghost small" disabled={busy} onClick={() => onDelete(s.id)}><Icon name="x" size={12}/></button>
+            </div>
+          </div>
+        ))}
+        {testResult && (
+          <div className={`cm-test ${testResult.ok ? 'ok' : 'err'} mono`} style={{ fontSize: 11.5 }}>
+            {testResult.ok ? <>✓ {testResult.version || 'ok'}</> : <>✗ {testResult.error}</>}
+          </div>
+        )}
+      </div>
+      <div className="cm-pane">
+        <div className="section-title">{form.id ? 'Edit connection' : 'New connection'}</div>
+        <ServerForm form={form} busy={busy} onChange={onChangeForm} onReset={onReset} onSubmit={onSubmit}/>
+      </div>
+    </div>
+  );
+}
+
+function SettingsTab({ promUrl, promLabel, busy, onChangeUrl, onChangeLabel, onSave }) {
+  return (
+    <div className="cm-body cm-single">
+      <div className="cm-pane">
+        <div className="section-title">Prometheus</div>
+        <div className="mute" style={{ fontSize: 12, marginBottom: 12 }}>
+          Live CPU / memory / load / uptime / OS are pulled from Prometheus and matched to inventory hosts by label.
+          Leave blank to show static values only.
+        </div>
+        <Field label="Prometheus URL" placeholder="http://prom.example.com:9090"
+               value={promUrl} onChange={onChangeUrl}/>
+        <Field label="Host label" placeholder="instance"
+               value={promLabel} onChange={onChangeLabel}/>
+        <div style={{ display: 'flex', gap: 8, marginTop: 14 }}>
+          <button className="btn primary small" disabled={busy} onClick={onSave}>Save</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ServerForm({ form, busy, onChange, onReset, onSubmit }) {
+  return (
+    <form onSubmit={(e) => { e.preventDefault(); onSubmit(); }}>
+      <Field label="Name" placeholder="prod-ansible" value={form.name} onChange={v => onChange({ name: v })}/>
+      <div className="cm-row-grid">
+        <Field label="Host" placeholder="ansible.example.com" value={form.host} onChange={v => onChange({ host: v })}/>
+        <Field label="Port" type="number" value={form.port} onChange={v => onChange({ port: v })}/>
+      </div>
+      <Field label="SSH user" placeholder="ansible" value={form.user} onChange={v => onChange({ user: v })}/>
+      <Field label="Key path (optional)" placeholder="~/.ssh/id_ed25519" value={form.keyPath} onChange={v => onChange({ keyPath: v })}/>
+      <Field label="Working dir (playbook repo on remote)" placeholder="/home/ansible/ops" value={form.workDir} onChange={v => onChange({ workDir: v })}/>
+      <Field label="Inventory path (optional)" placeholder="inventory/production.yml" value={form.inventory} onChange={v => onChange({ inventory: v })}/>
+      <div className="mute" style={{ fontSize: 11, marginTop: 6 }}>
+        SSH auth uses your running ssh-agent by default; specify a key path for unattended keys.
+      </div>
+      <div style={{ display: 'flex', gap: 8, marginTop: 14 }}>
+        <button className="btn primary small" type="submit" disabled={busy}>{form.id ? 'Update' : 'Create'}</button>
+        <button className="btn ghost small" type="button" disabled={busy} onClick={onReset}>Reset</button>
+      </div>
+    </form>
+  );
+}
+
+function Field({ label, value, onChange, placeholder, type }) {
+  return (
+    <label className="cm-field">
+      <span className="cm-field-label">{label}</span>
+      <input
+        className="input mono"
+        type={type || 'text'}
+        value={value ?? ''}
+        placeholder={placeholder}
+        onChange={(e) => onChange(e.target.value)}
+      />
+    </label>
+  );
+}
+
+window.ConnectionManager = ConnectionManager;

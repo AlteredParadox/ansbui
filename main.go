@@ -1,0 +1,104 @@
+// Relay — web UI for an Ansible control plane.
+//
+// One Go binary that:
+//   1. Serves the embedded React/CSS bundle at /.
+//   2. Lets the user configure one or more SSH-accessible "ansible servers".
+//   3. Runs ansible-inventory / ansible / ansible-playbook over SSH on the
+//      selected server, streaming output to the UI via WebSocket.
+//   4. Optionally enriches inventory with live Prometheus metrics for
+//      CPU / mem / load / uptime / OS, matched by hostname.
+package main
+
+import (
+	"context"
+	"embed"
+	"errors"
+	"flag"
+	"io/fs"
+	"log"
+	"net/http"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"syscall"
+	"time"
+
+	"github.com/AlteredParadox/relay/internal/ansible"
+	"github.com/AlteredParadox/relay/internal/api"
+	"github.com/AlteredParadox/relay/internal/config"
+	"github.com/AlteredParadox/relay/internal/sshpool"
+)
+
+//go:embed all:web
+var webFS embed.FS
+
+func main() {
+	addr := flag.String("addr", "127.0.0.1:8787", "listen address")
+	flag.Parse()
+
+	cfg, err := config.New()
+	if err != nil {
+		log.Fatalf("config: %v", err)
+	}
+
+	runsPath, err := runsPath()
+	if err != nil {
+		log.Fatalf("runs path: %v", err)
+	}
+	runs, err := ansible.NewRecorder(runsPath)
+	if err != nil {
+		log.Fatalf("runs recorder: %v", err)
+	}
+
+	pool := sshpool.New()
+	defer pool.Close()
+
+	webSub, err := fs.Sub(webFS, "web")
+	if err != nil {
+		log.Fatalf("embed web: %v", err)
+	}
+
+	srv := &api.Server{
+		Config:  cfg,
+		Pool:    pool,
+		Runs:    runs,
+		WebRoot: webSub,
+	}
+
+	httpSrv := &http.Server{
+		Addr:              *addr,
+		Handler:           srv.Handler(),
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	go func() {
+		log.Printf("Relay listening on http://%s", *addr)
+		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Fatalf("http: %v", err)
+		}
+	}()
+
+	<-ctx.Done()
+	log.Printf("shutting down…")
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = httpSrv.Shutdown(shutdownCtx)
+}
+
+func runsPath() (string, error) {
+	if p := os.Getenv("RELAY_RUNS"); p != "" {
+		return p, nil
+	}
+	dir := os.Getenv("XDG_CONFIG_HOME")
+	if dir == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		dir = filepath.Join(home, ".config")
+	}
+	return filepath.Join(dir, "relay", "runs.json"), nil
+}

@@ -1,0 +1,290 @@
+// Package config persists the user's ansible server connections and app
+// preferences (e.g. the Prometheus URL used for live host metrics).
+//
+// The store is a single JSON file at $XDG_CONFIG_HOME/relay/config.json
+// (falling back to ~/.config/relay/config.json). Access is guarded by a
+// mutex so API handlers can read and mutate it concurrently.
+package config
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"time"
+)
+
+// Server is a single ansible control node the UI can talk to over SSH.
+type Server struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Host      string `json:"host"`
+	Port      int    `json:"port"`
+	User      string `json:"user"`
+	KeyPath   string `json:"keyPath,omitempty"`
+	WorkDir   string `json:"workDir,omitempty"`
+	Inventory string `json:"inventory,omitempty"`
+	CreatedAt string `json:"createdAt"`
+}
+
+// Store is the on-disk config blob.
+type Store struct {
+	Servers         []Server `json:"servers"`
+	ActiveServerID  string   `json:"activeServerId,omitempty"`
+	PrometheusURL   string   `json:"prometheusUrl,omitempty"`
+	PrometheusLabel string   `json:"prometheusHostLabel,omitempty"`
+}
+
+// Manager loads, persists, and mutates the config store.
+type Manager struct {
+	path  string
+	mu    sync.RWMutex
+	store Store
+}
+
+// New returns a Manager backed by the default config path. It creates the
+// file on first use with sensible defaults.
+func New() (*Manager, error) {
+	path, err := defaultPath()
+	if err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return nil, fmt.Errorf("create config dir: %w", err)
+	}
+	m := &Manager{path: path}
+	if err := m.load(); err != nil {
+		return nil, err
+	}
+	return m, nil
+}
+
+func defaultPath() (string, error) {
+	if p := os.Getenv("RELAY_CONFIG"); p != "" {
+		return p, nil
+	}
+	dir := os.Getenv("XDG_CONFIG_HOME")
+	if dir == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("resolve home dir: %w", err)
+		}
+		dir = filepath.Join(home, ".config")
+	}
+	return filepath.Join(dir, "relay", "config.json"), nil
+}
+
+func (m *Manager) load() error {
+	data, err := os.ReadFile(m.path)
+	if errors.Is(err, os.ErrNotExist) {
+		m.store = Store{
+			Servers:         []Server{},
+			PrometheusLabel: "instance",
+		}
+		return m.persistLocked()
+	}
+	if err != nil {
+		return fmt.Errorf("read config: %w", err)
+	}
+	if err := json.Unmarshal(data, &m.store); err != nil {
+		return fmt.Errorf("parse config: %w", err)
+	}
+	if m.store.PrometheusLabel == "" {
+		m.store.PrometheusLabel = "instance"
+	}
+	return nil
+}
+
+func (m *Manager) persistLocked() error {
+	data, err := json.MarshalIndent(m.store, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode config: %w", err)
+	}
+	tmp := m.path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		return fmt.Errorf("write config: %w", err)
+	}
+	return os.Rename(tmp, m.path)
+}
+
+// Snapshot returns a deep copy of the current store.
+func (m *Manager) Snapshot() Store {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return cloneStore(m.store)
+}
+
+// Servers returns the configured servers.
+func (m *Manager) Servers() []Server {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := make([]Server, len(m.store.Servers))
+	copy(out, m.store.Servers)
+	return out
+}
+
+// ServerByID returns the server with the given id, or false.
+func (m *Manager) ServerByID(id string) (Server, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, s := range m.store.Servers {
+		if s.ID == id {
+			return s, true
+		}
+	}
+	return Server{}, false
+}
+
+// ActiveServer returns the active server (the one most recently selected
+// by the UI). The boolean is false when no server is selected or when the
+// active id points to a deleted entry.
+func (m *Manager) ActiveServer() (Server, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.store.ActiveServerID == "" {
+		return Server{}, false
+	}
+	for _, s := range m.store.Servers {
+		if s.ID == m.store.ActiveServerID {
+			return s, true
+		}
+	}
+	return Server{}, false
+}
+
+// UpsertServer adds a new server or updates one with the same id.
+func (m *Manager) UpsertServer(in Server) (Server, error) {
+	if err := validateServer(in); err != nil {
+		return Server{}, err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	in = normaliseServer(in)
+	for i, s := range m.store.Servers {
+		if s.ID == in.ID {
+			in.CreatedAt = s.CreatedAt
+			m.store.Servers[i] = in
+			if err := m.persistLocked(); err != nil {
+				return Server{}, err
+			}
+			return in, nil
+		}
+	}
+	if in.CreatedAt == "" {
+		in.CreatedAt = time.Now().UTC().Format(time.RFC3339)
+	}
+	m.store.Servers = append(m.store.Servers, in)
+	if err := m.persistLocked(); err != nil {
+		return Server{}, err
+	}
+	return in, nil
+}
+
+// DeleteServer removes a server by id.
+func (m *Manager) DeleteServer(id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	filtered := m.store.Servers[:0]
+	for _, s := range m.store.Servers {
+		if s.ID != id {
+			filtered = append(filtered, s)
+		}
+	}
+	m.store.Servers = filtered
+	if m.store.ActiveServerID == id {
+		m.store.ActiveServerID = ""
+	}
+	return m.persistLocked()
+}
+
+// SetActive marks the given server as active.
+func (m *Manager) SetActive(id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, s := range m.store.Servers {
+		if s.ID == id {
+			m.store.ActiveServerID = id
+			return m.persistLocked()
+		}
+	}
+	return fmt.Errorf("unknown server id %q", id)
+}
+
+// SetPrometheus updates the Prometheus integration settings.
+func (m *Manager) SetPrometheus(url, label string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.store.PrometheusURL = strings.TrimRight(strings.TrimSpace(url), "/")
+	if label = strings.TrimSpace(label); label != "" {
+		m.store.PrometheusLabel = label
+	}
+	return m.persistLocked()
+}
+
+// Prometheus returns the configured Prometheus URL and host label.
+func (m *Manager) Prometheus() (url, label string) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.store.PrometheusURL, m.store.PrometheusLabel
+}
+
+func validateServer(s Server) error {
+	if strings.TrimSpace(s.Host) == "" {
+		return errors.New("host is required")
+	}
+	if strings.TrimSpace(s.User) == "" {
+		return errors.New("user is required")
+	}
+	if s.Port < 0 || s.Port > 65535 {
+		return errors.New("port must be between 0 and 65535")
+	}
+	return nil
+}
+
+func normaliseServer(s Server) Server {
+	if s.Port == 0 {
+		s.Port = 22
+	}
+	s.Host = strings.TrimSpace(s.Host)
+	s.User = strings.TrimSpace(s.User)
+	s.KeyPath = strings.TrimSpace(s.KeyPath)
+	s.WorkDir = strings.TrimSpace(s.WorkDir)
+	s.Inventory = strings.TrimSpace(s.Inventory)
+	if s.ID == "" {
+		s.ID = slugify(s.Name, s.Host, s.User)
+	}
+	if s.Name == "" {
+		s.Name = fmt.Sprintf("%s@%s", s.User, s.Host)
+	}
+	return s
+}
+
+func slugify(parts ...string) string {
+	var buf strings.Builder
+	for _, p := range parts {
+		for _, r := range strings.ToLower(p) {
+			switch {
+			case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+				buf.WriteRune(r)
+			case r == '-', r == '_', r == '.':
+				buf.WriteRune('-')
+			}
+		}
+		buf.WriteByte('-')
+	}
+	out := strings.Trim(buf.String(), "-")
+	if out == "" {
+		out = fmt.Sprintf("server-%d", time.Now().Unix())
+	}
+	return out
+}
+
+func cloneStore(s Store) Store {
+	out := s
+	out.Servers = make([]Server, len(s.Servers))
+	copy(out.Servers, s.Servers)
+	return out
+}

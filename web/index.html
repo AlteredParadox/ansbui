@@ -1,0 +1,256 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=1280"/>
+  <title>Relay — Ansible Control Plane</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;550;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles/tokens.css"/>
+  <link rel="stylesheet" href="styles/app.css"/>
+  <link rel="stylesheet" href="styles/relay.css"/>
+</head>
+<body data-theme="dark" data-density="balanced">
+  <div id="root"></div>
+
+  <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+
+  <script src="data/api.js"></script>
+
+  <script type="text/babel" src="components/Icon.jsx"></script>
+  <script type="text/babel" src="components/Shell.jsx"></script>
+  <script type="text/babel" src="components/CommandPalette.jsx"></script>
+  <script type="text/babel" src="components/ConnectionManager.jsx"></script>
+  <script type="text/babel" src="views/Dashboard.jsx"></script>
+  <script type="text/babel" src="views/Inventory.jsx"></script>
+  <script type="text/babel" src="views/Playbooks.jsx"></script>
+  <script type="text/babel" src="views/Adhoc.jsx"></script>
+  <script type="text/babel" src="views/History.jsx"></script>
+  <script type="text/babel" src="views/Vault.jsx"></script>
+
+  <script type="text/babel">
+    const { useState, useEffect, useCallback } = React;
+
+    function Boot() {
+      const [phase, setPhase] = useState('loading');
+      const [servers, setServers] = useState([]);
+      const [activeId, setActiveId] = useState('');
+      const [showManager, setShowManager] = useState(false);
+      const [error, setError] = useState('');
+
+      const bootstrap = useCallback(async (options = {}) => {
+        setError('');
+        try {
+          const res = await window.RelayAPI.listServers();
+          setServers(res.servers || []);
+          setActiveId(res.activeServerId || '');
+          if (!res.activeServerId) {
+            setPhase('picker');
+            setShowManager(true);
+            return;
+          }
+          await window.RelayAPI.bootstrap();
+          setPhase('ready');
+          setShowManager(options.keepManagerOpen || false);
+        } catch (e) {
+          setError(e.message);
+          setPhase('picker');
+          setShowManager(true);
+        }
+      }, []);
+
+      useEffect(() => { bootstrap(); }, [bootstrap]);
+
+      if (phase === 'loading') {
+        return (
+          <div className="boot-screen">
+            <div className="boot-card">
+              <div className="boot-brand">
+                <BrandMark/>
+                <div>
+                  <h1 className="boot-title">Relay</h1>
+                  <div className="boot-sub mono">connecting…</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+      }
+
+      if (phase === 'picker') {
+        return (
+          <>
+            <div className="boot-screen">
+              <div className="boot-card">
+                <div className="boot-brand">
+                  <BrandMark/>
+                  <div>
+                    <h1 className="boot-title">Relay</h1>
+                    <div className="boot-sub mono">select an ansible server to continue</div>
+                  </div>
+                </div>
+                {error && <div className="boot-error">{error}</div>}
+                <div className="mute" style={{ fontSize: 12.5, marginBottom: 16 }}>
+                  {servers.length === 0
+                    ? 'No connections configured yet. Add the SSH coordinates of an ansible control node to begin.'
+                    : 'Pick a connection below or open the manager to edit.'}
+                </div>
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                  {servers.map(s => (
+                    <button key={s.id} className="btn" onClick={async () => {
+                      await window.RelayAPI.activateServer(s.id);
+                      bootstrap();
+                    }}>
+                      <Icon name="server" size={13}/> {s.name}
+                    </button>
+                  ))}
+                  <button className="btn primary" onClick={() => setShowManager(true)}>
+                    <Icon name="plus" size={12}/> {servers.length ? 'Manage connections' : 'Add connection'}
+                  </button>
+                </div>
+              </div>
+            </div>
+            <window.ConnectionManager
+              open={showManager}
+              onClose={() => setShowManager(false)}
+              onActivated={() => bootstrap()}
+              initialServers={servers}
+              initialActiveId={activeId}
+            />
+          </>
+        );
+      }
+
+      return <App activeId={activeId} servers={servers} onReload={bootstrap}/>;
+    }
+
+    function BrandMark() {
+      return (
+        <div className="brand-mark" aria-hidden>
+          <svg viewBox="0 0 24 24" width="22" height="22">
+            <path d="M4 19 12 4l8 15" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round"/>
+            <path d="M7.8 15h8.4" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"/>
+          </svg>
+        </div>
+      );
+    }
+
+    function App({ activeId, servers, onReload }) {
+      const [view, setView] = useState(() => localStorage.getItem('relay.view') || 'dashboard');
+      const [paletteOpen, setPaletteOpen] = useState(false);
+      const [adhocPrefill, setAdhocPrefill] = useState(null);
+      const [playbookId, setPlaybookId] = useState(null);
+      const [managerOpen, setManagerOpen] = useState(false);
+      const [tweaks, setTweaks] = useState(() => {
+        try { return { ...window.TWEAK_DEFAULTS, ...JSON.parse(localStorage.getItem('relay.tweaks') || '{}') }; }
+        catch { return { ...window.TWEAK_DEFAULTS }; }
+      });
+      const activeName = (servers.find(s => s.id === activeId) || {}).name || activeId;
+
+      useEffect(() => {
+        document.body.dataset.theme = tweaks.theme;
+        document.body.dataset.density = tweaks.density;
+        document.documentElement.style.setProperty('--accent-hue', tweaks.accentHue);
+        localStorage.setItem('relay.tweaks', JSON.stringify(tweaks));
+      }, [tweaks]);
+
+      useEffect(() => { localStorage.setItem('relay.view', view); }, [view]);
+
+      useEffect(() => {
+        let gBuffer = 0;
+        const onKey = (e) => {
+          const tag = (e.target.tagName || '').toLowerCase();
+          const typing = tag === 'input' || tag === 'textarea' || e.target.isContentEditable;
+          if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+            e.preventDefault(); setPaletteOpen(true); return;
+          }
+          if (e.key === 'Escape') { setPaletteOpen(false); return; }
+          if (typing) return;
+          const now = Date.now();
+          if (e.key === 'g') { gBuffer = now; return; }
+          if (gBuffer && now - gBuffer < 900) {
+            gBuffer = 0;
+            const map = { d: 'dashboard', i: 'inventory', p: 'playbooks', a: 'adhoc', r: 'history', s: 'vault' };
+            if (map[e.key]) { e.preventDefault(); setView(map[e.key]); }
+          }
+        };
+        window.addEventListener('keydown', onKey);
+        return () => window.removeEventListener('keydown', onKey);
+      }, []);
+
+      const openPalette = useCallback(() => setPaletteOpen(true), []);
+      const openAdhoc = useCallback((prefill) => {
+        setAdhocPrefill(prefill || null);
+        setView('adhoc');
+      }, []);
+      const runPlaybook = useCallback((id) => {
+        setPlaybookId(id);
+        setView('playbooks');
+      }, []);
+
+      const crumb = {
+        dashboard: ['Workspace', 'Dashboard'],
+        inventory: ['Workspace', 'Inventory'],
+        playbooks: ['Workspace', 'Playbooks'],
+        adhoc: ['Workspace', 'Ad-hoc'],
+        history: ['Workspace', 'Runs'],
+        vault: ['Workspace', 'Secrets']
+      }[view];
+
+      const ViewNode = (() => {
+        switch (view) {
+          case 'dashboard': return <window.DashboardView onNavigate={setView} onOpenAdhoc={openAdhoc} onRunPlaybook={runPlaybook}/>;
+          case 'inventory': return <window.InventoryView onOpenAdhoc={openAdhoc}/>;
+          case 'playbooks': return <window.PlaybooksView initialId={playbookId} onRun={(id) => openAdhoc({ target: 'all', module: 'ansible.builtin.ping' })}/>;
+          case 'adhoc': return <window.AdhocView prefill={adhocPrefill}/>;
+          case 'history': return <window.HistoryView/>;
+          case 'vault': return <window.VaultView/>;
+          default: return null;
+        }
+      })();
+
+      const layoutClass = `app ${tweaks.navLayout === 'topnav' ? 'topnav-layout' : ''}`;
+
+      return (
+        <div className={layoutClass} data-screen-label={`Relay · ${view}`}>
+          {tweaks.navLayout === 'sidebar' && <window.Sidebar view={view} setView={setView}/>}
+          <div className="app-main">
+            <window.TopNav
+              view={view} setView={setView}
+              onOpenPalette={openPalette}
+              breadcrumb={crumb}
+              activeName={activeName}
+              onManage={() => setManagerOpen(true)}
+            />
+            {tweaks.navLayout === 'topnav' && <window.TopLayoutNav view={view} setView={setView}/>}
+            <div style={{ minHeight: 0, overflow: 'auto' }}>
+              {ViewNode}
+            </div>
+          </div>
+
+          <window.CommandPalette
+            open={paletteOpen}
+            onClose={() => setPaletteOpen(false)}
+            onNavigate={setView}
+            onOpenAdhoc={openAdhoc}
+            onRunPlaybook={runPlaybook}
+          />
+
+          <window.ConnectionManager
+            open={managerOpen}
+            onClose={() => setManagerOpen(false)}
+            onActivated={() => { setManagerOpen(false); onReload({ keepManagerOpen: false }); }}
+            initialServers={servers}
+            initialActiveId={activeId}
+          />
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<Boot/>);
+  </script>
+</body>
+</html>
