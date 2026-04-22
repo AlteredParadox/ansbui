@@ -55,21 +55,6 @@ function suggestedTargets(hosts, groups, descendants) {
   return [{ id: 'all', count: hosts.length }, ...sorted];
 }
 
-// EVENT_MAPPING translates a backend event type into the terminal line
-// kind. "done" is intentionally missing here — it's handled in the
-// run-finish branch below so we don't log it twice.
-const EVENT_MAPPING = {
-  ok: { t: 'ok', state: 'ok' },
-  changed: { t: 'changed', state: 'changed' },
-  fail: { t: 'fail', state: 'failed' },
-  recap: { t: 'recap' },
-  'recap-warn': { t: 'recap-warn' },
-  'recap-fail': { t: 'recap-fail' },
-  meta: { t: 'meta' },
-  line: { t: 'meta' },
-  error: { t: 'fail' }
-};
-
 const STATE_TO_CLASS = { ok: 'ok', changed: 'changed', failed: 'err' };
 
 function hstickClass(state) {
@@ -134,7 +119,6 @@ function AdhocView({ prefill }) {
     setHostStates(initial);
     setRunning(true);
 
-    const startTime = Date.now();
     const log = [];
     const appendLog = (entry) => { log.push(entry); setOutput([...log]); };
 
@@ -148,52 +132,22 @@ function AdhocView({ prefill }) {
       timeout: Number(timeout) || 0
     };
 
-    const stream = globalThis.RelayAPI.openStream('adhoc', payload);
-    streamRef.current = stream;
-
     const idByName = {};
     resolvedHosts.forEach(h => { idByName[h.name] = h.id; });
-
     const markHost = (name, state) => {
       if (!name) return;
       setHostStates(prev => ({ ...prev, [idByName[name] || name]: state }));
     };
 
-    let finished = false;
-    const finish = (text) => {
-      if (finished) return;
-      finished = true;
-      appendLog({ t: 'done', text });
-      setRunning(false);
-      stream.close();
-      streamRef.current = null;
-    };
-
-    stream.onEvent((evt) => {
-      const mapping = EVENT_MAPPING[evt.type];
-      if (mapping) {
-        appendLog({ t: mapping.t, text: evt.text || '' });
-        if (mapping.state) markHost(evt.host, mapping.state);
-        return;
+    streamRef.current = globalThis.RelayAPI.runCommand('adhoc', payload, {
+      onEntry: appendLog,
+      onHostState: markHost,
+      onDone: () => setRunning(false),
+      onClose: () => { setRunning(false); streamRef.current = null; },
+      onError: () => {
+        appendLog({ t: 'fail', text: 'WebSocket error — check backend logs.' });
+        setRunning(false);
       }
-      if (evt.type === 'done') {
-        finish(evt.text || `completed in ${((Date.now() - startTime) / 1000).toFixed(1)}s`);
-        return;
-      }
-      if (evt.type === 'run-complete') {
-        // The backend has already sent a 'done' event with the wall
-        // time. 'run-complete' is just the persisted run record's id
-        // + final status — no need for another log line.
-        finish(`completed in ${((Date.now() - startTime) / 1000).toFixed(1)}s`);
-      }
-    });
-    stream.onClose(() => {
-      setRunning(false);
-      streamRef.current = null;
-    });
-    stream.onError(() => {
-      appendLog({ t: 'fail', text: 'WebSocket error — check backend logs.' });
-      setRunning(false);
     });
   };
 

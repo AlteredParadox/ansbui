@@ -2,18 +2,6 @@
 
 const { useState: useStateP, useMemo: useMemoP, useEffect: useEffectP, useRef: useRefP } = React;
 
-const PB_EVENT_MAPPING = {
-  ok: 'ok',
-  changed: 'changed',
-  fail: 'fail',
-  recap: 'recap',
-  'recap-warn': 'recap-warn',
-  'recap-fail': 'recap-fail',
-  meta: 'meta',
-  line: 'meta',
-  error: 'fail'
-};
-
 // Bounded regexes — each anchors to a single YAML line and avoids
 // nested quantifiers / overlapping alternation, keeping them linear
 // (Sonar S5852).
@@ -536,7 +524,6 @@ function PlaybookRunner({ open, pb, seed, onClose }) {
   const run = () => {
     if (running || !pb || !globalThis.RelayAPI) return;
     setOutput([]); setRunning(true);
-    const start = Date.now();
     const log = [];
     const appendLog = (entry) => { log.push(entry); setOutput([...log]); };
 
@@ -559,34 +546,14 @@ function PlaybookRunner({ open, pb, seed, onClose }) {
       become
     };
 
-    const stream = globalThis.RelayAPI.openStream('playbook', payload);
-    streamRef.current = stream;
-
-    let finished = false;
-    const finish = (text) => {
-      if (finished) return;
-      finished = true;
-      appendLog({ t: 'done', text });
-      setRunning(false);
-      stream.close();
-      streamRef.current = null;
-    };
-
-    stream.onEvent((evt) => {
-      const kind = PB_EVENT_MAPPING[evt.type];
-      if (kind) { appendLog({ t: kind, text: evt.text || '' }); return; }
-      if (evt.type === 'done') {
-        finish(evt.text || `completed in ${((Date.now() - start) / 1000).toFixed(1)}s`);
-        return;
+    streamRef.current = globalThis.RelayAPI.runCommand('playbook', payload, {
+      onEntry: appendLog,
+      onDone: () => setRunning(false),
+      onClose: () => { setRunning(false); streamRef.current = null; },
+      onError: () => {
+        appendLog({ t: 'fail', text: 'WebSocket error — check backend logs.' });
+        setRunning(false);
       }
-      if (evt.type === 'run-complete') {
-        finish(`completed in ${((Date.now() - start) / 1000).toFixed(1)}s`);
-      }
-    });
-    stream.onClose(() => { setRunning(false); streamRef.current = null; });
-    stream.onError(() => {
-      appendLog({ t: 'fail', text: 'WebSocket error — check backend logs.' });
-      setRunning(false);
     });
   };
 

@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/AlteredParadox/relay/internal/ansible"
+	"github.com/AlteredParadox/relay/internal/config"
+	"github.com/AlteredParadox/relay/internal/sshpool"
 	"github.com/gorilla/websocket"
 )
 
@@ -28,7 +30,26 @@ func sameOriginCheck(r *http.Request) bool {
 	return strings.HasSuffix(origin, "//"+host) || strings.HasSuffix(origin, "://"+host)
 }
 
-func (s *Server) wsAdhoc(w http.ResponseWriter, r *http.Request) {
+// runnerFunc is the shape of ansible.RunAdhoc / ansible.RunPlaybook:
+// blocking, streams events into `out`, owns closing the channel.
+type runnerFunc[T any] func(ctx context.Context, pool *sshpool.Pool, srv config.Server, req T, out chan<- ansible.Event) error
+
+// buildRecordFunc maps the decoded request into the RunRecord shape
+// that goes to the persistence layer. Kept separate so each handler
+// only has to know how to describe itself.
+type buildRecordFunc[T any] func(srv config.Server, req *T, id string) ansible.RunRecord
+
+// runWebSocket is the shared WS handler behind /api/adhoc/stream and
+// /api/playbook/stream. It owns the handshake, request decoding,
+// cancellation wiring, logging, and persistence; the only per-kind
+// work is the RunRecord shape and which ansible.RunX function to call.
+func runWebSocket[T any](
+	s *Server,
+	w http.ResponseWriter, r *http.Request,
+	kind string,
+	buildRecord buildRecordFunc[T],
+	run runnerFunc[T],
+) {
 	srv, err := s.resolveServer(r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
@@ -40,7 +61,7 @@ func (s *Server) wsAdhoc(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.Close()
 
-	var req ansible.AdhocRequest
+	var req T
 	if err := conn.ReadJSON(&req); err != nil {
 		_ = conn.WriteJSON(ansible.Event{Type: "error", Text: "decode request: " + err.Error()})
 		return
@@ -50,9 +71,30 @@ func (s *Server) wsAdhoc(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	watchPeer(conn, cancel)
 
+	record := buildRecord(srv, &req, ansible.NewID())
+	_ = conn.WriteJSON(map[string]string{"type": "run-id", "text": record.ID})
+
 	events := make(chan ansible.Event, 64)
-	run := ansible.RunRecord{
-		ID:        ansible.NewID(),
+	go func() {
+		if err := run(ctx, s.Pool, srv, req, events); err != nil {
+			log.Printf("%s run: %v", kind, err)
+		}
+	}()
+
+	consumeAndPersist(conn, events, &record, s.Runs)
+}
+
+func (s *Server) wsAdhoc(w http.ResponseWriter, r *http.Request) {
+	runWebSocket(s, w, r, "adhoc", buildAdhocRecord, ansible.RunAdhoc)
+}
+
+func (s *Server) wsPlaybook(w http.ResponseWriter, r *http.Request) {
+	runWebSocket(s, w, r, "playbook", buildPlaybookRecord, ansible.RunPlaybook)
+}
+
+func buildAdhocRecord(srv config.Server, req *ansible.AdhocRequest, id string) ansible.RunRecord {
+	return ansible.RunRecord{
+		ID:        id,
 		Kind:      "adhoc",
 		Server:    srv.Name,
 		Target:    req.Target,
@@ -66,42 +108,11 @@ func (s *Server) wsAdhoc(w http.ResponseWriter, r *http.Request) {
 		Who:       "ui",
 		StartedAt: time.Now().UTC(),
 	}
-	_ = conn.WriteJSON(map[string]string{"type": "run-id", "text": run.ID})
-
-	go func() {
-		if err := ansible.RunAdhoc(ctx, s.Pool, srv, req, events); err != nil {
-			log.Printf("adhoc run: %v", err)
-		}
-	}()
-
-	consumeAndPersist(conn, events, &run, s.Runs)
 }
 
-func (s *Server) wsPlaybook(w http.ResponseWriter, r *http.Request) {
-	srv, err := s.resolveServer(r)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err)
-		return
-	}
-	conn, err := wsUpgrader.Upgrade(w, r, nil)
-	if err != nil {
-		return
-	}
-	defer conn.Close()
-
-	var req ansible.PlaybookRequest
-	if err := conn.ReadJSON(&req); err != nil {
-		_ = conn.WriteJSON(ansible.Event{Type: "error", Text: "decode request: " + err.Error()})
-		return
-	}
-
-	ctx, cancel := context.WithCancel(r.Context())
-	defer cancel()
-	watchPeer(conn, cancel)
-
-	events := make(chan ansible.Event, 64)
-	run := ansible.RunRecord{
-		ID:        ansible.NewID(),
+func buildPlaybookRecord(srv config.Server, req *ansible.PlaybookRequest, id string) ansible.RunRecord {
+	return ansible.RunRecord{
+		ID:        id,
 		Kind:      "playbook",
 		Server:    srv.Name,
 		Playbook:  req.Path,
@@ -115,15 +126,6 @@ func (s *Server) wsPlaybook(w http.ResponseWriter, r *http.Request) {
 		Who:       "ui",
 		StartedAt: time.Now().UTC(),
 	}
-	_ = conn.WriteJSON(map[string]string{"type": "run-id", "text": run.ID})
-
-	go func() {
-		if err := ansible.RunPlaybook(ctx, s.Pool, srv, req, events); err != nil {
-			log.Printf("playbook run: %v", err)
-		}
-	}()
-
-	consumeAndPersist(conn, events, &run, s.Runs)
 }
 
 // watchPeer cancels ctx if the websocket peer disconnects or sends a

@@ -62,6 +62,59 @@
     };
   };
 
+  // Ansible-style event types are the same for ad-hoc and playbook
+  // runs, so both views translate them into terminal log entries
+  // using the same table.
+  const DEFAULT_EVENT_MAPPING = {
+    ok: { t: 'ok', state: 'ok' },
+    changed: { t: 'changed', state: 'changed' },
+    fail: { t: 'fail', state: 'failed' },
+    recap: { t: 'recap' },
+    'recap-warn': { t: 'recap-warn' },
+    'recap-fail': { t: 'recap-fail' },
+    meta: { t: 'meta' },
+    line: { t: 'meta' },
+    error: { t: 'fail' }
+  };
+
+  // runCommand wraps openStream with the finish-latch, event
+  // classification, and done/run-complete deduplication that both
+  // Adhoc and Playbooks views need. Callers only supply their own
+  // onEntry / onHostState / onDone / onClose / onError and get back
+  // a handle with close() for cleanup on unmount.
+  api.runCommand = (kind, payload, handlers) => {
+    const { onEntry, onHostState, onDone, onClose, onError } = handlers || {};
+    const mapping = (handlers && handlers.mapping) || DEFAULT_EVENT_MAPPING;
+    const started = Date.now();
+    const stream = api.openStream(kind, payload);
+    let finished = false;
+    const finish = (text) => {
+      if (finished) return;
+      finished = true;
+      onEntry?.({ t: 'done', text });
+      onDone?.();
+      stream.close();
+    };
+    stream.onEvent((evt) => {
+      const m = mapping[evt.type];
+      if (m) {
+        onEntry?.({ t: m.t, text: evt.text || '' });
+        if (m.state) onHostState?.(evt.host, m.state);
+        return;
+      }
+      if (evt.type === 'done') {
+        finish(evt.text || `completed in ${((Date.now() - started) / 1000).toFixed(1)}s`);
+        return;
+      }
+      if (evt.type === 'run-complete') {
+        finish(`completed in ${((Date.now() - started) / 1000).toFixed(1)}s`);
+      }
+    });
+    stream.onClose(() => onClose?.());
+    stream.onError(() => onError?.());
+    return { close: () => stream.close() };
+  };
+
   // Bootstrap globalThis.AnsibleData with the shape the views expect.
   api.bootstrap = async () => {
     const [inv, pbs, runs] = await Promise.all([
