@@ -48,9 +48,9 @@ function DashboardView({ onNavigate, onOpenAdhoc }) {
   const [refreshing, setRefreshing] = React.useState(false);
 
   const reload = async () => {
-    if (!globalThis.RelayAPI || refreshing) return;
+    if (!globalThis.AnsbuiAPI || refreshing) return;
     setRefreshing(true);
-    try { await globalThis.RelayAPI.bootstrap(); } finally { setRefreshing(false); }
+    try { await globalThis.AnsbuiAPI.bootstrap(); } finally { setRefreshing(false); }
   };
 
   const recentRuns = RUNS.slice(0, 6);

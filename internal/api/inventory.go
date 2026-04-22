@@ -7,9 +7,9 @@ import (
 	"log"
 	"net/http"
 
-	"github.com/AlteredParadox/relay/internal/ansible"
-	"github.com/AlteredParadox/relay/internal/config"
-	"github.com/AlteredParadox/relay/internal/prom"
+	"github.com/AlteredParadox/ansbui/internal/ansible"
+	"github.com/AlteredParadox/ansbui/internal/config"
+	"github.com/AlteredParadox/ansbui/internal/prom"
 )
 
 func (s *Server) resolveServer(r *http.Request) (config.Server, error) {

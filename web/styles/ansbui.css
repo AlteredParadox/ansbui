@@ -1,4 +1,4 @@
-/* Relay-specific additions to the design bundle's app.css. Keep this
+/* ansbui-specific additions to the design bundle's app.css. Keep this
    file small — new components only; no overrides of upstream tokens. */
 
 /* ===== Boot screen ===== */
@@ -118,7 +118,7 @@
    pseudo-element for the scrim, dropping the old onMouseDown div that
    triggered Sonar S6819/S6847. */
 
-dialog.relay-dialog {
+dialog.ansbui-dialog {
   border: 0;
   padding: 0;
   color: inherit;
@@ -126,7 +126,7 @@ dialog.relay-dialog {
   max-width: none;
   max-height: none;
 }
-dialog.relay-dialog::backdrop {
+dialog.ansbui-dialog::backdrop {
   background: var(--scrim);
   animation: fadein 140ms var(--ease);
 }
@@ -139,7 +139,7 @@ dialog.relay-dialog::backdrop {
    IMPORTANT: layout rules are scoped to [open] so a closed dialog stays
    at its user-agent display:none. Otherwise the dialog sits on top of
    the page even when not shown. */
-dialog.relay-dialog-center[open] {
+dialog.ansbui-dialog-center[open] {
   position: fixed;
   inset: 0;
   width: 100vw;
@@ -154,7 +154,7 @@ dialog.relay-dialog-center[open] {
 
 /* Host drawer: the dialog itself is the 460px right-hand panel.
    Same [open] scoping as above. */
-dialog.relay-dialog-drawer[open] {
+dialog.ansbui-dialog-drawer[open] {
   position: fixed;
   inset: 0 0 0 auto;
   width: 460px;
@@ -162,10 +162,10 @@ dialog.relay-dialog-drawer[open] {
   margin: 0;
   display: block;
 }
-dialog.relay-dialog-drawer[open] > * { height: 100%; }
+dialog.ansbui-dialog-drawer[open] > * { height: 100%; }
 
 /* Playbook run dialog — large panel with a live terminal. */
-dialog.relay-dialog-runner[open] {
+dialog.ansbui-dialog-runner[open] {
   position: fixed;
   inset: 5vh 5vw;
   width: 90vw;

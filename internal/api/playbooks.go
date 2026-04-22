@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"net/http"
 
-	"github.com/AlteredParadox/relay/internal/ansible"
+	"github.com/AlteredParadox/ansbui/internal/ansible"
 )
 
 func (s *Server) listPlaybooks(w http.ResponseWriter, r *http.Request) {

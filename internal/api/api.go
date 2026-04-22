@@ -14,9 +14,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/AlteredParadox/relay/internal/ansible"
-	"github.com/AlteredParadox/relay/internal/config"
-	"github.com/AlteredParadox/relay/internal/sshpool"
+	"github.com/AlteredParadox/ansbui/internal/ansible"
+	"github.com/AlteredParadox/ansbui/internal/config"
+	"github.com/AlteredParadox/ansbui/internal/sshpool"
 )
 
 // Server is the HTTP API + static bundle.

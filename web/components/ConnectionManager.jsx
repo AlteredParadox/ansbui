@@ -35,7 +35,7 @@ function ConnectionManager({ open, onClose, onActivated, initialServers, initial
   const [tab, setTab] = useStateCM('servers');
 
   const refreshServers = useCallbackCM(async () => {
-    const res = await globalThis.RelayAPI.listServers();
+    const res = await globalThis.AnsbuiAPI.listServers();
     setServers(res.servers || []);
     setActiveId(res.activeServerId || '');
   }, []);
@@ -43,7 +43,7 @@ function ConnectionManager({ open, onClose, onActivated, initialServers, initial
   useEffectCM(() => {
     if (!open) return;
     refreshServers();
-    globalThis.RelayAPI.getSettings().then(s => {
+    globalThis.AnsbuiAPI.getSettings().then(s => {
       setPromUrl(s.prometheusUrl || '');
       setPromLabel(s.prometheusHostLabel || 'instance');
     }).catch(() => {});
@@ -72,11 +72,11 @@ function ConnectionManager({ open, onClose, onActivated, initialServers, initial
     setBusy(true); setError('');
     try {
       const payload = { ...form, port: Number(form.port) || 22 };
-      const saved = await globalThis.RelayAPI.upsertServer(payload);
+      const saved = await globalThis.AnsbuiAPI.upsertServer(payload);
       await refreshServers();
       setForm(EMPTY_FORM);
       if (!activeId) {
-        await globalThis.RelayAPI.activateServer(saved.id);
+        await globalThis.AnsbuiAPI.activateServer(saved.id);
         await refreshServers();
         // Tell the parent (Boot/App) a server is now active so it can
         // transition from picker to ready. Without this the modal stays
@@ -90,7 +90,7 @@ function ConnectionManager({ open, onClose, onActivated, initialServers, initial
   const activate = async (id) => {
     setBusy(true); setError('');
     try {
-      await globalThis.RelayAPI.activateServer(id);
+      await globalThis.AnsbuiAPI.activateServer(id);
       await refreshServers();
       onActivated?.(id);
     } catch (e) { setError(e.message); }
@@ -101,7 +101,7 @@ function ConnectionManager({ open, onClose, onActivated, initialServers, initial
     if (!globalThis.confirm('Delete this connection?')) return;
     setBusy(true); setError('');
     try {
-      await globalThis.RelayAPI.deleteServer(id);
+      await globalThis.AnsbuiAPI.deleteServer(id);
       await refreshServers();
     } catch (e) { setError(e.message); }
     finally { setBusy(false); }
@@ -110,7 +110,7 @@ function ConnectionManager({ open, onClose, onActivated, initialServers, initial
   const testConnection = async (id) => {
     setBusy(true); setError(''); setTestResult(null);
     try {
-      const res = await globalThis.RelayAPI.testServer(id);
+      const res = await globalThis.AnsbuiAPI.testServer(id);
       setTestResult(res);
     } catch (e) { setError(e.message); }
     finally { setBusy(false); }
@@ -119,7 +119,7 @@ function ConnectionManager({ open, onClose, onActivated, initialServers, initial
   const saveSettings = async () => {
     setBusy(true); setError('');
     try {
-      await globalThis.RelayAPI.setSettings({
+      await globalThis.AnsbuiAPI.setSettings({
         prometheusUrl: promUrl.trim(),
         prometheusHostLabel: promLabel.trim() || 'instance'
       });
@@ -132,7 +132,7 @@ function ConnectionManager({ open, onClose, onActivated, initialServers, initial
   return (
     <dialog
       ref={dialogRef}
-      className="relay-dialog relay-dialog-center"
+      className="ansbui-dialog ansbui-dialog-center"
       aria-label="Connections and settings"
       {...globalThis.dialogBackdropHandlers(dialogRef, onClose)}
     >
@@ -216,7 +216,7 @@ function SettingsTab({ promUrl, promLabel, busy, onChangeUrl, onChangeLabel, onS
   const runProbe = async () => {
     setProbing(true);
     try {
-      const res = await globalThis.RelayAPI.metrics();
+      const res = await globalThis.AnsbuiAPI.metrics();
       setProbe(res);
     } catch (e) {
       setProbe({ error: e.message });

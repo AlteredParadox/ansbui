@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"net/http"
 
-	"github.com/AlteredParadox/relay/internal/ansible"
+	"github.com/AlteredParadox/ansbui/internal/ansible"
 )
 
 // /api/vault — list vault-encrypted files discovered in the active

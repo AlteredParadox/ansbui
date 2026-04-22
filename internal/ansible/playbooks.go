@@ -11,8 +11,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/AlteredParadox/relay/internal/config"
-	"github.com/AlteredParadox/relay/internal/sshpool"
+	"github.com/AlteredParadox/ansbui/internal/config"
+	"github.com/AlteredParadox/ansbui/internal/sshpool"
 )
 
 // Playbook is a summary of a single YAML playbook file on the remote

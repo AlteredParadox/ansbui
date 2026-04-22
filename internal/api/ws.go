@@ -7,9 +7,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/AlteredParadox/relay/internal/ansible"
-	"github.com/AlteredParadox/relay/internal/config"
-	"github.com/AlteredParadox/relay/internal/sshpool"
+	"github.com/AlteredParadox/ansbui/internal/ansible"
+	"github.com/AlteredParadox/ansbui/internal/config"
+	"github.com/AlteredParadox/ansbui/internal/sshpool"
 	"github.com/gorilla/websocket"
 )
 

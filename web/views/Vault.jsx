@@ -18,10 +18,10 @@ function VaultView() {
   const [openPathOpen, setOpenPathOpen] = useStateV(false);
 
   const reload = async () => {
-    if (!globalThis.RelayAPI) return;
+    if (!globalThis.AnsbuiAPI) return;
     setLoading(true); setError('');
     try {
-      const res = await globalThis.RelayAPI.listVaultFiles();
+      const res = await globalThis.AnsbuiAPI.listVaultFiles();
       setFiles(res.files || []);
       setWorkDir(res.workDir || '');
     } catch (e) { setError(e.message); }
@@ -177,7 +177,7 @@ function VaultUnlockDialog({ open, file, onClose }) {
     if (!file || !password) { setError('Password is required.'); return; }
     setBusy(true); setError('');
     try {
-      const res = await globalThis.RelayAPI.viewVault(file.path, password);
+      const res = await globalThis.AnsbuiAPI.viewVault(file.path, password);
       setPlaintext(res.plaintext || '');
       setDraft(res.plaintext || '');
     } catch (e) { setError(e.message); }
@@ -188,7 +188,7 @@ function VaultUnlockDialog({ open, file, onClose }) {
     if (!file || !password) { setError('Password is required.'); return; }
     setBusy(true); setError('');
     try {
-      await globalThis.RelayAPI.writeVault(file.path, password, draft);
+      await globalThis.AnsbuiAPI.writeVault(file.path, password, draft);
       setPlaintext(draft);
       setEditing(false);
     } catch (e) { setError(e.message); }
@@ -199,7 +199,7 @@ function VaultUnlockDialog({ open, file, onClose }) {
   const unlocked = plaintext != null;
 
   return (
-    <globalThis.RelayCenterDialog
+    <globalThis.AnsbuiCenterDialog
       open={open}
       onClose={onClose}
       title={file.name}
@@ -270,7 +270,7 @@ function VaultUnlockDialog({ open, file, onClose }) {
           </div>
         </>
       )}
-    </globalThis.RelayCenterDialog>
+    </globalThis.AnsbuiCenterDialog>
   );
 }
 
@@ -295,14 +295,14 @@ function VaultNewDialog({ open, onClose, onCreated }) {
     if (password !== confirm) { setError('Passwords do not match.'); return; }
     setBusy(true);
     try {
-      await globalThis.RelayAPI.writeVault(path.trim(), password, content);
+      await globalThis.AnsbuiAPI.writeVault(path.trim(), password, content);
       onCreated?.(path.trim());
     } catch (e) { setError(e.message); }
     finally { setBusy(false); }
   };
 
   return (
-    <globalThis.RelayCenterDialog
+    <globalThis.AnsbuiCenterDialog
       open={open}
       onClose={onClose}
       title="New vault file"
@@ -362,7 +362,7 @@ function VaultNewDialog({ open, onClose, onCreated }) {
         </button>
         <button type="button" className="btn small" disabled={busy} onClick={onClose}>Cancel</button>
       </div>
-    </globalThis.RelayCenterDialog>
+    </globalThis.AnsbuiCenterDialog>
   );
 }
 
@@ -383,7 +383,7 @@ function VaultOpenByPathDialog({ open, workDir, onClose, onOpen }) {
   };
 
   return (
-    <globalThis.RelayCenterDialog
+    <globalThis.AnsbuiCenterDialog
       open={open}
       onClose={onClose}
       title="Open vault file by path"
@@ -409,7 +409,7 @@ function VaultOpenByPathDialog({ open, workDir, onClose, onOpen }) {
           You'll be prompted for the vault password on the next screen. The path must live inside the server's workDir — '..' traversal is rejected by the backend.
         </div>
       </form>
-    </globalThis.RelayCenterDialog>
+    </globalThis.AnsbuiCenterDialog>
   );
 }
 

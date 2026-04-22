@@ -79,7 +79,7 @@ function Sidebar({ view, setView, collapsed }) {
           </svg>
         </div>
         <div className="brand-text">
-          <div className="brand-name">Relay</div>
+          <div className="brand-name">ansbui</div>
           <div className="brand-sub mono">ops</div>
         </div>
       </div>
@@ -134,7 +134,7 @@ function TopNav({ onOpenPalette, breadcrumb, activeName, onManage }) {
         <div className="tn-sep" />
         <div className="tn-status">
           <span className="dot ok" />
-          <span className="mono">relay</span>
+          <span className="mono">ansbui</span>
         </div>
       </div>
     </header>
@@ -173,7 +173,7 @@ function dialogBackdropHandlers(ref, onClose) {
   };
 }
 
-// RelayCenterDialog is the shell used by every top-centred modal in
+// AnsbuiCenterDialog is the shell used by every top-centred modal in
 // the app — connection manager, command palette, ad-hoc recent /
 // save-as-playbook, playbook history / import / run-limit picker.
 // The shell owns:
@@ -184,7 +184,7 @@ function dialogBackdropHandlers(ref, onClose) {
 //     into children
 // Extra props on the outer <dialog> can be threaded via dialogProps
 // (the command palette uses this for its global onKeyDown).
-function RelayCenterDialog({
+function AnsbuiCenterDialog({
   open,
   onClose,
   title,
@@ -199,7 +199,7 @@ function RelayCenterDialog({
   return (
     <dialog
       ref={dialogRef}
-      className="relay-dialog relay-dialog-center"
+      className="ansbui-dialog ansbui-dialog-center"
       aria-label={ariaLabel || (typeof title === 'string' ? title : undefined)}
       {...dialogBackdropHandlers(dialogRef, onClose)}
       {...(dialogProps || {})}
@@ -230,4 +230,4 @@ globalThis.TopLayoutNav = TopLayoutNav;
 globalThis.TWEAK_DEFAULTS = TWEAK_DEFAULTS;
 globalThis.useDialog = useDialog;
 globalThis.dialogBackdropHandlers = dialogBackdropHandlers;
-globalThis.RelayCenterDialog = RelayCenterDialog;
+globalThis.AnsbuiCenterDialog = AnsbuiCenterDialog;

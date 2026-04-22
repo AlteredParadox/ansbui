@@ -1,4 +1,4 @@
-# Relay — Ansible Control Plane UI
+# ansbui — Ansible Control Plane UI
 
 A single-binary web UI for an Ansible control node.
 
@@ -11,8 +11,8 @@ A single-binary web UI for an Ansible control node.
 
 ```sh
 sudo apt install -y golang-go openssh-client
-go build -o relay .
-./relay              # default: -addr :8787 (all interfaces)
+go build -o ansbui .
+./ansbui              # default: -addr :8787 (all interfaces)
 ```
 
 Open `http://<host>:8787/` in a browser. On first load you'll be prompted to add an ansible server — the SSH coordinates of a remote machine that already has `ansible` installed.
@@ -20,12 +20,12 @@ Open `http://<host>:8787/` in a browser. On first load you'll be prompted to add
 To restrict to loopback (useful if you're accessing via an SSH tunnel):
 
 ```sh
-./relay -addr 127.0.0.1:8787
+./ansbui -addr 127.0.0.1:8787
 ```
 
 ## Configuration
 
-Relay writes to `~/.config/relay/config.json` (and `runs.json`). The UI is the only writer — do not hand-edit while the binary is running.
+ansbui writes to `~/.config/ansbui/config.json` (and `runs.json`). The UI is the only writer — do not hand-edit while the binary is running.
 
 ### Ansible server fields
 
@@ -56,12 +56,12 @@ web/                    # static bundle (embedded)
 
 ## Security posture
 
-- **Relay has no built-in authentication.** Anyone who can reach the listen port can drive `ansible-playbook` as the configured SSH user. When bound to a non-loopback address, the binary logs a warning on startup. Put it behind an SSH tunnel (`ssh -L 8787:localhost:8787 host`), a VPN, or a reverse proxy (Caddy / Nginx) with auth before exposing to untrusted networks.
+- **ansbui has no built-in authentication.** Anyone who can reach the listen port can drive `ansible-playbook` as the configured SSH user. When bound to a non-loopback address, the binary logs a warning on startup. Put it behind an SSH tunnel (`ssh -L 8787:localhost:8787 host`), a VPN, or a reverse proxy (Caddy / Nginx) with auth before exposing to untrusted networks.
 - SSH auth to the ansible controller is key-based only (agent or on-disk key) — no password prompt.
 - The websocket upgrader enforces same-origin.
 - Playbook paths are validated against `^[A-Za-z0-9._-]+$` per segment, blocking `..` traversal.
 - Ansible argument keys are validated; values are shell-quoted.
-- The binary writes config with mode `0600` in `~/.config/relay/`.
+- The binary writes config with mode `0600` in `~/.config/ansbui/`.
 
 ## CI
 

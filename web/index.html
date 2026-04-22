@@ -3,13 +3,13 @@
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=1280"/>
-  <title>Relay — Ansible Control Plane</title>
+  <title>ansbui — Ansible Control Plane</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;550;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="styles/tokens.css"/>
   <link rel="stylesheet" href="styles/app.css"/>
-  <link rel="stylesheet" href="styles/relay.css"/>
+  <link rel="stylesheet" href="styles/ansbui.css"/>
 </head>
 <body data-theme="dark" data-density="balanced">
   <div id="root"></div>
@@ -44,7 +44,7 @@
       const bootstrap = useCallback(async (options = {}) => {
         setError('');
         try {
-          const res = await window.RelayAPI.listServers();
+          const res = await window.AnsbuiAPI.listServers();
           setServers(res.servers || []);
           setActiveId(res.activeServerId || '');
           if (!res.activeServerId) {
@@ -52,7 +52,7 @@
             setShowManager(true);
             return;
           }
-          await window.RelayAPI.bootstrap();
+          await window.AnsbuiAPI.bootstrap();
           setPhase('ready');
           setShowManager(options.keepManagerOpen || false);
         } catch (e) {
@@ -71,7 +71,7 @@
               <div className="boot-brand">
                 <BrandMark/>
                 <div>
-                  <h1 className="boot-title">Relay</h1>
+                  <h1 className="boot-title">ansbui</h1>
                   <div className="boot-sub mono">connecting…</div>
                 </div>
               </div>
@@ -88,7 +88,7 @@
                 <div className="boot-brand">
                   <BrandMark/>
                   <div>
-                    <h1 className="boot-title">Relay</h1>
+                    <h1 className="boot-title">ansbui</h1>
                     <div className="boot-sub mono">select an ansible server to continue</div>
                   </div>
                 </div>
@@ -101,7 +101,7 @@
                 <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
                   {servers.map(s => (
                     <button key={s.id} className="btn" onClick={async () => {
-                      await window.RelayAPI.activateServer(s.id);
+                      await window.AnsbuiAPI.activateServer(s.id);
                       bootstrap();
                     }}>
                       <Icon name="server" size={13}/> {s.name}
@@ -139,13 +139,13 @@
     }
 
     function App({ activeId, servers, onReload }) {
-      const [view, setView] = useState(() => localStorage.getItem('relay.view') || 'dashboard');
+      const [view, setView] = useState(() => localStorage.getItem('ansbui.view') || 'dashboard');
       const [paletteOpen, setPaletteOpen] = useState(false);
       const [adhocPrefill, setAdhocPrefill] = useState(null);
       const [playbookId, setPlaybookId] = useState(null);
       const [managerOpen, setManagerOpen] = useState(false);
       const [tweaks, setTweaks] = useState(() => {
-        try { return { ...window.TWEAK_DEFAULTS, ...JSON.parse(localStorage.getItem('relay.tweaks') || '{}') }; }
+        try { return { ...window.TWEAK_DEFAULTS, ...JSON.parse(localStorage.getItem('ansbui.tweaks') || '{}') }; }
         catch { return { ...window.TWEAK_DEFAULTS }; }
       });
       const activeName = (servers.find(s => s.id === activeId) || {}).name || activeId;
@@ -154,10 +154,10 @@
         document.body.dataset.theme = tweaks.theme;
         document.body.dataset.density = tweaks.density;
         document.documentElement.style.setProperty('--accent-hue', tweaks.accentHue);
-        localStorage.setItem('relay.tweaks', JSON.stringify(tweaks));
+        localStorage.setItem('ansbui.tweaks', JSON.stringify(tweaks));
       }, [tweaks]);
 
-      useEffect(() => { localStorage.setItem('relay.view', view); }, [view]);
+      useEffect(() => { localStorage.setItem('ansbui.view', view); }, [view]);
 
       useEffect(() => {
         let gBuffer = 0;
@@ -229,7 +229,7 @@
       const layoutClass = `app ${tweaks.navLayout === 'topnav' ? 'topnav-layout' : ''}`;
 
       return (
-        <div className={layoutClass} data-screen-label={`Relay · ${view}`}>
+        <div className={layoutClass} data-screen-label={`ansbui · ${view}`}>
           {tweaks.navLayout === 'sidebar' && <window.Sidebar view={view} setView={setView}/>}
           <div className="app-main">
             <window.TopNav

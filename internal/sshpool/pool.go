@@ -19,7 +19,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/AlteredParadox/relay/internal/config"
+	"github.com/AlteredParadox/ansbui/internal/config"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
 )
@@ -222,7 +222,7 @@ func pingClient(c *ssh.Client) bool {
 	if c == nil {
 		return false
 	}
-	_, _, err := c.SendRequest("keepalive@relay", true, nil)
+	_, _, err := c.SendRequest("keepalive@ansbui", true, nil)
 	return err == nil
 }
 

@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"net/http"
 
-	"github.com/AlteredParadox/relay/internal/ansible"
+	"github.com/AlteredParadox/ansbui/internal/ansible"
 )
 
 func (s *Server) listRuns(w http.ResponseWriter, _ *http.Request) {

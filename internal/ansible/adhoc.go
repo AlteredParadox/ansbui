@@ -11,8 +11,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/AlteredParadox/relay/internal/config"
-	"github.com/AlteredParadox/relay/internal/sshpool"
+	"github.com/AlteredParadox/ansbui/internal/config"
+	"github.com/AlteredParadox/ansbui/internal/sshpool"
 )
 
 // AdhocRequest is a request to run `ansible <target> -m <module> -a

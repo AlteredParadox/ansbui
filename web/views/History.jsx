@@ -28,10 +28,10 @@ function HistoryView({ onOpenPlaybook, onRunPlaybook, onOpenAdhoc }) {
   const [error, setError] = useStateH('');
 
   useEffectH(() => {
-    if (!selectedId || !globalThis.RelayAPI) { setDetail(null); return; }
+    if (!selectedId || !globalThis.AnsbuiAPI) { setDetail(null); return; }
     let alive = true;
     setError('');
-    globalThis.RelayAPI.getRun(selectedId)
+    globalThis.AnsbuiAPI.getRun(selectedId)
       .then(d => { if (alive) setDetail(d); })
       .catch(e => { if (alive) { setDetail(null); setError(e.message); } });
     return () => { alive = false; };

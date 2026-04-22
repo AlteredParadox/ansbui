@@ -1,4 +1,4 @@
-module github.com/AlteredParadox/relay
+module github.com/AlteredParadox/ansbui
 
 go 1.25.0
 

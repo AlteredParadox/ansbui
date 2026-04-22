@@ -1,4 +1,4 @@
-// Relay — web UI for an Ansible control plane.
+// ansbui — web UI for an Ansible control plane.
 //
 // One Go binary that:
 //   1. Serves the embedded React/CSS bundle at /.
@@ -25,10 +25,10 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/AlteredParadox/relay/internal/ansible"
-	"github.com/AlteredParadox/relay/internal/api"
-	"github.com/AlteredParadox/relay/internal/config"
-	"github.com/AlteredParadox/relay/internal/sshpool"
+	"github.com/AlteredParadox/ansbui/internal/ansible"
+	"github.com/AlteredParadox/ansbui/internal/api"
+	"github.com/AlteredParadox/ansbui/internal/config"
+	"github.com/AlteredParadox/ansbui/internal/sshpool"
 )
 
 //go:embed all:web
@@ -79,7 +79,7 @@ func main() {
 	defer stop()
 
 	go func() {
-		log.Printf("Relay listening on http://%s", *addr)
+		log.Printf("ansbui listening on http://%s", *addr)
 		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Fatalf("http: %v", err)
 		}
@@ -93,10 +93,10 @@ func main() {
 }
 
 // warnIfExposed prints a startup warning when the listen address is
-// reachable from outside the loopback interface. Relay has no built-in
-// authentication yet — anyone who can reach the port can drive
-// ansible-playbook as the configured SSH user — so the operator needs
-// to know they're running it that way.
+// reachable from outside the loopback interface. ansbui has no
+// built-in authentication yet — anyone who can reach the port can
+// drive ansible-playbook as the configured SSH user — so the
+// operator needs to know they're running it that way.
 func warnIfExposed(addr string) {
 	host, _, err := net.SplitHostPort(addr)
 	if err != nil {
@@ -105,17 +105,20 @@ func warnIfExposed(addr string) {
 	}
 	host = strings.TrimSpace(host)
 	if host == "" || host == "0.0.0.0" || host == "::" {
-		log.Print("⚠  Relay is listening on all interfaces and has no built-in auth.")
+		log.Print("⚠  ansbui is listening on all interfaces and has no built-in auth.")
 		log.Print("⚠  Put it behind an SSH tunnel, VPN, or reverse proxy with auth before exposing to untrusted networks.")
 		return
 	}
 	ip := net.ParseIP(host)
 	if ip != nil && !ip.IsLoopback() {
-		log.Printf("⚠  Relay is bound to %s (non-loopback) without auth — restrict reachability to trusted networks.", host)
+		log.Printf("⚠  ansbui is bound to %s (non-loopback) without auth — restrict reachability to trusted networks.", host)
 	}
 }
 
 func runsPath() (string, error) {
+	if p := os.Getenv("ANSBUI_RUNS"); p != "" {
+		return p, nil
+	}
 	if p := os.Getenv("RELAY_RUNS"); p != "" {
 		return p, nil
 	}
@@ -127,5 +130,5 @@ func runsPath() (string, error) {
 		}
 		dir = filepath.Join(home, ".config")
 	}
-	return filepath.Join(dir, "relay", "runs.json"), nil
+	return filepath.Join(dir, "ansbui", "runs.json"), nil
 }

@@ -570,10 +570,10 @@ function InventoryView({ onOpenAdhoc }) {
   const [filters, setFilters] = useStateI({ tags: [], os: [] });
 
   const reload = async () => {
-    if (refreshing || !globalThis.RelayAPI) return;
+    if (refreshing || !globalThis.AnsbuiAPI) return;
     setRefreshing(true); setRefreshError('');
     try {
-      await globalThis.RelayAPI.bootstrap();
+      await globalThis.AnsbuiAPI.bootstrap();
       setRefreshTick(t => t + 1);
     } catch (e) {
       setRefreshError(e.message);
@@ -710,12 +710,12 @@ function HostDrawer({ host, onClose, onOpenAdhoc }) {
   const open = host != null;
   const dialogRef = globalThis.useDialog(open, onClose);
   if (!host) {
-    return <dialog ref={dialogRef} className="relay-dialog relay-dialog-drawer" aria-hidden="true"/>;
+    return <dialog ref={dialogRef} className="ansbui-dialog ansbui-dialog-drawer" aria-hidden="true"/>;
   }
   return (
     <dialog
       ref={dialogRef}
-      className="relay-dialog relay-dialog-drawer"
+      className="ansbui-dialog ansbui-dialog-drawer"
       aria-label={`Host ${host.name}`}
       {...globalThis.dialogBackdropHandlers(dialogRef, onClose)}
     >

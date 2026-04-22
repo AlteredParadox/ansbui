@@ -9,8 +9,8 @@ import (
 	"path"
 	"strings"
 
-	"github.com/AlteredParadox/relay/internal/config"
-	"github.com/AlteredParadox/relay/internal/sshpool"
+	"github.com/AlteredParadox/ansbui/internal/config"
+	"github.com/AlteredParadox/ansbui/internal/sshpool"
 	"golang.org/x/crypto/ssh"
 )
 

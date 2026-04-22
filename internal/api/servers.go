@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"net/http"
 
-	"github.com/AlteredParadox/relay/internal/config"
+	"github.com/AlteredParadox/ansbui/internal/config"
 )
 
 func (s *Server) listServers(w http.ResponseWriter, _ *http.Request) {

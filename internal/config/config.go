@@ -1,9 +1,13 @@
 // Package config persists the user's ansible server connections and app
 // preferences (e.g. the Prometheus URL used for live host metrics).
 //
-// The store is a single JSON file at $XDG_CONFIG_HOME/relay/config.json
-// (falling back to ~/.config/relay/config.json). Access is guarded by a
+// The store is a single JSON file at $XDG_CONFIG_HOME/ansbui/config.json
+// (falling back to ~/.config/ansbui/config.json). Access is guarded by a
 // mutex so API handlers can read and mutate it concurrently.
+//
+// The previous "relay" directory is picked up transparently on first
+// run so existing users don't lose their connections across the
+// rename; see migrateLegacyDir.
 package config
 
 import (
@@ -46,12 +50,14 @@ type Manager struct {
 }
 
 // New returns a Manager backed by the default config path. It creates the
-// file on first use with sensible defaults.
+// file on first use with sensible defaults, and promotes a legacy
+// ~/.config/relay directory (pre-rename) if it's present.
 func New() (*Manager, error) {
 	path, err := defaultPath()
 	if err != nil {
 		return nil, err
 	}
+	migrateLegacyDir(filepath.Dir(path))
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, fmt.Errorf("create config dir: %w", err)
 	}
@@ -62,7 +68,30 @@ func New() (*Manager, error) {
 	return m, nil
 }
 
+// legacyConfigDirName is the pre-rename directory the app used to
+// write to (when the binary was called "relay"). migrateLegacyDir
+// promotes it to the new location on first run so existing users
+// don't lose their server list / prometheus settings.
+const legacyConfigDirName = "relay"
+
+func migrateLegacyDir(newDir string) {
+	if _, err := os.Stat(newDir); err == nil {
+		return // new dir already exists, nothing to do
+	}
+	parent := filepath.Dir(newDir)
+	legacy := filepath.Join(parent, legacyConfigDirName)
+	if _, err := os.Stat(legacy); err != nil {
+		return
+	}
+	_ = os.Rename(legacy, newDir)
+}
+
 func defaultPath() (string, error) {
+	if p := os.Getenv("ANSBUI_CONFIG"); p != "" {
+		return p, nil
+	}
+	// Back-compat: users who set RELAY_CONFIG before the rename still
+	// work without changing their env.
 	if p := os.Getenv("RELAY_CONFIG"); p != "" {
 		return p, nil
 	}
@@ -74,7 +103,7 @@ func defaultPath() (string, error) {
 		}
 		dir = filepath.Join(home, ".config")
 	}
-	return filepath.Join(dir, "relay", "config.json"), nil
+	return filepath.Join(dir, "ansbui", "config.json"), nil
 }
 
 func (m *Manager) load() error {

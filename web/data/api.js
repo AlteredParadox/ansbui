@@ -1,4 +1,4 @@
-// Relay API client — populates globalThis.AnsibleData with data fetched
+// ansbui API client — populates globalThis.AnsibleData with data fetched
 // from the Go backend. The existing view scripts continue to read from
 // globalThis.AnsibleData; this module owns the fetches, WebSocket
 // streaming, and the bootstrap translation.
@@ -324,5 +324,5 @@
     return buckets;
   }
 
-  globalThis.RelayAPI = api;
+  globalThis.AnsbuiAPI = api;
 })();

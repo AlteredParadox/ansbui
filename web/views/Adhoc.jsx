@@ -118,7 +118,7 @@ function AdhocView({ prefill }) {
     || { id: moduleName.split('.').pop() || 'custom', name: moduleName, desc: '', args: [] };
 
   const run = () => {
-    if (running || !globalThis.RelayAPI) return;
+    if (running || !globalThis.AnsbuiAPI) return;
     setOutput([]);
     const initial = {};
     resolvedHosts.forEach(h => { initial[h.id] = 'pending'; });
@@ -145,7 +145,7 @@ function AdhocView({ prefill }) {
       setHostStates(prev => ({ ...prev, [idByName[name] || name]: state }));
     };
 
-    streamRef.current = globalThis.RelayAPI.runCommand('adhoc', payload, {
+    streamRef.current = globalThis.AnsbuiAPI.runCommand('adhoc', payload, {
       onEntry: appendLog,
       onHostState: markHost,
       onDone: () => setRunning(false),
@@ -444,7 +444,7 @@ function AdhocRecentDialog({ open, onClose, onPick }) {
   const data = globalThis.AnsibleData || {};
   const runs = (data.RUNS || []).filter(r => r.kind === 'adhoc');
   return (
-    <globalThis.RelayCenterDialog
+    <globalThis.AnsbuiCenterDialog
       open={open}
       onClose={onClose}
       title="Recent ad-hoc commands"
@@ -478,7 +478,7 @@ function AdhocRecentDialog({ open, onClose, onPick }) {
           ))}
         </div>
       )}
-    </globalThis.RelayCenterDialog>
+    </globalThis.AnsbuiCenterDialog>
   );
 }
 
@@ -513,18 +513,18 @@ function AdhocSavePlaybookDialog({ open, composition, onClose }) {
     setError('');
     const path = (filename || '').trim();
     if (!path) { setError('Filename is required.'); return; }
-    if (!globalThis.RelayAPI) return;
+    if (!globalThis.AnsbuiAPI) return;
     setBusy(true);
     try {
-      await globalThis.RelayAPI.savePlaybook(path, yaml);
-      await globalThis.RelayAPI.bootstrap();
+      await globalThis.AnsbuiAPI.savePlaybook(path, yaml);
+      await globalThis.AnsbuiAPI.bootstrap();
       setDone(true);
     } catch (e) { setError(e.message); }
     finally { setBusy(false); }
   };
 
   return (
-    <globalThis.RelayCenterDialog
+    <globalThis.AnsbuiCenterDialog
       open={open}
       onClose={onClose}
       title="Save as playbook"
@@ -565,7 +565,7 @@ function AdhocSavePlaybookDialog({ open, composition, onClose }) {
           </>
         )}
       </div>
-    </globalThis.RelayCenterDialog>
+    </globalThis.AnsbuiCenterDialog>
   );
 }
 

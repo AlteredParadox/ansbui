@@ -10,8 +10,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/AlteredParadox/relay/internal/config"
-	"github.com/AlteredParadox/relay/internal/sshpool"
+	"github.com/AlteredParadox/ansbui/internal/config"
+	"github.com/AlteredParadox/ansbui/internal/sshpool"
 )
 
 // Group mirrors the shape of `ansible-inventory --list` group records.

@@ -136,7 +136,7 @@ function CommandPalette({ open, onClose, onNavigate, onOpenAdhoc, onRunPlaybook 
   return (
     <dialog
       ref={dialogRef}
-      className="relay-dialog relay-dialog-center"
+      className="ansbui-dialog ansbui-dialog-center"
       aria-label="Command palette"
       {...globalThis.dialogBackdropHandlers(dialogRef, onClose)}
       onKeyDown={handleKey}

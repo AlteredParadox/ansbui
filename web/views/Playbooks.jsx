@@ -322,9 +322,9 @@ function PlaybooksView({ initialId, runnerPrefill }) {
     setError('');
     if (!pb) { setYaml(''); setDraft(''); return; }
     if (pb.yaml) { setYaml(pb.yaml); setDraft(pb.yaml); return; }
-    if (!pb.path || !globalThis.RelayAPI) return;
+    if (!pb.path || !globalThis.AnsbuiAPI) return;
     let alive = true;
-    globalThis.RelayAPI.getPlaybook(pb.path)
+    globalThis.AnsbuiAPI.getPlaybook(pb.path)
       .then(res => {
         if (!alive) return;
         pb.yaml = res.yaml || '';
@@ -341,10 +341,10 @@ function PlaybooksView({ initialId, runnerPrefill }) {
   const cancelEdit = () => { setDraft(yaml); setEditing(false); setError(''); };
 
   const savePlaybook = async () => {
-    if (!pb?.path || !globalThis.RelayAPI) return;
+    if (!pb?.path || !globalThis.AnsbuiAPI) return;
     setSaving(true); setError('');
     try {
-      await globalThis.RelayAPI.savePlaybook(pb.path, draft);
+      await globalThis.AnsbuiAPI.savePlaybook(pb.path, draft);
       pb.yaml = draft;
       setYaml(draft);
       setEditing(false);
@@ -464,7 +464,7 @@ function PlaybooksView({ initialId, runnerPrefill }) {
       <PlaybookHistoryDialog open={historyOpen} pb={pb} onClose={() => setHistoryOpen(false)}/>
       <PlaybookImportDialog open={importOpen} onClose={() => setImportOpen(false)} onImported={(newPath) => {
         setImportOpen(false);
-        globalThis.RelayAPI?.bootstrap().catch(() => {});
+        globalThis.AnsbuiAPI?.bootstrap().catch(() => {});
       }}/>
     </div>
   );
@@ -522,7 +522,7 @@ function PlaybookRunner({ open, pb, seed, onClose }) {
   }, [output]);
 
   const run = () => {
-    if (running || !pb || !globalThis.RelayAPI) return;
+    if (running || !pb || !globalThis.AnsbuiAPI) return;
     setOutput([]); setRunning(true);
     const log = [];
     const appendLog = (entry) => { log.push(entry); setOutput([...log]); };
@@ -546,7 +546,7 @@ function PlaybookRunner({ open, pb, seed, onClose }) {
       become
     };
 
-    streamRef.current = globalThis.RelayAPI.runCommand('playbook', payload, {
+    streamRef.current = globalThis.AnsbuiAPI.runCommand('playbook', payload, {
       onEntry: appendLog,
       onDone: () => setRunning(false),
       onClose: () => { setRunning(false); streamRef.current = null; },
@@ -565,12 +565,12 @@ function PlaybookRunner({ open, pb, seed, onClose }) {
     setRunning(false);
   };
 
-  if (!pb) return <dialog ref={dialogRef} className="relay-dialog relay-dialog-runner" aria-hidden="true"/>;
+  if (!pb) return <dialog ref={dialogRef} className="ansbui-dialog ansbui-dialog-runner" aria-hidden="true"/>;
 
   return (
     <dialog
       ref={dialogRef}
-      className="relay-dialog relay-dialog-runner"
+      className="ansbui-dialog ansbui-dialog-runner"
       aria-label={`Run ${pb.name}`}
       {...globalThis.dialogBackdropHandlers(dialogRef, onClose)}
     >
@@ -931,7 +931,7 @@ function LimitPicker({ open, initialValue, onClose, onApply }) {
   const apply = () => onApply(selectedList.join(','));
 
   return (
-    <globalThis.RelayCenterDialog
+    <globalThis.AnsbuiCenterDialog
       open={open}
       onClose={onClose}
       title="Browse inventory"
@@ -1018,7 +1018,7 @@ function LimitPicker({ open, initialValue, onClose, onApply }) {
               </button>
               <button type="button" className="btn small" onClick={onClose}>Cancel</button>
             </div>
-    </globalThis.RelayCenterDialog>
+    </globalThis.AnsbuiCenterDialog>
   );
 }
 
@@ -1030,10 +1030,10 @@ function PlaybookHistoryDialog({ open, pb, onClose }) {
   const [error, setError] = useStateP('');
 
   useEffectP(() => {
-    if (!open || !pb || !globalThis.RelayAPI) return;
+    if (!open || !pb || !globalThis.AnsbuiAPI) return;
     setLoading(true); setError('');
     let alive = true;
-    globalThis.RelayAPI.listRuns()
+    globalThis.AnsbuiAPI.listRuns()
       .then(res => {
         if (!alive) return;
         const all = res.runs || [];
@@ -1048,7 +1048,7 @@ function PlaybookHistoryDialog({ open, pb, onClose }) {
   if (!pb) return null;
 
   return (
-    <globalThis.RelayCenterDialog
+    <globalThis.AnsbuiCenterDialog
       open={open}
       onClose={onClose}
       title="Run history"
@@ -1088,7 +1088,7 @@ function PlaybookHistoryDialog({ open, pb, onClose }) {
           </tbody>
         </table>
       )}
-    </globalThis.RelayCenterDialog>
+    </globalThis.AnsbuiCenterDialog>
   );
 }
 
@@ -1131,14 +1131,14 @@ function PlaybookImportDialog({ open, onClose, onImported }) {
     if (!yaml) { setError('YAML content is empty.'); return; }
     setBusy(true);
     try {
-      await globalThis.RelayAPI.savePlaybook(trimmed, yaml);
+      await globalThis.AnsbuiAPI.savePlaybook(trimmed, yaml);
       onImported?.(trimmed);
     } catch (e) { setError(e.message); }
     finally { setBusy(false); }
   };
 
   return (
-    <globalThis.RelayCenterDialog
+    <globalThis.AnsbuiCenterDialog
       open={open}
       onClose={onClose}
       title="Import playbook"
@@ -1183,7 +1183,7 @@ function PlaybookImportDialog({ open, onClose, onImported }) {
         </button>
         <button type="button" className="btn small" disabled={busy} onClick={onClose}>Cancel</button>
       </div>
-    </globalThis.RelayCenterDialog>
+    </globalThis.AnsbuiCenterDialog>
   );
 }
 
