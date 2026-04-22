@@ -754,7 +754,9 @@ function PlaybookVarValue({ id, row, onChange }) {
 let varRowIdSeq = 0;
 function newVarRow(patch) {
   varRowIdSeq += 1;
-  return { rid: `var-${varRowIdSeq}`, key: '', type: 'string', value: '', ...(patch || {}) };
+  // Spreading undefined is a valid no-op per the ES spec, so the
+  // empty-object fallback (|| {}) was redundant (Sonar S7744).
+  return { rid: `var-${varRowIdSeq}`, key: '', type: 'string', value: '', ...patch };
 }
 
 // varsFromRecord converts a persisted extraVars map back into the row
@@ -853,6 +855,28 @@ function limitDescendantSet(id, childrenOf, cache) {
   return set;
 }
 
+// countHostsInDescendants — kept separate so the .map in computeGroupRows
+// stays at 3 levels of nesting rather than 5 (Sonar S2004).
+function countHostsInDescendants(hosts, descendantSet) {
+  let n = 0;
+  for (const h of hosts) {
+    if ((h.groups || []).some(x => descendantSet.has(x))) n += 1;
+  }
+  return n;
+}
+
+function computeGroupRows(groups, hosts, descendants, query) {
+  const q = query.trim().toLowerCase();
+  const rows = [];
+  for (const g of groups) {
+    if (g.id === 'ungrouped') continue;
+    if (q && !g.name.toLowerCase().includes(q)) continue;
+    const set = descendants[g.id] || new Set([g.id]);
+    rows.push({ id: g.id, name: g.name, count: countHostsInDescendants(hosts, set) });
+  }
+  return rows.toSorted((a, b) => b.count - a.count || a.name.localeCompare(b.name));
+}
+
 function LimitPicker({ open, initialValue, onClose, onApply }) {
   const data = globalThis.AnsibleData || {};
   const GROUPS = data.GROUPS || [];
@@ -868,18 +892,10 @@ function LimitPicker({ open, initialValue, onClose, onApply }) {
 
   const descendants = useMemoP(() => buildLimitDescendants(GROUPS), [GROUPS]);
 
-  const groupRows = useMemoP(() => {
-    const q = query.trim().toLowerCase();
-    return GROUPS
-      .filter(g => g.id !== 'ungrouped')
-      .filter(g => !q || g.name.toLowerCase().includes(q))
-      .map(g => {
-        const set = descendants[g.id] || new Set([g.id]);
-        const count = HOSTS.filter(h => (h.groups || []).some(x => set.has(x))).length;
-        return { id: g.id, name: g.name, count };
-      })
-      .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
-  }, [GROUPS, HOSTS, descendants, query]);
+  const groupRows = useMemoP(
+    () => computeGroupRows(GROUPS, HOSTS, descendants, query),
+    [GROUPS, HOSTS, descendants, query]
+  );
 
   const hostRows = useMemoP(() => {
     const q = query.trim().toLowerCase();

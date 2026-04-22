@@ -557,32 +557,33 @@ function suggestFilename(moduleName) {
 
 function renderAdhocAsPlaybook({ target, module, args, become }) {
   const argEntries = Object.entries(args || {}).filter(([, v]) => v !== '' && v != null);
-  const lines = [];
-  lines.push('---');
-  lines.push(`- name: ${module} on ${target}`);
-  lines.push(`  hosts: ${target || 'all'}`);
-  lines.push('  gather_facts: false');
-  if (become) lines.push('  become: true');
-  lines.push('  tasks:');
-  lines.push(`    - name: run ${module}`);
-  if (argEntries.length === 0) {
-    lines.push(`      ${module}:`);
-  } else {
-    lines.push(`      ${module}:`);
-    for (const [k, v] of argEntries) {
-      lines.push(`        ${k}: ${yamlScalar(v)}`);
-    }
-  }
+  const lines = [
+    '---',
+    `- name: ${module} on ${target}`,
+    `  hosts: ${target || 'all'}`,
+    '  gather_facts: false',
+    ...(become ? ['  become: true'] : []),
+    '  tasks:',
+    `    - name: run ${module}`,
+    `      ${module}:`,
+    ...argEntries.map(([k, v]) => `        ${k}: ${yamlScalar(v)}`)
+  ];
   return lines.join('\n') + '\n';
 }
+
+// yamlScalar quotes a value for safe inclusion in the generated
+// playbook. The escape pattern for an embedded double-quote is
+// literally `\"` (backslash + quote). Using String.raw lets us write
+// that two-character sequence without escaping backslashes in the
+// source, matching Sonar S7780's preferred form.
+const YAML_QUOTE_ESCAPE = String.raw`\"`;
 
 function yamlScalar(v) {
   if (v == null) return '""';
   const s = String(v);
   if (/^(true|false|null|yes|no|\d+(\.\d+)?)$/i.test(s)) return `"${s}"`;
   if (/^[\w./@:-]+$/.test(s)) return s;
-  const escaped = s.replaceAll('"', '\\"');
-  return `"${escaped}"`;
+  return `"${s.replaceAll('"', YAML_QUOTE_ESCAPE)}"`;
 }
 
 globalThis.AdhocView = AdhocView;

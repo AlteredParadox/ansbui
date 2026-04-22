@@ -84,7 +84,7 @@
   // a handle with close() for cleanup on unmount.
   api.runCommand = (kind, payload, handlers) => {
     const { onEntry, onHostState, onDone, onClose, onError } = handlers || {};
-    const mapping = (handlers && handlers.mapping) || DEFAULT_EVENT_MAPPING;
+    const mapping = handlers?.mapping || DEFAULT_EVENT_MAPPING;
     const started = Date.now();
     const stream = api.openStream(kind, payload);
     let finished = false;

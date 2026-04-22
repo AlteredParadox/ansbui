@@ -112,7 +112,7 @@ function HistoryView({ onOpenPlaybook, onRunPlaybook }) {
               </div>
             </div>
             <div className="history-detail-actions">
-              {detail && detail.kind === 'playbook' && (
+              {detail?.kind === 'playbook' && (
                 <>
                   <button
                     type="button"
