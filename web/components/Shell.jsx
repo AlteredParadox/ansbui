@@ -173,9 +173,61 @@ function dialogBackdropHandlers(ref, onClose) {
   };
 }
 
+// RelayCenterDialog is the shell used by every top-centred modal in
+// the app — connection manager, command palette, ad-hoc recent /
+// save-as-playbook, playbook history / import / run-limit picker.
+// The shell owns:
+//   - the <dialog> element with backdrop handlers + useDialog binding
+//   - the cm chrome (width / maxHeight sizing, title + subtitle,
+//     close button in the header)
+//   - a single-pane body; callers render whatever content they need
+//     into children
+// Extra props on the outer <dialog> can be threaded via dialogProps
+// (the command palette uses this for its global onKeyDown).
+function RelayCenterDialog({
+  open,
+  onClose,
+  title,
+  subtitle,
+  ariaLabel,
+  width,
+  maxHeight,
+  dialogProps,
+  children
+}) {
+  const dialogRef = useDialog(open, onClose);
+  return (
+    <dialog
+      ref={dialogRef}
+      className="relay-dialog relay-dialog-center"
+      aria-label={ariaLabel || (typeof title === 'string' ? title : undefined)}
+      {...dialogBackdropHandlers(dialogRef, onClose)}
+      {...(dialogProps || {})}
+    >
+      <div className="cm" style={{ width: width || 'min(680px, 94vw)', maxHeight: maxHeight || '82vh' }}>
+        <div className="cm-head">
+          <div>
+            <div className="section-title">{title}</div>
+            {subtitle && <div className="mute" style={{ fontSize: 12, marginTop: 2 }}>{subtitle}</div>}
+          </div>
+          <button type="button" className="btn ghost small" onClick={onClose}>
+            <Icon name="x" size={14}/>
+          </button>
+        </div>
+        <div className="cm-body cm-single">
+          <div className="cm-pane">
+            {children}
+          </div>
+        </div>
+      </div>
+    </dialog>
+  );
+}
+
 globalThis.Sidebar = Sidebar;
 globalThis.TopNav = TopNav;
 globalThis.TopLayoutNav = TopLayoutNav;
 globalThis.TWEAK_DEFAULTS = TWEAK_DEFAULTS;
 globalThis.useDialog = useDialog;
 globalThis.dialogBackdropHandlers = dialogBackdropHandlers;
+globalThis.RelayCenterDialog = RelayCenterDialog;

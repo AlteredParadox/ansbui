@@ -854,7 +854,6 @@ function limitDescendantSet(id, childrenOf, cache) {
 }
 
 function LimitPicker({ open, initialValue, onClose, onApply }) {
-  const dialogRef = globalThis.useDialog(open, onClose);
   const data = globalThis.AnsibleData || {};
   const GROUPS = data.GROUPS || [];
   const HOSTS = data.HOSTS || [];
@@ -902,33 +901,23 @@ function LimitPicker({ open, initialValue, onClose, onApply }) {
   const apply = () => onApply(selectedList.join(','));
 
   return (
-    <dialog
-      ref={dialogRef}
-      className="relay-dialog relay-dialog-center"
-      aria-label="Pick limit targets"
-      {...globalThis.dialogBackdropHandlers(dialogRef, onClose)}
+    <globalThis.RelayCenterDialog
+      open={open}
+      onClose={onClose}
+      title="Browse inventory"
+      subtitle="Pick groups or hosts — the picker builds a comma-separated --limit expression."
+      width="min(720px, 94vw)"
+      maxHeight="75vh"
     >
-      <div className="cm" style={{ width: 'min(720px, 94vw)', maxHeight: '75vh' }}>
-        <div className="cm-head">
-          <div>
-            <div className="section-title">Browse inventory</div>
-            <div className="mute" style={{ fontSize: 12, marginTop: 2 }}>
-              Pick groups or hosts — the picker builds a comma-separated --limit expression.
-            </div>
-          </div>
-          <button type="button" className="btn ghost small" onClick={onClose}><Icon name="x" size={14}/></button>
-        </div>
-        <div className="cm-body cm-single">
-          <div className="cm-pane">
-            <input
-              className="input"
-              aria-label="Filter groups and hosts"
-              placeholder="Filter…"
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              style={{ marginBottom: 10 }}
-            />
-            <div className="lp-grid">
+      <input
+        className="input"
+        aria-label="Filter groups and hosts"
+        placeholder="Filter…"
+        value={query}
+        onChange={(e) => setQuery(e.target.value)}
+        style={{ marginBottom: 10 }}
+      />
+      <div className="lp-grid">
               <div>
                 <div className="section-title" style={{ marginBottom: 4 }}>Groups · {groupRows.length}</div>
                 <div className="lp-list">
@@ -999,17 +988,13 @@ function LimitPicker({ open, initialValue, onClose, onApply }) {
               </button>
               <button type="button" className="btn small" onClick={onClose}>Cancel</button>
             </div>
-          </div>
-        </div>
-      </div>
-    </dialog>
+    </globalThis.RelayCenterDialog>
   );
 }
 
 // ---------- History dialog ----------
 
 function PlaybookHistoryDialog({ open, pb, onClose }) {
-  const dialogRef = globalThis.useDialog(open, onClose);
   const [runs, setRuns] = useStateP([]);
   const [loading, setLoading] = useStateP(false);
   const [error, setError] = useStateP('');
@@ -1030,60 +1015,50 @@ function PlaybookHistoryDialog({ open, pb, onClose }) {
     return () => { alive = false; };
   }, [open, pb?.id]);
 
-  if (!pb) return <dialog ref={dialogRef} className="relay-dialog relay-dialog-center" aria-hidden="true"/>;
+  if (!pb) return null;
 
   return (
-    <dialog
-      ref={dialogRef}
-      className="relay-dialog relay-dialog-center"
-      aria-label={`Run history for ${pb.name}`}
-      {...globalThis.dialogBackdropHandlers(dialogRef, onClose)}
+    <globalThis.RelayCenterDialog
+      open={open}
+      onClose={onClose}
+      title="Run history"
+      subtitle={pb.name}
+      ariaLabel={`Run history for ${pb.name}`}
+      width="min(720px, 94vw)"
+      maxHeight="70vh"
     >
-      <div className="cm" style={{ width: 'min(720px, 94vw)', maxHeight: '70vh' }}>
-        <div className="cm-head">
-          <div>
-            <div className="section-title">Run history</div>
-            <div className="mono" style={{ marginTop: 2 }}>{pb.name}</div>
-          </div>
-          <button type="button" className="btn ghost small" onClick={onClose}><Icon name="x" size={14}/></button>
-        </div>
-        <div className="cm-body cm-single">
-          <div className="cm-pane">
-            {error && <div className="cm-error mono">{error}</div>}
-            {loading && <div className="mute mono" style={{ fontSize: 12 }}>loading…</div>}
-            {!loading && runs.length === 0 && <div className="mute" style={{ fontSize: 12 }}>No runs recorded for this playbook yet.</div>}
-            {runs.length > 0 && (
-              <table className="t" style={{ width: '100%' }}>
-                <thead>
-                  <tr>
-                    <th style={{ cursor: 'default', width: 22 }}></th>
-                    <th style={{ cursor: 'default' }}>When</th>
-                    <th style={{ cursor: 'default' }}>Duration</th>
-                    <th style={{ cursor: 'default' }}>ok</th>
-                    <th style={{ cursor: 'default' }}>changed</th>
-                    <th style={{ cursor: 'default' }}>failed</th>
-                    <th style={{ cursor: 'default' }}>By</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {runs.map(r => (
-                    <tr key={r.id}>
-                      <td><span className={`dot ${r.status}`}/></td>
-                      <td className="mono" style={{ fontSize: 12 }}>{r.startedAt ? new Date(r.startedAt).toLocaleString() : '—'}</td>
-                      <td className="mono">{r.duration || '—'}</td>
-                      <td className="mono" style={{ color: 'var(--ok)' }}>{r.ok || 0}</td>
-                      <td className="mono" style={{ color: 'var(--warn)' }}>{r.changed || 0}</td>
-                      <td className="mono" style={{ color: r.failed ? 'var(--err)' : undefined }}>{r.failed || 0}</td>
-                      <td className="mute">{r.who || ''}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            )}
-          </div>
-        </div>
-      </div>
-    </dialog>
+      {error && <div className="cm-error mono">{error}</div>}
+      {loading && <div className="mute mono" style={{ fontSize: 12 }}>loading…</div>}
+      {!loading && runs.length === 0 && <div className="mute" style={{ fontSize: 12 }}>No runs recorded for this playbook yet.</div>}
+      {runs.length > 0 && (
+        <table className="t" style={{ width: '100%' }}>
+          <thead>
+            <tr>
+              <th style={{ cursor: 'default', width: 22 }}></th>
+              <th style={{ cursor: 'default' }}>When</th>
+              <th style={{ cursor: 'default' }}>Duration</th>
+              <th style={{ cursor: 'default' }}>ok</th>
+              <th style={{ cursor: 'default' }}>changed</th>
+              <th style={{ cursor: 'default' }}>failed</th>
+              <th style={{ cursor: 'default' }}>By</th>
+            </tr>
+          </thead>
+          <tbody>
+            {runs.map(r => (
+              <tr key={r.id}>
+                <td><span className={`dot ${r.status}`}/></td>
+                <td className="mono" style={{ fontSize: 12 }}>{r.startedAt ? new Date(r.startedAt).toLocaleString() : '—'}</td>
+                <td className="mono">{r.duration || '—'}</td>
+                <td className="mono" style={{ color: 'var(--ok)' }}>{r.ok || 0}</td>
+                <td className="mono" style={{ color: 'var(--warn)' }}>{r.changed || 0}</td>
+                <td className="mono" style={{ color: r.failed ? 'var(--err)' : undefined }}>{r.failed || 0}</td>
+                <td className="mute">{r.who || ''}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </globalThis.RelayCenterDialog>
   );
 }
 
@@ -1092,7 +1067,6 @@ function PlaybookHistoryDialog({ open, pb, onClose }) {
 const PATH_SEGMENT_RE = /^[A-Za-z0-9._-]+$/;
 
 function PlaybookImportDialog({ open, onClose, onImported }) {
-  const dialogRef = globalThis.useDialog(open, onClose);
   const [filename, setFilename] = useStateP('');
   const [yaml, setYaml] = useStateP('');
   const [busy, setBusy] = useStateP(false);
@@ -1134,66 +1108,52 @@ function PlaybookImportDialog({ open, onClose, onImported }) {
   };
 
   return (
-    <dialog
-      ref={dialogRef}
-      className="relay-dialog relay-dialog-center"
-      aria-label="Import playbook"
-      {...globalThis.dialogBackdropHandlers(dialogRef, onClose)}
+    <globalThis.RelayCenterDialog
+      open={open}
+      onClose={onClose}
+      title="Import playbook"
+      subtitle="Upload a .yml/.yaml file or paste content below. It will be written to your server's workDir."
+      width="min(720px, 94vw)"
     >
-      <div className="cm" style={{ width: 'min(720px, 94vw)', maxHeight: '82vh' }}>
-        <div className="cm-head">
-          <div>
-            <div className="section-title">Import playbook</div>
-            <div className="mute" style={{ fontSize: 12, marginTop: 2 }}>
-              Upload a .yml/.yaml file or paste content below. It will be written to your server's workDir.
-            </div>
-          </div>
-          <button type="button" className="btn ghost small" onClick={onClose}><Icon name="x" size={14}/></button>
-        </div>
-        <div className="cm-body cm-single">
-          <div className="cm-pane">
-            {error && <div className="cm-error mono">{error}</div>}
+      {error && <div className="cm-error mono">{error}</div>}
 
-            <label htmlFor="pb-import-file" className="cm-field-label">File</label>
-            <input
-              id="pb-import-file"
-              type="file"
-              accept=".yml,.yaml,text/yaml"
-              onChange={(e) => pickFile(e.target.files?.[0])}
-              className="input"
-              style={{ padding: '4px 6px' }}
-            />
+      <label htmlFor="pb-import-file" className="cm-field-label">File</label>
+      <input
+        id="pb-import-file"
+        type="file"
+        accept=".yml,.yaml,text/yaml"
+        onChange={(e) => pickFile(e.target.files?.[0])}
+        className="input"
+        style={{ padding: '4px 6px' }}
+      />
 
-            <label htmlFor="pb-import-name" className="cm-field-label" style={{ marginTop: 10 }}>Target filename (relative to workDir)</label>
-            <input
-              id="pb-import-name"
-              className="input mono"
-              placeholder="deploy-app.yml or plays/deploy-app.yml"
-              value={filename}
-              onChange={(e) => setFilename(e.target.value)}
-            />
+      <label htmlFor="pb-import-name" className="cm-field-label" style={{ marginTop: 10 }}>Target filename (relative to workDir)</label>
+      <input
+        id="pb-import-name"
+        className="input mono"
+        placeholder="deploy-app.yml or plays/deploy-app.yml"
+        value={filename}
+        onChange={(e) => setFilename(e.target.value)}
+      />
 
-            <label htmlFor="pb-import-yaml" className="cm-field-label" style={{ marginTop: 10 }}>YAML</label>
-            <textarea
-              id="pb-import-yaml"
-              className="yaml-textarea"
-              spellCheck="false"
-              style={{ minHeight: 240, fontFamily: 'var(--font-mono)', fontSize: 12 }}
-              value={yaml}
-              onChange={(e) => setYaml(e.target.value)}
-              placeholder="---&#10;- hosts: all&#10;  tasks:&#10;    - name: …"
-            />
+      <label htmlFor="pb-import-yaml" className="cm-field-label" style={{ marginTop: 10 }}>YAML</label>
+      <textarea
+        id="pb-import-yaml"
+        className="yaml-textarea"
+        spellCheck="false"
+        style={{ minHeight: 240, fontFamily: 'var(--font-mono)', fontSize: 12 }}
+        value={yaml}
+        onChange={(e) => setYaml(e.target.value)}
+        placeholder="---&#10;- hosts: all&#10;  tasks:&#10;    - name: …"
+      />
 
-            <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
-              <button type="button" className="btn primary small" disabled={busy} onClick={submit}>
-                <Icon name="check" size={12}/> {busy ? 'Saving…' : 'Save'}
-              </button>
-              <button type="button" className="btn small" disabled={busy} onClick={onClose}>Cancel</button>
-            </div>
-          </div>
-        </div>
+      <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+        <button type="button" className="btn primary small" disabled={busy} onClick={submit}>
+          <Icon name="check" size={12}/> {busy ? 'Saving…' : 'Save'}
+        </button>
+        <button type="button" className="btn small" disabled={busy} onClick={onClose}>Cancel</button>
       </div>
-    </dialog>
+    </globalThis.RelayCenterDialog>
   );
 }
 

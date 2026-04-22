@@ -421,58 +421,44 @@ function downloadLog(lines, moduleName) {
 // ---------- Recent-commands dialog ----------
 
 function AdhocRecentDialog({ open, onClose, onPick }) {
-  const dialogRef = globalThis.useDialog(open, onClose);
   const data = globalThis.AnsibleData || {};
   const runs = (data.RUNS || []).filter(r => r.kind === 'adhoc');
   return (
-    <dialog
-      ref={dialogRef}
-      className="relay-dialog relay-dialog-center"
-      aria-label="Recent ad-hoc commands"
-      {...globalThis.dialogBackdropHandlers(dialogRef, onClose)}
+    <globalThis.RelayCenterDialog
+      open={open}
+      onClose={onClose}
+      title="Recent ad-hoc commands"
+      subtitle="Click any row to load its target, module, and arguments back into the composer."
+      width="min(720px, 94vw)"
+      maxHeight="70vh"
     >
-      <div className="cm" style={{ width: 'min(720px, 94vw)', maxHeight: '70vh' }}>
-        <div className="cm-head">
-          <div>
-            <div className="section-title">Recent ad-hoc commands</div>
-            <div className="mute" style={{ fontSize: 12, marginTop: 2 }}>
-              Click any row to load its target, module, and arguments back into the composer.
-            </div>
-          </div>
-          <button type="button" className="btn ghost small" onClick={onClose}><Icon name="x" size={14}/></button>
+      {runs.length === 0 && (
+        <div className="mute" style={{ fontSize: 12 }}>
+          No ad-hoc runs yet. Fire one from this view and it'll show up here.
         </div>
-        <div className="cm-body cm-single">
-          <div className="cm-pane">
-            {runs.length === 0 && (
-              <div className="mute" style={{ fontSize: 12 }}>
-                No ad-hoc runs yet. Fire one from this view and it'll show up here.
+      )}
+      {runs.length > 0 && (
+        <div className="adhoc-recent-list">
+          {runs.slice(0, 40).map(r => (
+            <button type="button" key={r.id} className="adhoc-recent-row" onClick={() => onPick(r)}>
+              <span className={`dot ${r.status}`}/>
+              <div className="adhoc-recent-main">
+                <div className="mono" style={{ fontSize: 12.5, fontWeight: 550 }}>
+                  {r.module || '—'} <span className="mute mono" style={{ fontWeight: 400 }}>on {r.target || '—'}</span>
+                </div>
+                <div className="mute mono" style={{ fontSize: 11 }}>
+                  {previewArgsFor(r.args)} {r.become && '· --become'} {r.check && '· --check'}
+                </div>
               </div>
-            )}
-            {runs.length > 0 && (
-              <div className="adhoc-recent-list">
-                {runs.slice(0, 40).map(r => (
-                  <button type="button" key={r.id} className="adhoc-recent-row" onClick={() => onPick(r)}>
-                    <span className={`dot ${r.status}`}/>
-                    <div className="adhoc-recent-main">
-                      <div className="mono" style={{ fontSize: 12.5, fontWeight: 550 }}>
-                        {r.module || '—'} <span className="mute mono" style={{ fontWeight: 400 }}>on {r.target || '—'}</span>
-                      </div>
-                      <div className="mute mono" style={{ fontSize: 11 }}>
-                        {previewArgsFor(r.args)} {r.become && '· --become'} {r.check && '· --check'}
-                      </div>
-                    </div>
-                    <div className="mute mono" style={{ fontSize: 11, textAlign: 'right' }}>
-                      <div>{r.when}</div>
-                      <div>{r.duration}</div>
-                    </div>
-                  </button>
-                ))}
+              <div className="mute mono" style={{ fontSize: 11, textAlign: 'right' }}>
+                <div>{r.when}</div>
+                <div>{r.duration}</div>
               </div>
-            )}
-          </div>
+            </button>
+          ))}
         </div>
-      </div>
-    </dialog>
+      )}
+    </globalThis.RelayCenterDialog>
   );
 }
 
@@ -491,7 +477,6 @@ function previewArgsFor(args) {
 // so the operator can edit it further in the Playbooks view.
 
 function AdhocSavePlaybookDialog({ open, composition, onClose }) {
-  const dialogRef = globalThis.useDialog(open, onClose);
   const [filename, setFilename] = useStateA('');
   const [busy, setBusy] = useStateA(false);
   const [error, setError] = useStateA('');
@@ -519,63 +504,48 @@ function AdhocSavePlaybookDialog({ open, composition, onClose }) {
   };
 
   return (
-    <dialog
-      ref={dialogRef}
-      className="relay-dialog relay-dialog-center"
-      aria-label="Save ad-hoc as playbook"
-      {...globalThis.dialogBackdropHandlers(dialogRef, onClose)}
+    <globalThis.RelayCenterDialog
+      open={open}
+      onClose={onClose}
+      title="Save as playbook"
+      subtitle="The current composer state is rendered as a minimal single-play YAML file under the server's workDir."
     >
-      <div className="cm" style={{ width: 'min(680px, 94vw)', maxHeight: '82vh' }}>
-        <div className="cm-head">
-          <div>
-            <div className="section-title">Save as playbook</div>
-            <div className="mute" style={{ fontSize: 12, marginTop: 2 }}>
-              The current composer state is rendered as a minimal single-play YAML file under the server's workDir.
-            </div>
-          </div>
-          <button type="button" className="btn ghost small" onClick={onClose}><Icon name="x" size={14}/></button>
-        </div>
-        <div className="cm-body cm-single">
-          <div className="cm-pane">
-            {error && <div className="cm-error mono">{error}</div>}
-            {done ? (
-              <div className="cm-test ok mono">✓ Saved to <b>{filename}</b>. Playbook library updated.</div>
-            ) : (
-              <>
-                <label htmlFor="adhoc-save-name" className="cm-field-label">Target filename (relative to workDir)</label>
-                <input
-                  id="adhoc-save-name"
-                  className="input mono"
-                  value={filename}
-                  onChange={(e) => setFilename(e.target.value)}
-                  placeholder="e.g. plays/ping-all.yml"
-                />
-                <div className="cm-field-label" style={{ marginTop: 10 }}>Preview</div>
-                <pre className="code-block" style={{
-                  background: 'var(--bg-inset)',
-                  border: '1px solid var(--line-soft)',
-                  borderRadius: 'var(--r-2)',
-                  maxHeight: 300,
-                  overflow: 'auto'
-                }}>{yaml}</pre>
-              </>
-            )}
-            <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
-              {done ? (
-                <button type="button" className="btn primary small" onClick={onClose}>Close</button>
-              ) : (
-                <>
-                  <button type="button" className="btn primary small" disabled={busy} onClick={submit}>
-                    <Icon name="check" size={12}/> {busy ? 'Saving…' : 'Save'}
-                  </button>
-                  <button type="button" className="btn small" disabled={busy} onClick={onClose}>Cancel</button>
-                </>
-              )}
-            </div>
-          </div>
-        </div>
+      {error && <div className="cm-error mono">{error}</div>}
+      {done ? (
+        <div className="cm-test ok mono">✓ Saved to <b>{filename}</b>. Playbook library updated.</div>
+      ) : (
+        <>
+          <label htmlFor="adhoc-save-name" className="cm-field-label">Target filename (relative to workDir)</label>
+          <input
+            id="adhoc-save-name"
+            className="input mono"
+            value={filename}
+            onChange={(e) => setFilename(e.target.value)}
+            placeholder="e.g. plays/ping-all.yml"
+          />
+          <div className="cm-field-label" style={{ marginTop: 10 }}>Preview</div>
+          <pre className="code-block" style={{
+            background: 'var(--bg-inset)',
+            border: '1px solid var(--line-soft)',
+            borderRadius: 'var(--r-2)',
+            maxHeight: 300,
+            overflow: 'auto'
+          }}>{yaml}</pre>
+        </>
+      )}
+      <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+        {done ? (
+          <button type="button" className="btn primary small" onClick={onClose}>Close</button>
+        ) : (
+          <>
+            <button type="button" className="btn primary small" disabled={busy} onClick={submit}>
+              <Icon name="check" size={12}/> {busy ? 'Saving…' : 'Save'}
+            </button>
+            <button type="button" className="btn small" disabled={busy} onClick={onClose}>Cancel</button>
+          </>
+        )}
       </div>
-    </dialog>
+    </globalThis.RelayCenterDialog>
   );
 }
 
