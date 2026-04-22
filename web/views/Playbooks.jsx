@@ -302,7 +302,7 @@ function colorizeValue(rest) {
   return <span className="yml-v">{rest}</span>;
 }
 
-function PlaybooksView({ initialId }) {
+function PlaybooksView({ initialId, runnerPrefill }) {
   const data = globalThis.AnsibleData || {};
   const PLAYBOOKS = data.PLAYBOOKS || [];
   const [selectedId, setSelectedId] = useStateP(initialId || PLAYBOOKS[0]?.id || '');
@@ -312,10 +312,22 @@ function PlaybooksView({ initialId }) {
   const [saving, setSaving] = useStateP(false);
   const [error, setError] = useStateP('');
   const [runnerOpen, setRunnerOpen] = useStateP(false);
+  const [runnerSeed, setRunnerSeed] = useStateP(null);
   const [historyOpen, setHistoryOpen] = useStateP(false);
   const [importOpen, setImportOpen] = useStateP(false);
 
   const pb = PLAYBOOKS.find(p => p.id === selectedId) || PLAYBOOKS[0];
+
+  // External "open runner with prefill" signal from the History view.
+  // The prefill carries an issuedAt so repeat clicks on the same
+  // playbook re-open the dialog.
+  useEffectP(() => {
+    if (!runnerPrefill) return;
+    const match = PLAYBOOKS.find(p => p.path === runnerPrefill.playbookPath || p.name === runnerPrefill.playbookPath);
+    if (match) setSelectedId(match.id);
+    setRunnerSeed(runnerPrefill);
+    setRunnerOpen(true);
+  }, [runnerPrefill?.issuedAt]);
 
   useEffectP(() => {
     setEditing(false);
@@ -455,7 +467,12 @@ function PlaybooksView({ initialId }) {
           </div>
         </main>
       </div>
-      <PlaybookRunner open={runnerOpen} pb={pb} onClose={() => setRunnerOpen(false)}/>
+      <PlaybookRunner
+        open={runnerOpen}
+        pb={pb}
+        seed={runnerSeed}
+        onClose={() => { setRunnerOpen(false); setRunnerSeed(null); }}
+      />
       <PlaybookHistoryDialog open={historyOpen} pb={pb} onClose={() => setHistoryOpen(false)}/>
       <PlaybookImportDialog open={importOpen} onClose={() => setImportOpen(false)} onImported={(newPath) => {
         setImportOpen(false);
@@ -465,7 +482,7 @@ function PlaybooksView({ initialId }) {
   );
 }
 
-function PlaybookRunner({ open, pb, onClose }) {
+function PlaybookRunner({ open, pb, seed, onClose }) {
   const dialogRef = globalThis.useDialog(open, onClose);
   const [limit, setLimit] = useStateP('');
   const [limitPickerOpen, setLimitPickerOpen] = useStateP(false);
@@ -474,12 +491,25 @@ function PlaybookRunner({ open, pb, onClose }) {
   const [become, setBecome] = useStateP(false);
   const [running, setRunning] = useStateP(false);
   const [output, setOutput] = useStateP([]);
-  // vars are stored as an ordered list of {key, value} rows so empty
-  // rows remain in the UI while the user is typing.
+  // vars are stored as an ordered list of {key, type, value} rows so
+  // empty rows remain in the UI while the user is typing.
   const [vars, setVars] = useStateP([{ key: '', type: 'string', value: '' }]);
   const [varsError, setVarsError] = useStateP('');
   const streamRef = useRefP(null);
   const outRef = useRefP(null);
+
+  // When `seed` arrives (e.g. from a History re-run action) apply it to
+  // the form fields. We key the effect on open+seed-identity so
+  // re-opening with the same seed object doesn't spuriously re-apply.
+  useEffectP(() => {
+    if (!open || !seed) return;
+    setLimit(seed.limit || '');
+    setTagsRaw((seed.tags || []).join(', '));
+    setCheck(!!seed.check);
+    setBecome(!!seed.become);
+    setVars(varsFromRecord(seed.extraVars));
+    setVarsError('');
+  }, [open, seed]);
 
   const setVarAt = (i, patch) => setVars(prev => prev.map((row, j) => (j === i ? { ...row, ...patch } : row)));
   const addVar = () => setVars(prev => [...prev, { key: '', type: 'string', value: '' }]);
@@ -749,6 +779,20 @@ function PlaybookVarValue({ id, row, onChange }) {
       onChange={(e) => onChange({ value: e.target.value })}
     />
   );
+}
+
+// varsFromRecord converts a persisted extraVars map back into the row
+// model used by the editor. The persisted values preserve real JSON
+// types, so we pick the row type from each value's runtime type.
+function varsFromRecord(record) {
+  const entries = Object.entries(record || {});
+  if (!entries.length) return [{ key: '', type: 'string', value: '' }];
+  return entries.map(([k, v]) => {
+    if (typeof v === 'number') return { key: k, type: 'number', value: String(v) };
+    if (typeof v === 'boolean') return { key: k, type: 'bool', value: v ? 'true' : 'false' };
+    if (v !== null && typeof v === 'object') return { key: k, type: 'json', value: JSON.stringify(v) };
+    return { key: k, type: 'string', value: String(v ?? '') };
+  });
 }
 
 // collectExtraVars walks the row model and builds a typed map ready for

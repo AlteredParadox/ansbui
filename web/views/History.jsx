@@ -18,9 +18,10 @@ function filterRuns(runs, filter) {
   return runs.filter(r => r.status === filter);
 }
 
-function HistoryView() {
+function HistoryView({ onOpenPlaybook, onRunPlaybook }) {
   const data = globalThis.AnsibleData || {};
   const RUNS = data.RUNS || [];
+  const PLAYBOOKS = data.PLAYBOOKS || [];
   const [selectedId, setSelectedId] = useStateH(RUNS[0]?.id || '');
   const [filter, setFilter] = useStateH('all');
   const [detail, setDetail] = useStateH(null);
@@ -111,6 +112,40 @@ function HistoryView() {
               </div>
             </div>
             <div className="history-detail-actions">
+              {detail && detail.kind === 'playbook' && (
+                <>
+                  <button
+                    type="button"
+                    className="btn small"
+                    onClick={() => {
+                      const pb = findPlaybookFor(PLAYBOOKS, detail);
+                      if (pb) onOpenPlaybook?.(pb.id);
+                    }}
+                    disabled={!findPlaybookFor(PLAYBOOKS, detail)}
+                    title={findPlaybookFor(PLAYBOOKS, detail) ? 'Open in Playbooks' : 'Playbook no longer in library'}
+                  >
+                    <Icon name="code" size={12}/> View playbook
+                  </button>
+                  {detail.status === 'err' && (
+                    <button
+                      type="button"
+                      className="btn small"
+                      onClick={() => onRunPlaybook?.(buildRetryPrefill(detail))}
+                      disabled={failedHostsFromLog(detail.log).length === 0}
+                      title="Re-run against only the hosts that failed last time"
+                    >
+                      <Icon name="refresh" size={12}/> Retry failed
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    className="btn primary small"
+                    onClick={() => onRunPlaybook?.(buildRerunPrefill(detail))}
+                  >
+                    <Icon name="play" size={12}/> Re-run
+                  </button>
+                </>
+              )}
               {detail && (
                 <button type="button" className="btn small" onClick={() => exportOneRun(detail)}>
                   <Icon name="download" size={12}/> Download log
@@ -174,6 +209,58 @@ function triggerDownload(blob, filename) {
 
 function timeStamp() {
   return new Date().toISOString().replace(/[:]/g, '-').replace(/\..*/, '');
+}
+
+// findPlaybookFor resolves a run's playbook (stored as the relative
+// path the runner used) back to an entry in the library. Falls back
+// to matching by basename so a moved file still resolves if the new
+// location keeps the same filename.
+function findPlaybookFor(playbooks, run) {
+  if (!run?.playbook) return null;
+  const direct = playbooks.find(p => p.path === run.playbook);
+  if (direct) return direct;
+  const base = run.playbook.split('/').pop();
+  return playbooks.find(p => (p.path || '').split('/').pop() === base || p.name === base) || null;
+}
+
+// failedHostsFromLog scans a run's event log for "fail" or
+// recap-fail entries that carry a host name. Dedupes and returns
+// hostnames in the order they appeared.
+function failedHostsFromLog(log) {
+  if (!Array.isArray(log)) return [];
+  const seen = new Set();
+  const out = [];
+  for (const evt of log) {
+    if ((evt.type === 'fail' || evt.type === 'recap-fail') && evt.host) {
+      if (seen.has(evt.host)) continue;
+      seen.add(evt.host);
+      out.push(evt.host);
+    }
+  }
+  return out;
+}
+
+function buildRerunPrefill(run) {
+  return {
+    playbookPath: run.playbook,
+    limit: run.limit || '',
+    tags: run.tags || [],
+    extraVars: run.extraVars || {},
+    check: !!run.check,
+    become: !!run.become
+  };
+}
+
+function buildRetryPrefill(run) {
+  const hosts = failedHostsFromLog(run.log);
+  return {
+    playbookPath: run.playbook,
+    limit: hosts.join(','),
+    tags: run.tags || [],
+    extraVars: run.extraVars || {},
+    check: !!run.check,
+    become: !!run.become
+  };
 }
 
 globalThis.HistoryView = HistoryView;

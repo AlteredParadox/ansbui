@@ -181,6 +181,7 @@
         return () => window.removeEventListener('keydown', onKey);
       }, []);
 
+      const [pbRunnerPrefill, setPbRunnerPrefill] = useState(null);
       const openPalette = useCallback(() => setPaletteOpen(true), []);
       const openAdhoc = useCallback((prefill) => {
         setAdhocPrefill(prefill || null);
@@ -188,6 +189,19 @@
       }, []);
       const runPlaybook = useCallback((id) => {
         setPlaybookId(id);
+        setPbRunnerPrefill(null);
+        setView('playbooks');
+      }, []);
+      // openPlaybookRunner navigates to the Playbooks view, selects the
+      // matching playbook by path, and asks PlaybooksView to auto-open
+      // its Run dialog with the supplied prefill. Used by History's
+      // Re-run / Retry failed actions.
+      const openPlaybookRunner = useCallback((prefill) => {
+        if (!prefill) return;
+        const pbs = (globalThis.AnsibleData || {}).PLAYBOOKS || [];
+        const match = pbs.find(p => p.path === prefill.playbookPath || p.name === prefill.playbookPath);
+        if (match) setPlaybookId(match.id);
+        setPbRunnerPrefill({ ...prefill, issuedAt: Date.now() });
         setView('playbooks');
       }, []);
 
@@ -204,9 +218,9 @@
         switch (view) {
           case 'dashboard': return <window.DashboardView onNavigate={setView} onOpenAdhoc={openAdhoc}/>;
           case 'inventory': return <window.InventoryView onOpenAdhoc={openAdhoc}/>;
-          case 'playbooks': return <window.PlaybooksView initialId={playbookId}/>;
+          case 'playbooks': return <window.PlaybooksView initialId={playbookId} runnerPrefill={pbRunnerPrefill}/>;
           case 'adhoc': return <window.AdhocView prefill={adhocPrefill}/>;
-          case 'history': return <window.HistoryView/>;
+          case 'history': return <window.HistoryView onOpenPlaybook={runPlaybook} onRunPlaybook={openPlaybookRunner}/>;
           case 'vault': return <window.VaultView/>;
           default: return null;
         }

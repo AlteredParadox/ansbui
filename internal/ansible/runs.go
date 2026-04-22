@@ -10,7 +10,9 @@ import (
 	"time"
 )
 
-// RunRecord summarises a single ad-hoc or playbook run.
+// RunRecord summarises a single ad-hoc or playbook run. Fields for the
+// "other" kind are left at their zero value, so a UI can switch on
+// Kind and read only what's relevant.
 type RunRecord struct {
 	ID        string    `json:"id"`
 	Kind      string    `json:"kind"` // "adhoc" or "playbook"
@@ -29,6 +31,19 @@ type RunRecord struct {
 	StartedAt time.Time `json:"startedAt"`
 	EndedAt   time.Time `json:"endedAt"`
 	Log       []Event   `json:"log,omitempty"`
+
+	// Replay fields — captured so the UI can prefill a new run from an
+	// existing record. Ad-hoc records use Args/Become/Check/Forks/
+	// Timeout; playbook records use Limit/Tags/ExtraVars. Playbook
+	// runs also share Become/Check with ad-hoc.
+	Args      map[string]string `json:"args,omitempty"`
+	Become    bool              `json:"become,omitempty"`
+	Check     bool              `json:"check,omitempty"`
+	Forks     int               `json:"forks,omitempty"`
+	Timeout   int               `json:"timeout,omitempty"`
+	Limit     string            `json:"limit,omitempty"`
+	Tags      []string          `json:"tags,omitempty"`
+	ExtraVars map[string]any    `json:"extraVars,omitempty"`
 }
 
 // Recorder is a thread-safe on-disk list of RunRecords.

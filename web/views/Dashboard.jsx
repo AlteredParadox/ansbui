@@ -65,7 +65,7 @@ function DashboardView({ onNavigate, onOpenAdhoc }) {
         </div>
         <div className="view-actions">
           <button type="button" className="btn small" onClick={reload} disabled={refreshing}>
-            <Icon name="refresh" size={13}/> {refreshing ? 'Reloading…' : 'Reload'}
+            <Icon name="refresh" size={13}/> {refreshing ? 'Re-syncing…' : 'Re-sync inventory'}
           </button>
           <button type="button" className="btn primary small" onClick={() => onOpenAdhoc()}>
             <Icon name="play" size={12}/> Run command

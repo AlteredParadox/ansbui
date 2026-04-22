@@ -200,15 +200,29 @@
   function toRunCard(r) {
     return {
       id: r.id,
+      kind: r.kind || 'adhoc',
       pb: r.playbook || r.module || '',
+      playbook: r.playbook || '',
+      module: r.module || '',
+      target: r.target || '',
       status: r.status || 'ok',
       when: friendly(r.startedAt),
+      startedAt: r.startedAt || '',
       duration: r.duration || '',
       ok: r.ok || 0,
       changed: r.changed || 0,
       failed: r.failed || 0,
       skipped: r.skipped || 0,
-      who: r.who || 'ui'
+      who: r.who || 'ui',
+      // replay fields — only one kind's set is populated at a time
+      args: r.args || {},
+      become: !!r.become,
+      check: !!r.check,
+      forks: r.forks || 0,
+      timeout: r.timeout || 0,
+      limit: r.limit || '',
+      tags: r.tags || [],
+      extraVars: r.extraVars || {}
     };
   }
 

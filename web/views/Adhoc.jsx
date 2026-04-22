@@ -90,6 +90,8 @@ function AdhocView({ prefill }) {
   const [timeout, setTimeoutState] = useStateA(30);
   const [running, setRunning] = useStateA(false);
   const [output, setOutput] = useStateA([]);
+  const [recentOpen, setRecentOpen] = useStateA(false);
+  const [saveOpen, setSaveOpen] = useStateA(false);
   const [hostStates, setHostStates] = useStateA({});
   const outRef = useRefA(null);
   const streamRef = useRefA(null);
@@ -202,7 +204,9 @@ function AdhocView({ prefill }) {
           <div className="view-sub mute">Fire a single module at a selection of hosts. Keyboard-first.</div>
         </div>
         <div className="view-actions">
-          <span className="mute mono" style={{ fontSize: 12 }}>runs persisted automatically</span>
+          <button type="button" className="btn small" onClick={() => setRecentOpen(true)}>
+            <Icon name="history" size={12}/> Recent
+          </button>
         </div>
       </div>
 
@@ -326,6 +330,9 @@ function AdhocView({ prefill }) {
               {become && <span className="pill info" style={{ marginLeft: 6 }}>sudo</span>}
             </div>
             <div className="composer-run-actions">
+              <button type="button" className="btn small" onClick={() => setSaveOpen(true)}>
+                <Icon name="download" size={12}/> Save as playbook…
+              </button>
               <button type="button" className="btn primary" onClick={run} disabled={running}>
                 <Icon name="play" size={12}/> {running ? 'Running…' : 'Run'}
               </button>
@@ -377,6 +384,25 @@ function AdhocView({ prefill }) {
           </div>
         </div>
       </div>
+      <AdhocRecentDialog
+        open={recentOpen}
+        onClose={() => setRecentOpen(false)}
+        onPick={(run) => {
+          setTarget(run.target || 'all');
+          setModuleName(run.module || 'ansible.builtin.ping');
+          setArgs(run.args || {});
+          setBecome(!!run.become);
+          setCheck(!!run.check);
+          if (run.forks) setForks(run.forks);
+          if (run.timeout) setTimeoutState(run.timeout);
+          setRecentOpen(false);
+        }}
+      />
+      <AdhocSavePlaybookDialog
+        open={saveOpen}
+        composition={{ target, module: mod.name, args, become }}
+        onClose={() => setSaveOpen(false)}
+      />
     </div>
   );
 }
@@ -423,6 +449,203 @@ function downloadLog(lines, moduleName) {
   a.click();
   document.body.removeChild(a);
   URL.revokeObjectURL(url);
+}
+
+// ---------- Recent-commands dialog ----------
+
+function AdhocRecentDialog({ open, onClose, onPick }) {
+  const dialogRef = globalThis.useDialog(open, onClose);
+  const data = globalThis.AnsibleData || {};
+  const runs = (data.RUNS || []).filter(r => r.kind === 'adhoc');
+  return (
+    <dialog
+      ref={dialogRef}
+      className="relay-dialog relay-dialog-center"
+      aria-label="Recent ad-hoc commands"
+      onClick={(e) => { if (e.target === dialogRef.current) onClose(); }}
+    >
+      <div className="cm" style={{ width: 'min(720px, 94vw)', maxHeight: '70vh' }}>
+        <div className="cm-head">
+          <div>
+            <div className="section-title">Recent ad-hoc commands</div>
+            <div className="mute" style={{ fontSize: 12, marginTop: 2 }}>
+              Click any row to load its target, module, and arguments back into the composer.
+            </div>
+          </div>
+          <button type="button" className="btn ghost small" onClick={onClose}><Icon name="x" size={14}/></button>
+        </div>
+        <div className="cm-body cm-single">
+          <div className="cm-pane">
+            {runs.length === 0 && (
+              <div className="mute" style={{ fontSize: 12 }}>
+                No ad-hoc runs yet. Fire one from this view and it'll show up here.
+              </div>
+            )}
+            {runs.length > 0 && (
+              <div className="adhoc-recent-list">
+                {runs.slice(0, 40).map(r => (
+                  <button type="button" key={r.id} className="adhoc-recent-row" onClick={() => onPick(r)}>
+                    <span className={`dot ${r.status}`}/>
+                    <div className="adhoc-recent-main">
+                      <div className="mono" style={{ fontSize: 12.5, fontWeight: 550 }}>
+                        {r.module || '—'} <span className="mute mono" style={{ fontWeight: 400 }}>on {r.target || '—'}</span>
+                      </div>
+                      <div className="mute mono" style={{ fontSize: 11 }}>
+                        {previewArgsFor(r.args)} {r.become && '· --become'} {r.check && '· --check'}
+                      </div>
+                    </div>
+                    <div className="mute mono" style={{ fontSize: 11, textAlign: 'right' }}>
+                      <div>{r.when}</div>
+                      <div>{r.duration}</div>
+                    </div>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    </dialog>
+  );
+}
+
+function previewArgsFor(args) {
+  if (!args) return '';
+  const entries = Object.entries(args).filter(([, v]) => v !== '' && v != null);
+  if (!entries.length) return '(no args)';
+  return entries.map(([k, v]) => `${k}=${v}`).join(' ');
+}
+
+// ---------- Save-as-playbook dialog ----------
+//
+// Generates a minimal single-play YAML from the current composer
+// state and writes it to the remote workDir via /api/playbooks/content.
+// The YAML shape is deliberately conservative — no jinja, no loops —
+// so the operator can edit it further in the Playbooks view.
+
+function AdhocSavePlaybookDialog({ open, composition, onClose }) {
+  const dialogRef = globalThis.useDialog(open, onClose);
+  const [filename, setFilename] = useStateA('');
+  const [busy, setBusy] = useStateA(false);
+  const [error, setError] = useStateA('');
+  const [done, setDone] = useStateA(false);
+
+  useEffectA(() => {
+    if (!open) { setFilename(''); setError(''); setDone(false); return; }
+    setFilename(suggestFilename(composition.module));
+  }, [open, composition.module]);
+
+  const yaml = useMemoA(() => renderAdhocAsPlaybook(composition), [composition]);
+
+  const submit = async () => {
+    setError('');
+    const path = (filename || '').trim();
+    if (!path) { setError('Filename is required.'); return; }
+    if (!globalThis.RelayAPI) return;
+    setBusy(true);
+    try {
+      await globalThis.RelayAPI.savePlaybook(path, yaml);
+      await globalThis.RelayAPI.bootstrap();
+      setDone(true);
+    } catch (e) { setError(e.message); }
+    finally { setBusy(false); }
+  };
+
+  return (
+    <dialog
+      ref={dialogRef}
+      className="relay-dialog relay-dialog-center"
+      aria-label="Save ad-hoc as playbook"
+      onClick={(e) => { if (e.target === dialogRef.current) onClose(); }}
+    >
+      <div className="cm" style={{ width: 'min(680px, 94vw)', maxHeight: '82vh' }}>
+        <div className="cm-head">
+          <div>
+            <div className="section-title">Save as playbook</div>
+            <div className="mute" style={{ fontSize: 12, marginTop: 2 }}>
+              The current composer state is rendered as a minimal single-play YAML file under the server's workDir.
+            </div>
+          </div>
+          <button type="button" className="btn ghost small" onClick={onClose}><Icon name="x" size={14}/></button>
+        </div>
+        <div className="cm-body cm-single">
+          <div className="cm-pane">
+            {error && <div className="cm-error mono">{error}</div>}
+            {done ? (
+              <div className="cm-test ok mono">✓ Saved to <b>{filename}</b>. Playbook library updated.</div>
+            ) : (
+              <>
+                <label htmlFor="adhoc-save-name" className="cm-field-label">Target filename (relative to workDir)</label>
+                <input
+                  id="adhoc-save-name"
+                  className="input mono"
+                  value={filename}
+                  onChange={(e) => setFilename(e.target.value)}
+                  placeholder="e.g. plays/ping-all.yml"
+                />
+                <div className="cm-field-label" style={{ marginTop: 10 }}>Preview</div>
+                <pre className="code-block" style={{
+                  background: 'var(--bg-inset)',
+                  border: '1px solid var(--line-soft)',
+                  borderRadius: 'var(--r-2)',
+                  maxHeight: 300,
+                  overflow: 'auto'
+                }}>{yaml}</pre>
+              </>
+            )}
+            <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+              {done ? (
+                <button type="button" className="btn primary small" onClick={onClose}>Close</button>
+              ) : (
+                <>
+                  <button type="button" className="btn primary small" disabled={busy} onClick={submit}>
+                    <Icon name="check" size={12}/> {busy ? 'Saving…' : 'Save'}
+                  </button>
+                  <button type="button" className="btn small" disabled={busy} onClick={onClose}>Cancel</button>
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+    </dialog>
+  );
+}
+
+function suggestFilename(moduleName) {
+  const bare = (moduleName || 'adhoc').split('.').pop() || 'adhoc';
+  const safe = bare.replaceAll(/[^A-Za-z0-9_-]+/g, '_');
+  return `plays/${safe}.yml`;
+}
+
+function renderAdhocAsPlaybook({ target, module, args, become }) {
+  const argEntries = Object.entries(args || {}).filter(([, v]) => v !== '' && v != null);
+  const lines = [];
+  lines.push('---');
+  lines.push(`- name: ${module} on ${target}`);
+  lines.push(`  hosts: ${target || 'all'}`);
+  lines.push('  gather_facts: false');
+  if (become) lines.push('  become: true');
+  lines.push('  tasks:');
+  lines.push(`    - name: run ${module}`);
+  if (argEntries.length === 0) {
+    lines.push(`      ${module}:`);
+  } else {
+    lines.push(`      ${module}:`);
+    for (const [k, v] of argEntries) {
+      lines.push(`        ${k}: ${yamlScalar(v)}`);
+    }
+  }
+  return lines.join('\n') + '\n';
+}
+
+function yamlScalar(v) {
+  if (v == null) return '""';
+  const s = String(v);
+  if (/^(true|false|null|yes|no|\d+(\.\d+)?)$/i.test(s)) return `"${s}"`;
+  if (/^[\w./@:-]+$/.test(s)) return s;
+  const escaped = s.replaceAll('"', '\\"');
+  return `"${escaped}"`;
 }
 
 globalThis.AdhocView = AdhocView;
