@@ -58,42 +58,68 @@ func NewClient(baseURL, hostLabel string) (*Client, error) {
 	}, nil
 }
 
+// ProbeResult captures per-query diagnostics so the UI can show the
+// operator which parts of the Prometheus integration are working and
+// which are silently failing.
+type ProbeResult struct {
+	Name    string `json:"name"`
+	Query   string `json:"query"`
+	Samples int    `json:"samples"`
+	Error   string `json:"error,omitempty"`
+}
+
+// MetricsResult bundles the merged host map with per-probe diagnostics.
+type MetricsResult struct {
+	Metrics map[string]HostMetric `json:"metrics"`
+	Probes  []ProbeResult         `json:"probes"`
+}
+
 // Metrics issues the node_exporter queries and returns a map keyed by
-// host. Missing / errored queries don't abort the batch — they just
-// leave the corresponding field at zero.
-func (c *Client) Metrics(ctx context.Context) (map[string]HostMetric, error) {
+// host. Per-probe errors are captured into the result's Probes slice so
+// the caller can surface them rather than silently showing zero.
+func (c *Client) Metrics(ctx context.Context) (MetricsResult, error) {
 	out := make(map[string]HostMetric)
+	var probes []ProbeResult
 
 	type probe struct {
+		name  string
 		query string
 		apply func(host string, value float64, m *HostMetric)
 	}
-	probes := []probe{
+	defs := []probe{
 		{
+			name:  "cpu",
 			query: `100 - (avg by (` + c.label + `) (rate(node_cpu_seconds_total{mode="idle"}[1m])) * 100)`,
 			apply: func(_ string, v float64, m *HostMetric) { m.CPU = clampPercent(v) },
 		},
 		{
+			name:  "mem",
 			query: `(1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) * 100`,
 			apply: func(_ string, v float64, m *HostMetric) { m.Mem = clampPercent(v) },
 		},
 		{
+			name:  "load",
 			query: `node_load1`,
 			apply: func(_ string, v float64, m *HostMetric) { m.Load = round2(v) },
 		},
 		{
+			name:  "uptime",
 			query: `(time() - node_boot_time_seconds) / 86400`,
 			apply: func(_ string, v float64, m *HostMetric) { m.Uptime = int(v) },
 		},
 		{
+			name:  "up",
 			query: `up`,
 			apply: func(_ string, v float64, m *HostMetric) { m.Up = v > 0 },
 		},
 	}
 
-	for _, p := range probes {
+	for _, p := range defs {
 		samples, err := c.instantQuery(ctx, p.query)
+		pr := ProbeResult{Name: p.name, Query: p.query, Samples: len(samples)}
 		if err != nil {
+			pr.Error = err.Error()
+			probes = append(probes, pr)
 			continue
 		}
 		for host, value := range samples {
@@ -102,21 +128,25 @@ func (c *Client) Metrics(ctx context.Context) (map[string]HostMetric, error) {
 			p.apply(host, value, &m)
 			out[host] = m
 		}
+		probes = append(probes, pr)
 	}
 
 	// OS info comes from node_uname_info labels rather than a value.
-	if labels, err := c.instantLabels(ctx, `node_uname_info`); err == nil {
+	labels, err := c.instantLabels(ctx, `node_uname_info`)
+	unamePR := ProbeResult{Name: "os", Query: "node_uname_info", Samples: len(labels)}
+	if err != nil {
+		unamePR.Error = err.Error()
+	} else {
 		for host, lbls := range labels {
 			m := out[host]
 			m.Host = host
-			m.OS = strings.TrimSpace(lbls["nodename"] + " " + lbls["release"])
-			if id, ok := lbls["release"]; ok && id != "" {
-				m.OS = lbls["sysname"] + " " + id
-			}
+			m.OS = strings.TrimSpace(lbls["sysname"] + " " + lbls["release"])
 			out[host] = m
 		}
 	}
-	return out, nil
+	probes = append(probes, unamePR)
+
+	return MetricsResult{Metrics: out, Probes: probes}, nil
 }
 
 type promResp struct {

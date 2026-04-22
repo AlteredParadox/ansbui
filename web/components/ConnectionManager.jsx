@@ -210,6 +210,21 @@ function ServersTab(props) {
 }
 
 function SettingsTab({ promUrl, promLabel, busy, onChangeUrl, onChangeLabel, onSave }) {
+  const [probe, setProbe] = useStateCM(null);
+  const [probing, setProbing] = useStateCM(false);
+
+  const runProbe = async () => {
+    setProbing(true);
+    try {
+      const res = await globalThis.RelayAPI.metrics();
+      setProbe(res);
+    } catch (e) {
+      setProbe({ error: e.message });
+    } finally {
+      setProbing(false);
+    }
+  };
+
   return (
     <div className="cm-body cm-single">
       <div className="cm-pane">
@@ -224,7 +239,48 @@ function SettingsTab({ promUrl, promLabel, busy, onChangeUrl, onChangeLabel, onS
                value={promLabel} onChange={onChangeLabel}/>
         <div style={{ display: 'flex', gap: 8, marginTop: 14 }}>
           <button type="button" className="btn primary small" disabled={busy} onClick={onSave}>Save</button>
+          <button type="button" className="btn small" disabled={probing} onClick={runProbe}>
+            {probing ? 'Probing…' : 'Test queries'}
+          </button>
         </div>
+        {probe && <ProbeReport report={probe}/>}
+      </div>
+    </div>
+  );
+}
+
+function ProbeReport({ report }) {
+  if (report.error) {
+    return <div className="cm-error mono" style={{ marginTop: 12 }}>{report.error}</div>;
+  }
+  if (!report.configured) {
+    return <div className="mute" style={{ marginTop: 12, fontSize: 12 }}>No Prometheus URL configured.</div>;
+  }
+  const hosts = Object.keys(report.metrics || {});
+  return (
+    <div style={{ marginTop: 14 }}>
+      <div className="section-title" style={{ marginBottom: 6 }}>Query results</div>
+      <table className="t" style={{ width: '100%', marginBottom: 10 }}>
+        <thead>
+          <tr>
+            <th style={{ cursor: 'default' }}>Probe</th>
+            <th style={{ cursor: 'default' }}>Samples</th>
+            <th style={{ cursor: 'default' }}>Error</th>
+          </tr>
+        </thead>
+        <tbody>
+          {(report.probes || []).map(p => (
+            <tr key={p.name}>
+              <td className="mono">{p.name}</td>
+              <td className="mono" style={{ color: p.samples > 0 ? 'var(--ok)' : 'var(--text-3)' }}>{p.samples}</td>
+              <td className="mono mute" style={{ color: p.error ? 'var(--err)' : undefined, maxWidth: 400, whiteSpace: 'normal' }}>{p.error || '—'}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <div className="mute" style={{ fontSize: 12 }}>
+        Matched hosts in Prometheus: <b style={{ color: 'var(--text)' }}>{hosts.length}</b>
+        {hosts.length > 0 && <> — <span className="mono">{hosts.slice(0, 5).join(', ')}{hosts.length > 5 ? `, +${hosts.length - 5}` : ''}</span></>}
       </div>
     </div>
   );

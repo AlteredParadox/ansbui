@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 
 	"github.com/AlteredParadox/relay/internal/ansible"
@@ -37,35 +38,63 @@ func (s *Server) inventory(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, err)
 		return
 	}
-	if metrics := s.tryMetrics(r.Context()); metrics != nil {
-		applyMetrics(&inv, metrics)
+	if result, ok := s.tryMetrics(r.Context()); ok {
+		applyMetrics(&inv, result.Metrics)
 	}
 	writeJSON(w, http.StatusOK, inv)
 }
 
+// metrics returns the raw per-host metric snapshot plus per-probe
+// diagnostics. The UI's settings panel uses this to explain why
+// Prometheus data may not be showing up.
 func (s *Server) metrics(w http.ResponseWriter, r *http.Request) {
-	metrics := s.tryMetrics(r.Context())
-	if metrics == nil {
-		writeJSON(w, http.StatusOK, map[string]any{"configured": false, "metrics": map[string]any{}})
+	url, _ := s.Config.Prometheus()
+	if url == "" {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"configured": false,
+			"metrics":    map[string]any{},
+			"probes":     []any{},
+		})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"configured": true, "metrics": metrics})
+	result, ok := s.tryMetrics(r.Context())
+	if !ok {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"configured": true,
+			"error":      "prometheus client could not be constructed (check URL)",
+			"metrics":    map[string]any{},
+			"probes":     []any{},
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"configured": true,
+		"metrics":    result.Metrics,
+		"probes":     result.Probes,
+	})
 }
 
-func (s *Server) tryMetrics(ctx context.Context) map[string]prom.HostMetric {
+func (s *Server) tryMetrics(ctx context.Context) (prom.MetricsResult, bool) {
 	url, label := s.Config.Prometheus()
 	if url == "" {
-		return nil
+		return prom.MetricsResult{}, false
 	}
 	client, err := prom.NewClient(url, label)
 	if err != nil {
-		return nil
+		log.Printf("prom: bad client config: %v", err)
+		return prom.MetricsResult{}, false
 	}
-	m, err := client.Metrics(ctx)
+	result, err := client.Metrics(ctx)
 	if err != nil {
-		return nil
+		log.Printf("prom: metrics call failed: %v", err)
+		return prom.MetricsResult{}, false
 	}
-	return m
+	for _, p := range result.Probes {
+		if p.Error != "" {
+			log.Printf("prom: probe %q failed: %s", p.Name, p.Error)
+		}
+	}
+	return result, true
 }
 
 func applyMetrics(inv *ansible.Inventory, metrics map[string]prom.HostMetric) {
@@ -73,7 +102,6 @@ func applyMetrics(inv *ansible.Inventory, metrics map[string]prom.HostMetric) {
 		h := &inv.Hosts[i]
 		m, ok := metrics[h.Name]
 		if !ok {
-			// fall back to matching on ansible_host / IP
 			m, ok = metrics[h.IP]
 		}
 		if !ok {
