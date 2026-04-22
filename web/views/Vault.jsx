@@ -1,29 +1,322 @@
-// Secrets / Vault view — placeholder.
-//
-// Vault discovery (scanning the remote workDir for $ANSIBLE_VAULT-
-// encrypted files and surfacing their scopes) isn't wired up yet.
-// The component renders a single empty-state card so the nav item
-// is still present and discoverable, but nothing here makes API
-// calls or pretends to show data it doesn't have.
+// Secrets / Vault view — list $ANSIBLE_VAULT-encrypted files in the
+// active server's workDir, unlock them with a caller-supplied
+// password, and edit + re-encrypt in place. The password is held only
+// in local component state during the unlock/save flow; it is never
+// sent to the browser storage, never logged server-side, and never
+// written to the remote filesystem (pipes + bash process substitution
+// keep it in memory).
+
+const { useState: useStateV, useEffect: useEffectV, useMemo: useMemoV } = React;
 
 function VaultView() {
+  const [files, setFiles] = useStateV([]);
+  const [loading, setLoading] = useStateV(false);
+  const [error, setError] = useStateV('');
+  const [selected, setSelected] = useStateV(null); // { path, name, ... }
+  const [newOpen, setNewOpen] = useStateV(false);
+
+  const reload = async () => {
+    if (!globalThis.RelayAPI) return;
+    setLoading(true); setError('');
+    try {
+      const res = await globalThis.RelayAPI.listVaultFiles();
+      setFiles(res.files || []);
+    } catch (e) { setError(e.message); }
+    finally { setLoading(false); }
+  };
+
+  useEffectV(() => { reload(); }, []);
+
   return (
     <div className="view view-vault">
       <div className="view-head">
         <div>
           <h1 className="view-title">Secrets</h1>
           <div className="view-sub mute">
-            Vault discovery isn't implemented yet. Once added, this view will list
-            {' '}<span className="mono">$ANSIBLE_VAULT</span>{'-'}encrypted files found under the server's workDir,
-            their scopes, and the playbooks that reference them.
+            {loading ? 'Scanning workDir…' : `${files.length} vault-encrypted file${files.length === 1 ? '' : 's'} found in the active server's workDir.`}
           </div>
         </div>
+        <div className="view-actions">
+          <button type="button" className="btn small" onClick={reload} disabled={loading}>
+            <Icon name="refresh" size={12}/> Reload
+          </button>
+          <button type="button" className="btn primary small" onClick={() => setNewOpen(true)}>
+            <Icon name="plus" size={12}/> New vault file…
+          </button>
+        </div>
       </div>
-      <div className="card" style={{ padding: 24, textAlign: 'center', color: 'var(--text-3)' }}>
-        <div style={{ fontSize: 12.5 }}>Nothing to show here yet.</div>
+
+      {error && <div className="cm-error mono">{error}</div>}
+
+      <div className="vault-grid">
+        {files.length === 0 && !loading && (
+          <div className="mute" style={{ padding: 24, fontSize: 12.5 }}>
+            No vault-encrypted files found. Create one with <span className="mono">ansible-vault create path/to/file.yml</span> on the remote, or click <b>New vault file…</b> above.
+          </div>
+        )}
+        {files.map(f => (
+          <button
+            type="button"
+            key={f.path}
+            className="card vault-tile"
+            onClick={() => setSelected(f)}
+          >
+            <div className="vault-tile-head">
+              <Icon name="vault" size={14}/>
+              <span className="mono" style={{ fontWeight: 550 }}>{f.name}</span>
+            </div>
+            <div className="mute mono" style={{ fontSize: 11, marginTop: 4 }}>{f.path}</div>
+            <div className="vault-tile-meta">
+              {f.vaultId && <span className="mini-tag mono">id: {f.vaultId}</span>}
+              <span className="mini-tag mono">{formatBytes(f.size || 0)}</span>
+            </div>
+          </button>
+        ))}
       </div>
+
+      <VaultUnlockDialog
+        open={selected != null}
+        file={selected}
+        onClose={() => setSelected(null)}
+      />
+      <VaultNewDialog
+        open={newOpen}
+        onClose={() => setNewOpen(false)}
+        onCreated={() => { setNewOpen(false); reload(); }}
+      />
     </div>
   );
+}
+
+function formatBytes(n) {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / 1024 / 1024).toFixed(1)} MB`;
+}
+
+// ---------- Unlock + edit dialog ----------
+
+function VaultUnlockDialog({ open, file, onClose }) {
+  const [password, setPassword] = useStateV('');
+  const [plaintext, setPlaintext] = useStateV(null);
+  const [draft, setDraft] = useStateV('');
+  const [editing, setEditing] = useStateV(false);
+  const [busy, setBusy] = useStateV(false);
+  const [error, setError] = useStateV('');
+
+  useEffectV(() => {
+    if (!open) {
+      // Clear everything on close so a stale password / plaintext
+      // doesn't linger in state for another file.
+      setPassword('');
+      setPlaintext(null);
+      setDraft('');
+      setEditing(false);
+      setError('');
+      setBusy(false);
+    }
+  }, [open]);
+
+  const unlock = async () => {
+    if (!file || !password) { setError('Password is required.'); return; }
+    setBusy(true); setError('');
+    try {
+      const res = await globalThis.RelayAPI.viewVault(file.path, password);
+      setPlaintext(res.plaintext || '');
+      setDraft(res.plaintext || '');
+    } catch (e) { setError(e.message); }
+    finally { setBusy(false); }
+  };
+
+  const save = async () => {
+    if (!file || !password) { setError('Password is required.'); return; }
+    setBusy(true); setError('');
+    try {
+      await globalThis.RelayAPI.writeVault(file.path, password, draft);
+      setPlaintext(draft);
+      setEditing(false);
+    } catch (e) { setError(e.message); }
+    finally { setBusy(false); }
+  };
+
+  if (!file) return null;
+  const unlocked = plaintext != null;
+
+  return (
+    <globalThis.RelayCenterDialog
+      open={open}
+      onClose={onClose}
+      title={file.name}
+      subtitle={unlocked ? `Unlocked · ${file.path}` : `Enter the vault password to decrypt ${file.path}.`}
+      width="min(820px, 94vw)"
+      maxHeight="86vh"
+    >
+      {error && <div className="cm-error mono">{error}</div>}
+
+      {!unlocked && (
+        <form onSubmit={(e) => { e.preventDefault(); unlock(); }}>
+          <label htmlFor="vault-pw" className="cm-field-label">Vault password</label>
+          <input
+            id="vault-pw"
+            type="password"
+            className="input mono"
+            autoFocus
+            autoComplete="off"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            placeholder="•••••••"
+          />
+          <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+            <button type="submit" className="btn primary small" disabled={busy || !password}>
+              <Icon name="key" size={12}/> {busy ? 'Unlocking…' : 'Unlock'}
+            </button>
+            <button type="button" className="btn small" disabled={busy} onClick={onClose}>Cancel</button>
+          </div>
+        </form>
+      )}
+
+      {unlocked && (
+        <>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8 }}>
+            {editing ? (
+              <>
+                <button type="button" className="btn primary small" disabled={busy} onClick={save}>
+                  <Icon name="check" size={12}/> {busy ? 'Saving…' : 'Save + re-encrypt'}
+                </button>
+                <button type="button" className="btn small" disabled={busy} onClick={() => { setDraft(plaintext); setEditing(false); }}>
+                  Cancel
+                </button>
+              </>
+            ) : (
+              <>
+                <button type="button" className="btn small" onClick={() => setEditing(true)}>
+                  <Icon name="code" size={12}/> Edit
+                </button>
+                <button type="button" className="btn ghost small" onClick={() => copyToClipboard(plaintext)}>
+                  Copy
+                </button>
+              </>
+            )}
+            <span className="mute mono" style={{ marginLeft: 'auto', fontSize: 11 }}>
+              {draft.split('\n').length} lines · {draft.length} chars
+            </span>
+          </div>
+          <textarea
+            className="yaml-textarea"
+            spellCheck="false"
+            style={{ minHeight: 360 }}
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            readOnly={!editing}
+          />
+          <div className="mute" style={{ fontSize: 11.5, marginTop: 8 }}>
+            The password stays in memory for this dialog only — it's dropped when you close.
+          </div>
+        </>
+      )}
+    </globalThis.RelayCenterDialog>
+  );
+}
+
+// ---------- New vault file dialog ----------
+
+function VaultNewDialog({ open, onClose, onCreated }) {
+  const [path, setPath] = useStateV('');
+  const [password, setPassword] = useStateV('');
+  const [confirm, setConfirm] = useStateV('');
+  const [content, setContent] = useStateV('');
+  const [busy, setBusy] = useStateV(false);
+  const [error, setError] = useStateV('');
+
+  useEffectV(() => {
+    if (!open) { setPath(''); setPassword(''); setConfirm(''); setContent(''); setError(''); setBusy(false); }
+  }, [open]);
+
+  const submit = async () => {
+    setError('');
+    if (!path.trim()) { setError('Target path is required.'); return; }
+    if (!password) { setError('Password is required.'); return; }
+    if (password !== confirm) { setError('Passwords do not match.'); return; }
+    setBusy(true);
+    try {
+      await globalThis.RelayAPI.writeVault(path.trim(), password, content);
+      onCreated?.(path.trim());
+    } catch (e) { setError(e.message); }
+    finally { setBusy(false); }
+  };
+
+  return (
+    <globalThis.RelayCenterDialog
+      open={open}
+      onClose={onClose}
+      title="New vault file"
+      subtitle="Creates a fresh $ANSIBLE_VAULT-encrypted file under the server's workDir."
+      width="min(720px, 94vw)"
+    >
+      {error && <div className="cm-error mono">{error}</div>}
+
+      <label htmlFor="vault-new-path" className="cm-field-label">Path (relative to workDir)</label>
+      <input
+        id="vault-new-path"
+        className="input mono"
+        value={path}
+        onChange={(e) => setPath(e.target.value)}
+        placeholder="group_vars/prod.yml"
+      />
+
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginTop: 10 }}>
+        <div>
+          <label htmlFor="vault-new-pw" className="cm-field-label">Vault password</label>
+          <input
+            id="vault-new-pw"
+            type="password"
+            autoComplete="new-password"
+            className="input mono"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+          />
+        </div>
+        <div>
+          <label htmlFor="vault-new-pw2" className="cm-field-label">Confirm password</label>
+          <input
+            id="vault-new-pw2"
+            type="password"
+            autoComplete="new-password"
+            className="input mono"
+            value={confirm}
+            onChange={(e) => setConfirm(e.target.value)}
+          />
+        </div>
+      </div>
+
+      <label htmlFor="vault-new-body" className="cm-field-label" style={{ marginTop: 10 }}>Content (plaintext YAML)</label>
+      <textarea
+        id="vault-new-body"
+        className="yaml-textarea"
+        spellCheck="false"
+        style={{ minHeight: 220 }}
+        value={content}
+        onChange={(e) => setContent(e.target.value)}
+        placeholder={'---\ndb_password: hunter2'}
+      />
+
+      <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+        <button type="button" className="btn primary small" disabled={busy} onClick={submit}>
+          <Icon name="check" size={12}/> {busy ? 'Encrypting…' : 'Create + encrypt'}
+        </button>
+        <button type="button" className="btn small" disabled={busy} onClick={onClose}>Cancel</button>
+      </div>
+    </globalThis.RelayCenterDialog>
+  );
+}
+
+async function copyToClipboard(text) {
+  if (!text) return;
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    // ignore — some browsers block clipboard from insecure origins
+  }
 }
 
 globalThis.VaultView = VaultView;

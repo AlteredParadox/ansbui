@@ -221,6 +221,28 @@ dialog.relay-dialog-runner[open] {
   padding: 0 8px;
 }
 
+/* Vault tile grid — overview of all $ANSIBLE_VAULT files. */
+.vault-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 10px;
+  margin-top: 8px;
+}
+.vault-tile {
+  text-align: left;
+  padding: 12px 14px;
+  cursor: pointer;
+  transition: background 120ms var(--ease), border-color 120ms var(--ease);
+}
+.vault-tile:hover { background: var(--bg-2); border-color: var(--text-4); }
+.vault-tile-head {
+  display: flex; align-items: center; gap: 6px;
+  color: var(--text-2);
+}
+.vault-tile-meta {
+  display: flex; flex-wrap: wrap; gap: 4px; margin-top: 8px;
+}
+
 /* Inline YAML textarea editor for the Playbooks edit mode. Matches the
    surrounding <pre>.code-block styling so switching between read-only
    and edit modes doesn't reflow the pane. */

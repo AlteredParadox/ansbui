@@ -220,7 +220,7 @@
           case 'inventory': return <window.InventoryView onOpenAdhoc={openAdhoc}/>;
           case 'playbooks': return <window.PlaybooksView initialId={playbookId} runnerPrefill={pbRunnerPrefill}/>;
           case 'adhoc': return <window.AdhocView prefill={adhocPrefill}/>;
-          case 'history': return <window.HistoryView onOpenPlaybook={runPlaybook} onRunPlaybook={openPlaybookRunner}/>;
+          case 'history': return <window.HistoryView onOpenPlaybook={runPlaybook} onRunPlaybook={openPlaybookRunner} onOpenAdhoc={openAdhoc}/>;
           case 'vault': return <window.VaultView/>;
           default: return null;
         }

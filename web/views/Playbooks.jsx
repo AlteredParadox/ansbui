@@ -557,6 +557,14 @@ function PlaybookRunner({ open, pb, seed, onClose }) {
     });
   };
 
+  const cancel = () => {
+    if (streamRef.current) {
+      streamRef.current.close();
+      streamRef.current = null;
+    }
+    setRunning(false);
+  };
+
   if (!pb) return <dialog ref={dialogRef} className="relay-dialog relay-dialog-runner" aria-hidden="true"/>;
 
   return (
@@ -620,9 +628,15 @@ function PlaybookRunner({ open, pb, seed, onClose }) {
           </div>
 
           <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
-            <button type="button" className="btn primary small" onClick={run} disabled={running}>
-              <Icon name="play" size={12}/> {running ? 'Running…' : 'Run'}
-            </button>
+            {running ? (
+              <button type="button" className="btn small" onClick={cancel}>
+                <Icon name="x" size={12}/> Cancel
+              </button>
+            ) : (
+              <button type="button" className="btn primary small" onClick={run}>
+                <Icon name="play" size={12}/> Run
+              </button>
+            )}
             <button type="button" className="btn small" onClick={() => { setOutput([]); }} disabled={running}>
               Clear output
             </button>

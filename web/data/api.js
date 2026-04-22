@@ -41,6 +41,14 @@
   api.listRuns = () => json('/api/runs');
   api.getRun = (id) => json(`/api/runs/${encodeURIComponent(id)}`);
 
+  api.listVaultFiles = () => json('/api/vault');
+  api.viewVault = (path, password) => json('/api/vault/view', {
+    method: 'POST', body: JSON.stringify({ path, password })
+  });
+  api.writeVault = (path, password, content) => json('/api/vault/content', {
+    method: 'POST', body: JSON.stringify({ path, password, content })
+  });
+
   // Open a WebSocket to stream ad-hoc / playbook output.
   api.openStream = (kind, request) => {
     const wsProto = globalThis.location.protocol === 'https:' ? 'wss' : 'ws';

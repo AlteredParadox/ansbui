@@ -49,6 +49,10 @@ func (s *Server) Handler() http.Handler {
 
 	mux.HandleFunc("GET /api/runs", s.listRuns)
 	mux.HandleFunc("GET /api/runs/{id}", s.getRun)
+
+	mux.HandleFunc("GET /api/vault", s.listVault)
+	mux.HandleFunc("POST /api/vault/view", s.viewVault)
+	mux.HandleFunc("POST /api/vault/content", s.writeVault)
 	mux.HandleFunc("GET /api/adhoc/stream", s.wsAdhoc)
 	mux.HandleFunc("GET /api/playbook/stream", s.wsPlaybook)
 

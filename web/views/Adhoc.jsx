@@ -95,8 +95,14 @@ function AdhocView({ prefill }) {
   const streamRef = useRefA(null);
 
   useEffectA(() => {
-    if (prefill?.target) setTarget(prefill.target);
-    if (prefill?.module) setModuleName(prefill.module);
+    if (!prefill) return;
+    if (prefill.target) setTarget(prefill.target);
+    if (prefill.module) setModuleName(prefill.module);
+    if (prefill.args) setArgs(prefill.args);
+    if (typeof prefill.become === 'boolean') setBecome(prefill.become);
+    if (typeof prefill.check === 'boolean') setCheck(prefill.check);
+    if (prefill.forks) setForks(prefill.forks);
+    if (prefill.timeout) setTimeoutState(prefill.timeout);
   }, [prefill]);
 
   const resolvedHosts = useMemoA(() => {
@@ -149,6 +155,14 @@ function AdhocView({ prefill }) {
         setRunning(false);
       }
     });
+  };
+
+  const cancelRun = () => {
+    if (streamRef.current) {
+      streamRef.current.close();
+      streamRef.current = null;
+    }
+    setRunning(false);
   };
 
   useEffectA(() => () => {
@@ -300,9 +314,15 @@ function AdhocView({ prefill }) {
               <button type="button" className="btn small" onClick={() => setSaveOpen(true)}>
                 <Icon name="download" size={12}/> Save as playbook…
               </button>
-              <button type="button" className="btn primary" onClick={run} disabled={running}>
-                <Icon name="play" size={12}/> {running ? 'Running…' : 'Run'}
-              </button>
+              {running ? (
+                <button type="button" className="btn" onClick={cancelRun}>
+                  <Icon name="x" size={12}/> Cancel
+                </button>
+              ) : (
+                <button type="button" className="btn primary" onClick={run}>
+                  <Icon name="play" size={12}/> Run
+                </button>
+              )}
             </div>
           </div>
         </div>

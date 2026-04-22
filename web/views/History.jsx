@@ -18,7 +18,7 @@ function filterRuns(runs, filter) {
   return runs.filter(r => r.status === filter);
 }
 
-function HistoryView({ onOpenPlaybook, onRunPlaybook }) {
+function HistoryView({ onOpenPlaybook, onRunPlaybook, onOpenAdhoc }) {
   const data = globalThis.AnsibleData || {};
   const RUNS = data.RUNS || [];
   const PLAYBOOKS = data.PLAYBOOKS || [];
@@ -146,6 +146,28 @@ function HistoryView({ onOpenPlaybook, onRunPlaybook }) {
                   </button>
                 </>
               )}
+              {detail?.kind === 'adhoc' && (
+                <>
+                  {detail.status === 'err' && (
+                    <button
+                      type="button"
+                      className="btn small"
+                      onClick={() => onOpenAdhoc?.(buildAdhocRetryPrefill(detail))}
+                      disabled={failedHostsFromLog(detail.log).length === 0}
+                      title="Re-run against only the hosts that failed last time"
+                    >
+                      <Icon name="refresh" size={12}/> Retry failed
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    className="btn primary small"
+                    onClick={() => onOpenAdhoc?.(buildAdhocRerunPrefill(detail))}
+                  >
+                    <Icon name="play" size={12}/> Re-run
+                  </button>
+                </>
+              )}
               {detail && (
                 <button type="button" className="btn small" onClick={() => exportOneRun(detail)}>
                   <Icon name="download" size={12}/> Download log
@@ -260,6 +282,30 @@ function buildRetryPrefill(run) {
     extraVars: run.extraVars || {},
     check: !!run.check,
     become: !!run.become
+  };
+}
+
+// buildAdhocRerunPrefill / buildAdhocRetryPrefill produce the prefill
+// object AdhocView accepts via openAdhoc(). Retry uses the failed-
+// host list from the log as the explicit target; the regular re-run
+// keeps whatever target/selection the run was originally launched at.
+function buildAdhocRerunPrefill(run) {
+  return {
+    target: run.target || 'all',
+    module: run.module || 'ansible.builtin.ping',
+    args: run.args || {},
+    become: !!run.become,
+    check: !!run.check,
+    forks: run.forks || 0,
+    timeout: run.timeout || 0
+  };
+}
+
+function buildAdhocRetryPrefill(run) {
+  const hosts = failedHostsFromLog(run.log);
+  return {
+    ...buildAdhocRerunPrefill(run),
+    target: hosts.length ? hosts.join(',') : run.target || 'all'
   };
 }
 
