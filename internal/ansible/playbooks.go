@@ -42,7 +42,28 @@ func ListPlaybooks(ctx context.Context, pool *sshpool.Pool, srv config.Server) (
 		return nil, err
 	}
 	cmd := fmt.Sprintf(
-		"cd %s && find . -maxdepth 3 -type f \\( -name '*.yml' -o -name '*.yaml' \\) -printf '%%P\\t%%s\\t%%T@\\n'",
+		"cd %s && find . -maxdepth 3 -type f "+
+			"\\( -name '*.yml' -o -name '*.yaml' \\) "+
+			// Skip the usual Ansible dirs that hold YAML but aren't
+			// playbooks: variable files, role internals, inventory
+			// definitions, jinja templates, static file payloads.
+			"-not -path './host_vars/*' "+
+			"-not -path './group_vars/*' "+
+			"-not -path './roles/*' "+
+			"-not -path './collections/*' "+
+			"-not -path './inventory/*' "+
+			"-not -path './inventories/*' "+
+			"-not -path './vars/*' "+
+			"-not -path './defaults/*' "+
+			"-not -path './tasks/*' "+
+			"-not -path './handlers/*' "+
+			"-not -path './meta/*' "+
+			"-not -path './files/*' "+
+			"-not -path './templates/*' "+
+			"-not -path './library/*' "+
+			"-not -path './*_plugins/*' "+
+			"-not -path './.*' "+
+			"-printf '%%P\\t%%s\\t%%T@\\n'",
 		shellQuote(srv.WorkDir),
 	)
 	stdout, stderr, err := sshpool.Run(cli, cmd)
