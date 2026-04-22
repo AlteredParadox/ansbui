@@ -42,6 +42,9 @@ function suggestedTargets(hosts, groups, descendants) {
   return [{ id: 'all', count: hosts.length }, ...sorted];
 }
 
+// EVENT_MAPPING translates a backend event type into the terminal line
+// kind. "done" is intentionally missing here — it's handled in the
+// run-finish branch below so we don't log it twice.
 const EVENT_MAPPING = {
   ok: { t: 'ok', state: 'ok' },
   changed: { t: 'changed', state: 'changed' },
@@ -51,8 +54,7 @@ const EVENT_MAPPING = {
   'recap-fail': { t: 'recap-fail' },
   meta: { t: 'meta' },
   line: { t: 'meta' },
-  error: { t: 'fail' },
-  done: { t: 'done' }
+  error: { t: 'fail' }
 };
 
 const STATE_TO_CLASS = { ok: 'ok', changed: 'changed', failed: 'err' };
@@ -140,17 +142,32 @@ function AdhocView({ prefill }) {
       setHostStates(prev => ({ ...prev, [idByName[name] || name]: state }));
     };
 
+    let finished = false;
+    const finish = (text) => {
+      if (finished) return;
+      finished = true;
+      appendLog({ t: 'done', text });
+      setRunning(false);
+      stream.close();
+      streamRef.current = null;
+    };
+
     stream.onEvent((evt) => {
       const mapping = EVENT_MAPPING[evt.type];
       if (mapping) {
         appendLog({ t: mapping.t, text: evt.text || '' });
         if (mapping.state) markHost(evt.host, mapping.state);
+        return;
       }
-      if (evt.type === 'done' || evt.type === 'run-complete') {
-        appendLog({ t: 'done', text: `completed in ${((Date.now() - startTime) / 1000).toFixed(1)}s` });
-        setRunning(false);
-        stream.close();
-        streamRef.current = null;
+      if (evt.type === 'done') {
+        finish(evt.text || `completed in ${((Date.now() - startTime) / 1000).toFixed(1)}s`);
+        return;
+      }
+      if (evt.type === 'run-complete') {
+        // The backend has already sent a 'done' event with the wall
+        // time. 'run-complete' is just the persisted run record's id
+        // + final status — no need for another log line.
+        finish(`completed in ${((Date.now() - startTime) / 1000).toFixed(1)}s`);
       }
     });
     stream.onClose(() => {
