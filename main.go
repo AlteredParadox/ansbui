@@ -16,10 +16,12 @@ import (
 	"flag"
 	"io/fs"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -33,8 +35,10 @@ import (
 var webFS embed.FS
 
 func main() {
-	addr := flag.String("addr", "127.0.0.1:8787", "listen address")
+	addr := flag.String("addr", ":8787", "listen address (host:port). Default ':8787' binds on all interfaces")
 	flag.Parse()
+
+	warnIfExposed(*addr)
 
 	cfg, err := config.New()
 	if err != nil {
@@ -86,6 +90,29 @@ func main() {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_ = httpSrv.Shutdown(shutdownCtx)
+}
+
+// warnIfExposed prints a startup warning when the listen address is
+// reachable from outside the loopback interface. Relay has no built-in
+// authentication yet — anyone who can reach the port can drive
+// ansible-playbook as the configured SSH user — so the operator needs
+// to know they're running it that way.
+func warnIfExposed(addr string) {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		// malformed flag; ListenAndServe will complain shortly
+		return
+	}
+	host = strings.TrimSpace(host)
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		log.Print("⚠  Relay is listening on all interfaces and has no built-in auth.")
+		log.Print("⚠  Put it behind an SSH tunnel, VPN, or reverse proxy with auth before exposing to untrusted networks.")
+		return
+	}
+	ip := net.ParseIP(host)
+	if ip != nil && !ip.IsLoopback() {
+		log.Printf("⚠  Relay is bound to %s (non-loopback) without auth — restrict reachability to trusted networks.", host)
+	}
 }
 
 func runsPath() (string, error) {

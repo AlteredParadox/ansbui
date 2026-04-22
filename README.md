@@ -12,10 +12,16 @@ A single-binary web UI for an Ansible control node.
 ```sh
 sudo apt install -y golang-go openssh-client
 go build -o relay .
-./relay -addr 127.0.0.1:8787
+./relay              # default: -addr :8787 (all interfaces)
 ```
 
-Open `http://127.0.0.1:8787/` in a browser. On first load you'll be prompted to add an ansible server — the SSH coordinates of a remote machine that already has `ansible` installed.
+Open `http://<host>:8787/` in a browser. On first load you'll be prompted to add an ansible server — the SSH coordinates of a remote machine that already has `ansible` installed.
+
+To restrict to loopback (useful if you're accessing via an SSH tunnel):
+
+```sh
+./relay -addr 127.0.0.1:8787
+```
 
 ## Configuration
 
@@ -50,7 +56,8 @@ web/                    # static bundle (embedded)
 
 ## Security posture
 
-- SSH auth is key-based only (agent or on-disk key) — no password prompt.
+- **Relay has no built-in authentication.** Anyone who can reach the listen port can drive `ansible-playbook` as the configured SSH user. When bound to a non-loopback address, the binary logs a warning on startup. Put it behind an SSH tunnel (`ssh -L 8787:localhost:8787 host`), a VPN, or a reverse proxy (Caddy / Nginx) with auth before exposing to untrusted networks.
+- SSH auth to the ansible controller is key-based only (agent or on-disk key) — no password prompt.
 - The websocket upgrader enforces same-origin.
 - Playbook paths are validated against `^[A-Za-z0-9._-]+$` per segment, blocking `..` traversal.
 - Ansible argument keys are validated; values are shell-quoted.
