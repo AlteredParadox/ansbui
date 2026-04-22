@@ -27,14 +27,16 @@ function VaultView() {
 
   useEffectV(() => { reload(); }, []);
 
+  const subtitle = loading
+    ? 'Scanning workDir…'
+    : `${files.length} vault-encrypted ${pluralise('file', files.length)} found in the active server's workDir.`;
+
   return (
     <div className="view view-vault">
       <div className="view-head">
         <div>
           <h1 className="view-title">Secrets</h1>
-          <div className="view-sub mute">
-            {loading ? 'Scanning workDir…' : `${files.length} vault-encrypted file${files.length === 1 ? '' : 's'} found in the active server's workDir.`}
-          </div>
+          <div className="view-sub mute">{subtitle}</div>
         </div>
         <div className="view-actions">
           <button type="button" className="btn small" onClick={reload} disabled={loading}>
@@ -86,6 +88,10 @@ function VaultView() {
       />
     </div>
   );
+}
+
+function pluralise(noun, n) {
+  return n === 1 ? noun : `${noun}s`;
 }
 
 function formatBytes(n) {
