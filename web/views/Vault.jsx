@@ -104,6 +104,18 @@ function VaultView() {
 // EmptyVaultHint points at the real workDir so the operator can paste
 // the exact path into their ansible-vault command, and offers an
 // inline shortcut to open a file the scanner didn't pick up.
+const HINT_CODE_STYLE = {
+  background: 'var(--bg-inset)',
+  border: '1px solid var(--line-soft)',
+  borderRadius: 'var(--r-2)',
+  padding: '8px 10px',
+  margin: '6px 0',
+  fontSize: 12,
+  color: 'var(--text-2)',
+  whiteSpace: 'pre-wrap',
+  wordBreak: 'break-all'
+};
+
 function EmptyVaultHint({ workDir, onOpenByPath }) {
   return (
     <div className="mute" style={{ padding: 24, fontSize: 12.5, lineHeight: 1.7 }}>
@@ -112,19 +124,14 @@ function EmptyVaultHint({ workDir, onOpenByPath }) {
       </div>
       {workDir && (
         <div style={{ marginTop: 8 }}>
-          Scanner looked at <span className="mono" style={{ color: 'var(--text-2)' }}>{workDir}</span>.
-          Create one with:
-          <pre className="code-block" style={{
-            background: 'var(--bg-inset)',
-            border: '1px solid var(--line-soft)',
-            borderRadius: 'var(--r-2)',
-            padding: '8px 10px',
-            margin: '6px 0',
-            fontSize: 12,
-            color: 'var(--text-2)',
-            whiteSpace: 'pre-wrap',
-            wordBreak: 'break-all'
-          }}>{`cd ${workDir}\nansible-vault create group_vars/all/vault.yml`}</pre>
+          Scanner looked at <span className="mono" style={{ color: 'var(--text-2)' }}>{workDir}</span> and every subdirectory.
+          Ansible supports two common layouts — use whichever matches your repo:
+          <pre className="code-block" style={HINT_CODE_STYLE}>{`# inventory-dir layout (scoped per-inventory)
+cd ${workDir}
+ansible-vault create inventory/group_vars/all/vault.yml
+
+# top-level layout (scoped per-repo)
+ansible-vault create group_vars/all/vault.yml`}</pre>
         </div>
       )}
       <div style={{ marginTop: 6 }}>
