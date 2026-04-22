@@ -8,6 +8,30 @@
 
 const { useState, useEffect, useRef, useCallback, useMemo } = React;
 
+// useDialog binds a <dialog> element to a controlled `open` boolean.
+// When open flips true we call showModal(); when it flips false we call
+// close(). The onClose callback fires for both programmatic closes and
+// native dismissals (Escape, form method="dialog", etc.). Used by the
+// command palette, connection manager, and host drawer so we get the
+// native focus trap + ::backdrop rather than a hand-rolled scrim div.
+function useDialog(open, onClose) {
+  const ref = useRef(null);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    if (open && !el.open) el.showModal();
+    else if (!open && el.open) el.close();
+  }, [open]);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el || !onClose) return undefined;
+    const handler = () => onClose();
+    el.addEventListener('close', handler);
+    return () => el.removeEventListener('close', handler);
+  }, [onClose]);
+  return ref;
+}
+
 const NAV_BASE = [
   { id: 'dashboard', label: 'Dashboard', icon: 'dashboard', hint: 'g d' },
   { id: 'inventory', label: 'Inventory', icon: 'inventory', hint: 'g i', countKey: 'HOSTS' },
@@ -131,3 +155,4 @@ globalThis.Sidebar = Sidebar;
 globalThis.TopNav = TopNav;
 globalThis.TopLayoutNav = TopLayoutNav;
 globalThis.TWEAK_DEFAULTS = TWEAK_DEFAULTS;
+globalThis.useDialog = useDialog;

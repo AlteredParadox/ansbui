@@ -131,7 +131,7 @@ function HistoryView() {
             {detail && (!detail.log || detail.log.length === 0) && (
               <div className="terminal-empty mute-2 mono"># no log captured for this run</div>
             )}
-            {detail && detail.log && detail.log.map((evt, i) => (
+            {detail?.log?.map((evt, i) => (
               <div key={`${i}-${evt.type}`} className={`term-line term-${evt.type}`}>
                 {evt.type === 'ok' && <span className="term-prefix">ok</span>}
                 {evt.type === 'changed' && <span className="term-prefix">changed</span>}

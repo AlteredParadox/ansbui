@@ -174,7 +174,7 @@ function YamlEditor({ value, onSave }) {
       </div>
       <div className="code-body">
         <div className="code-gutter mono">
-          {lines.map((_, i) => <div key={`gut-${i}`}>{i + 1}</div>)}
+          <pre style={{ margin: 0 }}>{Array.from({ length: lines.length }, (_, i) => i + 1).join('\n')}</pre>
         </div>
         <pre className="code-block code-block-edit">
           <code>{highlightYamlFull(value)}</code>

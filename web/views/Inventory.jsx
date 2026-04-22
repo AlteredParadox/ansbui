@@ -225,7 +225,7 @@ function InventoryGraph({ groups, hosts, onSelectGroup }) {
 
         {groups.map(g => {
           const p = positioned[g.id];
-          if (!p || p.tier !== 2) return null;
+          if (p?.tier !== 2) return null;
           const gHosts = hosts.filter(h => (h.groups || []).includes(g.id));
           const count = Math.min(12, gHosts.length);
           const ang0 = Math.atan2(p.y - CY, p.x - CX);
@@ -445,8 +445,10 @@ function emitHosts(group, pad, lines, hosts) {
   if (!gHosts.length) return;
   lines.push(`${pad}  hosts:`);
   for (const h of gHosts.slice(0, 6)) {
-    lines.push(`${pad}    ${h.name}:`);
-    lines.push(`${pad}      ansible_host: ${h.ip}`);
+    lines.push(
+      `${pad}    ${h.name}:`,
+      `${pad}      ansible_host: ${h.ip}`
+    );
   }
   if (gHosts.length > 6) lines.push(`${pad}    # … ${gHosts.length - 6} more`);
 }
@@ -629,30 +631,26 @@ function InventoryView({ onOpenAdhoc }) {
         </div>
       )}
 
-      {detail && <HostDrawer host={detail} onClose={() => setDetail(null)}/>}
+      <HostDrawer host={detail} onClose={() => setDetail(null)}/>
     </div>
   );
 }
 
 function HostDrawer({ host, onClose }) {
-  const onKeyDown = (e) => {
-    if (e.key === 'Escape') { e.preventDefault(); onClose(); }
-  };
+  const open = host != null;
+  const dialogRef = globalThis.useDialog(open, onClose);
+  if (!host) {
+    return <dialog ref={dialogRef} className="relay-dialog relay-dialog-drawer" aria-hidden="true"/>;
+  }
   return (
-    <div
-      className="drawer-scrim"
-      role="dialog"
-      aria-modal="true"
+    <dialog
+      ref={dialogRef}
+      className="relay-dialog relay-dialog-drawer"
       aria-label={`Host ${host.name}`}
-      tabIndex={-1}
-      onMouseDown={onClose}
-      onKeyDown={onKeyDown}
+      onClose={onClose}
+      onClick={(e) => { if (e.target === dialogRef.current) onClose(); }}
     >
-      <aside
-        className="drawer"
-        onMouseDown={e => e.stopPropagation()}
-        onKeyDown={onKeyDown}
-      >
+      <aside className="drawer">
         <div className="drawer-head">
           <div>
             <div className="section-title">Host</div>
@@ -697,7 +695,7 @@ function HostDrawer({ host, onClose }) {
           <button type="button" className="btn primary small"><Icon name="play" size={12}/> Run on this host</button>
         </div>
       </aside>
-    </div>
+    </dialog>
   );
 }
 

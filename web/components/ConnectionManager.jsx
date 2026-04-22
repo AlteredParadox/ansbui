@@ -123,21 +123,17 @@ function ConnectionManager({ open, onClose, onActivated, initialServers, initial
     finally { setBusy(false); }
   };
 
-  if (!open) return null;
+  const dialogRef = globalThis.useDialog(open, onClose);
 
   return (
-    <div
-      className="cp-scrim"
-      role="presentation"
-      onMouseDown={onClose}
+    <dialog
+      ref={dialogRef}
+      className="relay-dialog relay-dialog-center"
+      aria-label="Connections and settings"
+      onClose={onClose}
+      onClick={(e) => { if (e.target === dialogRef.current) onClose(); }}
     >
-      <div
-        className="cm"
-        role="dialog"
-        aria-modal="true"
-        aria-label="Connections and settings"
-        onMouseDown={e => e.stopPropagation()}
-      >
+      <div className="cm">
         <div className="cm-head">
           <div className="seg">
             <button type="button" className={tab === 'servers' ? 'on' : ''} onClick={() => setTab('servers')}>Ansible servers</button>
@@ -162,7 +158,7 @@ function ConnectionManager({ open, onClose, onActivated, initialServers, initial
           />
         )}
       </div>
-    </div>
+    </dialog>
   );
 }
 

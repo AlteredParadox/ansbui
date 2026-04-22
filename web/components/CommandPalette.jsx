@@ -103,6 +103,7 @@ function CommandPalette({ open, onClose, onNavigate, onOpenAdhoc, onRunPlaybook 
   const [q, setQ] = useStateCP('');
   const [sel, setSel] = useStateCP(0);
   const inputRef = useRefCP(null);
+  const dialogRef = globalThis.useDialog(open, onClose);
 
   useEffectCP(() => {
     if (!open) return undefined;
@@ -121,38 +122,27 @@ function CommandPalette({ open, onClose, onNavigate, onOpenAdhoc, onRunPlaybook 
 
   useEffectCP(() => { setSel(0); }, [q]);
 
-  useEffectCP(() => {
-    if (!open) return undefined;
-    const onKey = (e) => {
-      if (e.key === 'Escape') { e.preventDefault(); onClose(); return; }
-      if (e.key === 'ArrowDown') { e.preventDefault(); setSel(s => Math.min(flat.length - 1, s + 1)); return; }
-      if (e.key === 'ArrowUp') { e.preventDefault(); setSel(s => Math.max(0, s - 1)); return; }
-      if (e.key === 'Enter') {
-        e.preventDefault();
-        const item = flat[sel];
-        if (item) { item.run(); onClose(); }
-      }
-    };
-    globalThis.addEventListener('keydown', onKey);
-    return () => globalThis.removeEventListener('keydown', onKey);
-  }, [open, flat, sel, onClose]);
-
-  if (!open) return null;
+  const handleKey = (e) => {
+    if (e.key === 'ArrowDown') { e.preventDefault(); setSel(s => Math.min(flat.length - 1, s + 1)); return; }
+    if (e.key === 'ArrowUp') { e.preventDefault(); setSel(s => Math.max(0, s - 1)); return; }
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      const item = flat[sel];
+      if (item) { item.run(); onClose(); }
+    }
+  };
 
   let running = 0;
   return (
-    <div
-      className="cp-scrim"
-      role="presentation"
-      onMouseDown={onClose}
+    <dialog
+      ref={dialogRef}
+      className="relay-dialog relay-dialog-center"
+      aria-label="Command palette"
+      onClose={onClose}
+      onClick={(e) => { if (e.target === dialogRef.current) onClose(); }}
+      onKeyDown={handleKey}
     >
-      <div
-        className="cp"
-        role="dialog"
-        aria-modal="true"
-        aria-label="Command palette"
-        onMouseDown={e => e.stopPropagation()}
-      >
+      <div className="cp">
         <div className="cp-head">
           <Icon name="search" size={14} className="mute" />
           <input
@@ -205,7 +195,7 @@ function CommandPalette({ open, onClose, onNavigate, onOpenAdhoc, onRunPlaybook 
           <span style={{ marginLeft: 'auto' }} className="mute">{flat.length} results</span>
         </div>
       </div>
-    </div>
+    </dialog>
   );
 }
 

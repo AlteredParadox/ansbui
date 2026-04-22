@@ -102,7 +102,7 @@
   ];
 
   function buildGroups(groups) {
-    if (!groups || !groups.length) return [];
+    if (!groups?.length) return [];
     return groups.map(g => ({
       id: g.id || g.name,
       name: g.name,
