@@ -468,6 +468,7 @@ function PlaybooksView({ initialId }) {
 function PlaybookRunner({ open, pb, onClose }) {
   const dialogRef = globalThis.useDialog(open, onClose);
   const [limit, setLimit] = useStateP('');
+  const [limitPickerOpen, setLimitPickerOpen] = useStateP(false);
   const [tagsRaw, setTagsRaw] = useStateP('');
   const [check, setCheck] = useStateP(false);
   const [become, setBecome] = useStateP(false);
@@ -579,7 +580,12 @@ function PlaybookRunner({ open, pb, onClose }) {
 
         <div className="pb-runner-form">
           <label htmlFor="pb-limit" className="cm-field-label">Limit (optional — overrides hosts:)</label>
-          <input id="pb-limit" className="input mono" placeholder={pb.targets || 'e.g. webservers, host1.example.com'} value={limit} onChange={e => setLimit(e.target.value)}/>
+          <div className="pb-limit-row">
+            <input id="pb-limit" className="input mono" placeholder={pb.targets || 'e.g. webservers, host1.example.com'} value={limit} onChange={e => setLimit(e.target.value)}/>
+            <button type="button" className="btn small" onClick={() => setLimitPickerOpen(true)}>
+              <Icon name="filter" size={12}/> Browse…
+            </button>
+          </div>
 
           <label htmlFor="pb-tags" className="cm-field-label">Tags (comma-separated, optional)</label>
           <input id="pb-tags" className="input mono" placeholder="deploy, config" value={tagsRaw} onChange={e => setTagsRaw(e.target.value)}/>
@@ -640,6 +646,12 @@ function PlaybookRunner({ open, pb, onClose }) {
           ))}
         </div>
       </div>
+      <LimitPicker
+        open={limitPickerOpen}
+        initialValue={limit}
+        onClose={() => setLimitPickerOpen(false)}
+        onApply={(v) => { setLimit(v); setLimitPickerOpen(false); }}
+      />
     </dialog>
   );
 }
@@ -775,6 +787,188 @@ function collectExtraVars(rows) {
     }
   });
   return out;
+}
+
+// ---------- Limit picker ----------
+//
+// Browse inventory groups + hosts with multi-select, then write a
+// comma-joined limit expression into the Run dialog's limit field.
+// Items map 1:1 to ansible's --limit pattern language — group names
+// and host names share a namespace. We keep the selected set as
+// ordered unique tokens so the user can see what they picked before
+// applying.
+
+function splitTokens(raw) {
+  return (raw || '')
+    .split(/[\s,]+/)
+    .map(s => s.trim())
+    .filter(Boolean);
+}
+
+function LimitPicker({ open, initialValue, onClose, onApply }) {
+  const dialogRef = globalThis.useDialog(open, onClose);
+  const data = globalThis.AnsibleData || {};
+  const GROUPS = data.GROUPS || [];
+  const HOSTS = data.HOSTS || [];
+  const [selected, setSelected] = useStateP(new Set());
+  const [query, setQuery] = useStateP('');
+
+  useEffectP(() => {
+    if (!open) return;
+    setSelected(new Set(splitTokens(initialValue)));
+    setQuery('');
+  }, [open, initialValue]);
+
+  const descendants = useMemoP(() => {
+    const childrenOf = {};
+    for (const g of GROUPS) (childrenOf[g.parent ?? '__root__'] ||= []).push(g.id);
+    const cache = {};
+    const walk = (id) => {
+      if (cache[id]) return cache[id];
+      const set = new Set([id]);
+      for (const c of childrenOf[id] || []) for (const d of walk(c)) set.add(d);
+      cache[id] = set;
+      return set;
+    };
+    for (const g of GROUPS) walk(g.id);
+    return cache;
+  }, [GROUPS]);
+
+  const groupRows = useMemoP(() => {
+    const q = query.trim().toLowerCase();
+    return GROUPS
+      .filter(g => g.id !== 'ungrouped')
+      .filter(g => !q || g.name.toLowerCase().includes(q))
+      .map(g => {
+        const set = descendants[g.id] || new Set([g.id]);
+        const count = HOSTS.filter(h => (h.groups || []).some(x => set.has(x))).length;
+        return { id: g.id, name: g.name, count };
+      })
+      .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
+  }, [GROUPS, HOSTS, descendants, query]);
+
+  const hostRows = useMemoP(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return HOSTS.slice(0, 200);
+    return HOSTS.filter(h =>
+      h.name.toLowerCase().includes(q) ||
+      (h.ip || '').includes(q) ||
+      (h.groups || []).join(' ').toLowerCase().includes(q)
+    ).slice(0, 200);
+  }, [HOSTS, query]);
+
+  const toggle = (id) => setSelected(prev => {
+    const next = new Set(prev);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    return next;
+  });
+
+  const selectedList = [...selected];
+  const apply = () => onApply(selectedList.join(','));
+
+  return (
+    <dialog
+      ref={dialogRef}
+      className="relay-dialog relay-dialog-center"
+      aria-label="Pick limit targets"
+      onClick={(e) => { if (e.target === dialogRef.current) onClose(); }}
+    >
+      <div className="cm" style={{ width: 'min(720px, 94vw)', maxHeight: '75vh' }}>
+        <div className="cm-head">
+          <div>
+            <div className="section-title">Browse inventory</div>
+            <div className="mute" style={{ fontSize: 12, marginTop: 2 }}>
+              Pick groups or hosts — the picker builds a comma-separated --limit expression.
+            </div>
+          </div>
+          <button type="button" className="btn ghost small" onClick={onClose}><Icon name="x" size={14}/></button>
+        </div>
+        <div className="cm-body cm-single">
+          <div className="cm-pane">
+            <input
+              className="input"
+              aria-label="Filter groups and hosts"
+              placeholder="Filter…"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              style={{ marginBottom: 10 }}
+            />
+            <div className="lp-grid">
+              <div>
+                <div className="section-title" style={{ marginBottom: 4 }}>Groups · {groupRows.length}</div>
+                <div className="lp-list">
+                  {groupRows.length === 0 && <div className="mute mono" style={{ fontSize: 12 }}>no matches</div>}
+                  {groupRows.map(g => (
+                    <label key={`g-${g.id}`} className="lp-row" htmlFor={`lp-g-${g.id}`}>
+                      <input
+                        id={`lp-g-${g.id}`}
+                        type="checkbox"
+                        checked={selected.has(g.id)}
+                        onChange={() => toggle(g.id)}
+                      />
+                      <Icon name="group" size={12}/>
+                      <span className="mono">{g.name}</span>
+                      <span className="mute mono" style={{ marginLeft: 'auto', fontSize: 11 }}>{g.count}</span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+              <div>
+                <div className="section-title" style={{ marginBottom: 4 }}>Hosts · {hostRows.length}{HOSTS.length > hostRows.length ? ` of ${HOSTS.length}` : ''}</div>
+                <div className="lp-list">
+                  {hostRows.length === 0 && <div className="mute mono" style={{ fontSize: 12 }}>no matches</div>}
+                  {hostRows.map(h => (
+                    <label key={`h-${h.id}`} className="lp-row" htmlFor={`lp-h-${h.id}`}>
+                      <input
+                        id={`lp-h-${h.id}`}
+                        type="checkbox"
+                        checked={selected.has(h.name)}
+                        onChange={() => toggle(h.name)}
+                      />
+                      <span className={`dot ${h.status}`}/>
+                      <span className="mono">{h.name}</span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            <div className="lp-selected">
+              <div className="section-title" style={{ marginBottom: 4 }}>Selected · {selectedList.length}</div>
+              <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                {selectedList.length === 0 && <span className="mute" style={{ fontSize: 12 }}>Nothing selected.</span>}
+                {selectedList.map(tok => (
+                  <button
+                    key={tok}
+                    type="button"
+                    className="chip on"
+                    onClick={() => toggle(tok)}
+                    title="Remove"
+                  >
+                    <span className="mono">{tok}</span>
+                    <Icon name="x" size={10}/>
+                  </button>
+                ))}
+              </div>
+              <div className="mono mute" style={{ fontSize: 11.5, marginTop: 6, wordBreak: 'break-all' }}>
+                --limit {selectedList.join(',') || '(empty)'}
+              </div>
+            </div>
+
+            <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+              <button type="button" className="btn primary small" onClick={apply} disabled={selectedList.length === 0}>
+                <Icon name="check" size={12}/> Apply
+              </button>
+              <button type="button" className="btn small" onClick={() => setSelected(new Set())} disabled={selectedList.length === 0}>
+                Clear
+              </button>
+              <button type="button" className="btn small" onClick={onClose}>Cancel</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </dialog>
+  );
 }
 
 // ---------- History dialog ----------
