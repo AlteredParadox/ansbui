@@ -370,12 +370,13 @@ function PlaybookRunner({ open, pb, onClose }) {
   const [output, setOutput] = useStateP([]);
   // vars are stored as an ordered list of {key, value} rows so empty
   // rows remain in the UI while the user is typing.
-  const [vars, setVars] = useStateP([{ key: '', value: '' }]);
+  const [vars, setVars] = useStateP([{ key: '', type: 'string', value: '' }]);
+  const [varsError, setVarsError] = useStateP('');
   const streamRef = useRefP(null);
   const outRef = useRefP(null);
 
   const setVarAt = (i, patch) => setVars(prev => prev.map((row, j) => (j === i ? { ...row, ...patch } : row)));
-  const addVar = () => setVars(prev => [...prev, { key: '', value: '' }]);
+  const addVar = () => setVars(prev => [...prev, { key: '', type: 'string', value: '' }]);
   const removeVar = (i) => setVars(prev => prev.filter((_, j) => j !== i));
 
   useEffectP(() => {
@@ -401,11 +402,14 @@ function PlaybookRunner({ open, pb, onClose }) {
     const appendLog = (entry) => { log.push(entry); setOutput([...log]); };
 
     const tags = tagsRaw.split(',').map(t => t.trim()).filter(Boolean);
-    const extraVars = {};
-    for (const { key, value } of vars) {
-      const k = key.trim();
-      if (!k) continue;
-      extraVars[k] = value;
+    let extraVars;
+    try {
+      extraVars = collectExtraVars(vars);
+      setVarsError('');
+    } catch (e) {
+      setVarsError(e.message);
+      setRunning(false);
+      return;
     }
     const payload = {
       path: pb.path,
@@ -478,36 +482,19 @@ function PlaybookRunner({ open, pb, onClose }) {
           <div className="cm-field-label" style={{ marginTop: 8 }}>Extra variables (--extra-vars)</div>
           <div className="pb-vars">
             {vars.map((row, i) => (
-              <div className="pb-var-row" key={i}>
-                <input
-                  className="input mono"
-                  aria-label={`Variable ${i + 1} name`}
-                  placeholder="var_name"
-                  value={row.key}
-                  onChange={e => setVarAt(i, { key: e.target.value })}
-                />
-                <span className="mute-2 mono" aria-hidden="true">=</span>
-                <input
-                  className="input mono"
-                  aria-label={`Variable ${i + 1} value`}
-                  placeholder="value"
-                  value={row.value}
-                  onChange={e => setVarAt(i, { value: e.target.value })}
-                />
-                <button
-                  type="button"
-                  className="btn ghost small"
-                  onClick={() => removeVar(i)}
-                  disabled={vars.length === 1 && !row.key && !row.value}
-                  title="Remove variable"
-                >
-                  <Icon name="x" size={12}/>
-                </button>
-              </div>
+              <PlaybookVarRow
+                key={i}
+                index={i}
+                row={row}
+                onChange={(patch) => setVarAt(i, patch)}
+                onRemove={() => removeVar(i)}
+                removable={vars.length > 1 || row.key !== '' || row.value !== ''}
+              />
             ))}
             <button type="button" className="btn ghost small" onClick={addVar} style={{ justifySelf: 'start' }}>
               <Icon name="plus" size={11}/> Add variable
             </button>
+            {varsError && <div className="cm-error mono" style={{ marginTop: 4 }}>{varsError}</div>}
           </div>
 
           <div className="pb-runner-opts">
@@ -550,6 +537,139 @@ function PlaybookRunner({ open, pb, onClose }) {
       </div>
     </dialog>
   );
+}
+
+// ---------- Extra-vars editor ----------
+
+const VAR_TYPES = [
+  { id: 'string', label: 'string' },
+  { id: 'number', label: 'number' },
+  { id: 'bool',   label: 'bool' },
+  { id: 'json',   label: 'json' }
+];
+
+function PlaybookVarRow({ index, row, onChange, onRemove, removable }) {
+  const valueId = `pb-var-${index}-value`;
+  return (
+    <div className="pb-var-row">
+      <input
+        className="input mono"
+        aria-label={`Variable ${index + 1} name`}
+        placeholder="var_name"
+        value={row.key}
+        onChange={(e) => onChange({ key: e.target.value })}
+      />
+      <select
+        className="input pb-var-type"
+        aria-label={`Variable ${index + 1} type`}
+        value={row.type}
+        onChange={(e) => onChange({ type: e.target.value })}
+      >
+        {VAR_TYPES.map(t => <option key={t.id} value={t.id}>{t.label}</option>)}
+      </select>
+      <PlaybookVarValue id={valueId} row={row} onChange={onChange}/>
+      <button
+        type="button"
+        className="btn ghost small"
+        onClick={onRemove}
+        disabled={!removable}
+        title="Remove variable"
+      >
+        <Icon name="x" size={12}/>
+      </button>
+    </div>
+  );
+}
+
+function PlaybookVarValue({ id, row, onChange }) {
+  if (row.type === 'bool') {
+    const current = row.value === true || row.value === 'true';
+    return (
+      <select
+        id={id}
+        className="input mono"
+        aria-label="value"
+        value={current ? 'true' : 'false'}
+        onChange={(e) => onChange({ value: e.target.value })}
+      >
+        <option value="true">true</option>
+        <option value="false">false</option>
+      </select>
+    );
+  }
+  if (row.type === 'number') {
+    return (
+      <input
+        id={id}
+        className="input mono"
+        type="number"
+        aria-label="value"
+        placeholder="0"
+        value={row.value}
+        onChange={(e) => onChange({ value: e.target.value })}
+      />
+    );
+  }
+  if (row.type === 'json') {
+    return (
+      <input
+        id={id}
+        className="input mono"
+        aria-label="value"
+        placeholder='["a","b"]  or  {"nested":"obj"}'
+        value={row.value}
+        onChange={(e) => onChange({ value: e.target.value })}
+      />
+    );
+  }
+  return (
+    <input
+      id={id}
+      className="input mono"
+      aria-label="value"
+      placeholder="value"
+      value={row.value}
+      onChange={(e) => onChange({ value: e.target.value })}
+    />
+  );
+}
+
+// collectExtraVars walks the row model and builds a typed map ready for
+// JSON-serialization on the backend. Throws on bad number/json input so
+// the run dialog can surface a targeted error.
+function collectExtraVars(rows) {
+  const out = {};
+  rows.forEach((row, idx) => {
+    const key = row.key.trim();
+    if (!key) return;
+    if (row.type === 'string') {
+      if (row.value === '') return;
+      out[key] = row.value;
+      return;
+    }
+    if (row.type === 'number') {
+      if (row.value === '' || row.value === null) return;
+      const n = Number(row.value);
+      if (!Number.isFinite(n)) {
+        throw new Error(`row ${idx + 1} (${key}): "${row.value}" is not a number`);
+      }
+      out[key] = n;
+      return;
+    }
+    if (row.type === 'bool') {
+      out[key] = row.value === true || row.value === 'true';
+      return;
+    }
+    if (row.type === 'json') {
+      if (row.value === '') return;
+      try {
+        out[key] = JSON.parse(row.value);
+      } catch (e) {
+        throw new Error(`row ${idx + 1} (${key}): invalid JSON — ${e.message}`);
+      }
+    }
+  });
+  return out;
 }
 
 globalThis.PlaybooksView = PlaybooksView;

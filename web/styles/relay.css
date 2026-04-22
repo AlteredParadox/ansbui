@@ -212,8 +212,11 @@ dialog.relay-dialog-runner[open] {
 }
 .pb-var-row {
   display: grid;
-  grid-template-columns: 1fr 14px 1fr auto;
+  grid-template-columns: minmax(0, 1.4fr) 94px minmax(0, 1.6fr) auto;
   align-items: center;
   gap: 6px;
 }
-.pb-var-row > span { text-align: center; }
+.pb-var-type {
+  font-size: 12px;
+  padding: 0 8px;
+}

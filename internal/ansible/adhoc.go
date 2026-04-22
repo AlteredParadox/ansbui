@@ -29,12 +29,12 @@ type AdhocRequest struct {
 
 // PlaybookRequest is a request to run `ansible-playbook <path>`.
 type PlaybookRequest struct {
-	Path      string            `json:"path"`
-	Limit     string            `json:"limit,omitempty"`
-	Tags      []string          `json:"tags,omitempty"`
-	ExtraVars map[string]string `json:"extraVars,omitempty"`
-	Check     bool              `json:"check"`
-	Become    bool              `json:"become"`
+	Path      string         `json:"path"`
+	Limit     string         `json:"limit,omitempty"`
+	Tags      []string       `json:"tags,omitempty"`
+	ExtraVars map[string]any `json:"extraVars,omitempty"`
+	Check     bool           `json:"check"`
+	Become    bool           `json:"become"`
 }
 
 // Event is a single message streamed to the UI while a run is in flight.
@@ -223,20 +223,27 @@ func buildPlaybookCmd(srv config.Server, req PlaybookRequest) (string, error) {
 
 var argKeyRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
-// buildExtraVarsArg serialises a key/value map to the JSON form that
-// ansible-playbook accepts with `--extra-vars`. Keys are validated the
-// same way as module args so we don't splice arbitrary shell tokens;
-// values go through json.Marshal which handles quoting safely.
-func buildExtraVarsArg(vars map[string]string) (string, error) {
+// buildExtraVarsArg serialises a typed key/value map to the JSON form
+// that ansible-playbook accepts with `--extra-vars`. Keys are
+// validated against the same safe-name regex we use for ad-hoc args so
+// we don't splice arbitrary shell tokens; values are passed through as
+// whatever JSON type the caller supplied (string, number, bool, list,
+// nested object) and re-encoded with json.Marshal, which handles all
+// escaping. nil values are dropped so a half-filled row doesn't send
+// `"key": null` unless the user explicitly typed it.
+func buildExtraVarsArg(vars map[string]any) (string, error) {
 	if len(vars) == 0 {
 		return "", nil
 	}
-	clean := make(map[string]string, len(vars))
+	clean := make(map[string]any, len(vars))
 	for k, v := range vars {
 		if !argKeyRE.MatchString(k) {
 			return "", fmt.Errorf("invalid extra-var name %q (must match %s)", k, argKeyRE)
 		}
-		if v == "" {
+		if v == nil {
+			continue
+		}
+		if s, ok := v.(string); ok && s == "" {
 			continue
 		}
 		clean[k] = v
