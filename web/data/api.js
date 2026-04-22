@@ -1,15 +1,17 @@
-// Relay API client — populates window.AnsibleData with data fetched from
-// the Go backend instead of the static mock. The existing view scripts
-// continue to read from window.AnsibleData; this module just owns the
-// fetches and exposes helpers for mutations and live streaming.
+// Relay API client — populates globalThis.AnsibleData with data fetched
+// from the Go backend. The existing view scripts continue to read from
+// globalThis.AnsibleData; this module owns the fetches, WebSocket
+// streaming, and the bootstrap translation.
 
 (function () {
   const api = {};
 
-  const json = async (path, opts = {}) => {
+  const json = async (path, opts) => {
+    const options = opts || {};
+    const headers = options.headers || {};
     const res = await fetch(path, {
-      headers: { 'Content-Type': 'application/json', ...(opts.headers || {}) },
-      ...opts
+      ...options,
+      headers: { 'Content-Type': 'application/json', ...headers }
     });
     if (!res.ok) {
       const text = await res.text();
@@ -39,13 +41,11 @@
   api.listRuns = () => json('/api/runs');
   api.getRun = (id) => json(`/api/runs/${encodeURIComponent(id)}`);
 
-  // Open a WebSocket to stream ad-hoc / playbook output. Returns
-  // { send, close, onEvent } — caller sends the request payload after
-  // opening, then receives events via onEvent.
+  // Open a WebSocket to stream ad-hoc / playbook output.
   api.openStream = (kind, request) => {
-    const wsProto = window.location.protocol === 'https:' ? 'wss' : 'ws';
+    const wsProto = globalThis.location.protocol === 'https:' ? 'wss' : 'ws';
     const path = kind === 'adhoc' ? '/api/adhoc/stream' : '/api/playbook/stream';
-    const ws = new WebSocket(`${wsProto}://${window.location.host}${path}`);
+    const ws = new WebSocket(`${wsProto}://${globalThis.location.host}${path}`);
     const listeners = new Set();
     ws.addEventListener('open', () => ws.send(JSON.stringify(request)));
     ws.addEventListener('message', (e) => {
@@ -62,7 +62,7 @@
     };
   };
 
-  // Bootstrap window.AnsibleData with the shape the views expect.
+  // Bootstrap globalThis.AnsibleData with the shape the views expect.
   api.bootstrap = async () => {
     const [inv, pbs, runs] = await Promise.all([
       api.inventory().catch(() => ({ groups: [], hosts: [] })),
@@ -71,19 +71,19 @@
     ]);
     const GROUPS = buildGroups(inv.groups);
     const HOSTS = annotateHosts(inv.hosts);
-    const PLAYBOOKS = pbs.playbooks.map(toPlaybookCard);
-    const RUNS = runs.runs.map(toRunCard);
+    const PLAYBOOKS = (pbs.playbooks || []).map(toPlaybookCard);
+    const RUNS = (runs.runs || []).map(toRunCard);
     const ACTIVITY = activityFromRuns(RUNS);
-    window.AnsibleData = {
+    globalThis.AnsibleData = {
       GROUPS,
       HOSTS,
       PLAYBOOKS,
       MODULES: BUILTIN_MODULES,
-      SECRETS: [], // secrets/vault surfaced separately in a future step
+      SECRETS: [],
       RUNS,
       ACTIVITY
     };
-    return window.AnsibleData;
+    return globalThis.AnsibleData;
   };
 
   const BUILTIN_MODULES = [
@@ -131,12 +131,25 @@
     }));
   }
 
+  // Bounded regex — input is a single YAML line up to the first newline
+  // because the /m anchor only lets `.+` run to end-of-line. Safe for
+  // S5852 (ReDoS).
+  const TITLE_RE = /^-[ \t]+name:[ \t]+([^\n]+)$/m;
+  const QUOTES_RE = /["']/g;
+
+  function playbookTitle(p) {
+    if (p.title) return p.title;
+    const yaml = p.yaml || '';
+    const m = TITLE_RE.exec(yaml);
+    if (!m) return p.name;
+    return m[1].replaceAll(QUOTES_RE, '');
+  }
+
   function toPlaybookCard(p) {
-    const titleFromYAML = (p.yaml || '').match(/^-\s+name:\s+(.+)$/m);
     return {
       id: p.id,
       name: p.name,
-      title: p.title || (titleFromYAML ? titleFromYAML[1].replace(/["']/g, '') : p.name),
+      title: playbookTitle(p),
       description: p.description || '',
       tags: p.tags || [],
       lastRun: '',
@@ -175,22 +188,32 @@
     return `${Math.round(diff / 86400)}d ago`;
   }
 
+  // Bounded regex — matches the short friendly-time strings we produce
+  // above (e.g. "12m ago"). No nested repetition. Safe for S5852.
+  const FRIENDLY_RE = /^(\d+)([smhd])/;
+  const UNIT_SECONDS = { s: 1, m: 60, h: 3600, d: 86400 };
+
+  function labelToSeconds(label) {
+    const match = FRIENDLY_RE.exec(label || '');
+    if (!match) return null;
+    const amount = Number.parseInt(match[1], 10);
+    const unit = UNIT_SECONDS[match[2]] || 0;
+    return amount * unit;
+  }
+
   function activityFromRuns(runs) {
     const buckets = new Array(30).fill(0);
-    const now = Date.now();
-    const day = 86400000;
-    runs.forEach(r => {
-      const label = r.when;
-      const m = /([0-9]+)(s|m|h|d)/.exec(label || '');
-      if (!m) { buckets[29] += 1; return; }
-      const n = +m[1];
-      const unit = m[2];
-      const seconds = unit === 's' ? n : unit === 'm' ? n * 60 : unit === 'h' ? n * 3600 : n * 86400;
+    for (const r of runs) {
+      const seconds = labelToSeconds(r.when);
+      if (seconds == null) {
+        buckets[29] += 1;
+        continue;
+      }
       const daysAgo = Math.min(29, Math.floor(seconds / 86400));
       buckets[29 - daysAgo] += 1;
-    });
+    }
     return buckets;
   }
 
-  window.RelayAPI = api;
+  globalThis.RelayAPI = api;
 })();

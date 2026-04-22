@@ -1,11 +1,11 @@
 // Dashboard — overview stats, activity sparkline, recent runs, quick actions
 
 function Sparkline({ data, w = 240, h = 48, color = 'var(--accent)' }) {
-  if (!data || !data.length) return null;
+  if (!data?.length) return null;
   const max = Math.max(...data);
   const min = Math.min(...data);
   const range = Math.max(1, max - min);
-  const step = w / (data.length - 1);
+  const step = w / Math.max(1, data.length - 1);
   const pts = data.map((v, i) => `${(i * step).toFixed(1)},${(h - ((v - min) / range) * (h - 4) - 2).toFixed(1)}`).join(' ');
   const area = `0,${h} ${pts} ${w},${h}`;
   return (
@@ -37,7 +37,11 @@ function DonutStatus({ ok, warn, err, size = 110 }) {
 }
 
 function DashboardView({ onNavigate, onOpenAdhoc, onRunPlaybook }) {
-  const { HOSTS, PLAYBOOKS, RUNS, ACTIVITY } = window.AnsibleData;
+  const data = globalThis.AnsibleData || {};
+  const HOSTS = data.HOSTS || [];
+  const PLAYBOOKS = data.PLAYBOOKS || [];
+  const RUNS = data.RUNS || [];
+  const ACTIVITY = data.ACTIVITY || [];
   const ok = HOSTS.filter(h => h.status === 'ok').length;
   const warn = HOSTS.filter(h => h.status === 'warn').length;
   const err = HOSTS.filter(h => h.status === 'err').length;
@@ -194,18 +198,23 @@ function DashboardView({ onNavigate, onOpenAdhoc, onRunPlaybook }) {
   );
 }
 
+function statusKey(status) {
+  if (status === 'warn') return 'warn';
+  if (status === 'err') return 'err';
+  return 'ok';
+}
+
 function computeFleetByGroup(hosts) {
   const bucket = {};
-  hosts.forEach(h => {
-    (h.groups || []).forEach(g => {
-      if (g === 'all' || g === 'ungrouped') return;
+  for (const h of hosts) {
+    for (const g of h.groups || []) {
+      if (g === 'all' || g === 'ungrouped') continue;
       if (!bucket[g]) bucket[g] = { name: g, count: 0, ok: 0, warn: 0, err: 0 };
       bucket[g].count += 1;
-      const s = h.status === 'warn' ? 'warn' : h.status === 'err' ? 'err' : 'ok';
-      bucket[g][s] += 1;
-    });
-  });
+      bucket[g][statusKey(h.status)] += 1;
+    }
+  }
   return Object.values(bucket).sort((a, b) => b.count - a.count).slice(0, 4);
 }
 
-window.DashboardView = DashboardView;
+globalThis.DashboardView = DashboardView;

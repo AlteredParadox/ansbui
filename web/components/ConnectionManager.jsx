@@ -5,8 +5,6 @@
 //   - list of saved ansible server connections
 //   - add/edit/test/delete + activate
 //   - prometheus URL + host-label settings
-//
-// Talks to window.RelayAPI only — no direct fetches in here.
 
 const {
   useState: useStateCM,
@@ -37,7 +35,7 @@ function ConnectionManager({ open, onClose, onActivated, initialServers, initial
   const [tab, setTab] = useStateCM('servers');
 
   const refreshServers = useCallbackCM(async () => {
-    const res = await window.RelayAPI.listServers();
+    const res = await globalThis.RelayAPI.listServers();
     setServers(res.servers || []);
     setActiveId(res.activeServerId || '');
   }, []);
@@ -45,7 +43,7 @@ function ConnectionManager({ open, onClose, onActivated, initialServers, initial
   useEffectCM(() => {
     if (!open) return;
     refreshServers();
-    window.RelayAPI.getSettings().then(s => {
+    globalThis.RelayAPI.getSettings().then(s => {
       setPromUrl(s.prometheusUrl || '');
       setPromLabel(s.prometheusHostLabel || 'instance');
     }).catch(() => {});
@@ -74,12 +72,11 @@ function ConnectionManager({ open, onClose, onActivated, initialServers, initial
     setBusy(true); setError('');
     try {
       const payload = { ...form, port: Number(form.port) || 22 };
-      const saved = await window.RelayAPI.upsertServer(payload);
+      const saved = await globalThis.RelayAPI.upsertServer(payload);
       await refreshServers();
       setForm(EMPTY_FORM);
-      // Auto-activate if there was none.
       if (!activeId) {
-        await window.RelayAPI.activateServer(saved.id);
+        await globalThis.RelayAPI.activateServer(saved.id);
         await refreshServers();
       }
     } catch (e) { setError(e.message); }
@@ -89,18 +86,18 @@ function ConnectionManager({ open, onClose, onActivated, initialServers, initial
   const activate = async (id) => {
     setBusy(true); setError('');
     try {
-      await window.RelayAPI.activateServer(id);
+      await globalThis.RelayAPI.activateServer(id);
       await refreshServers();
-      onActivated && onActivated(id);
+      onActivated?.(id);
     } catch (e) { setError(e.message); }
     finally { setBusy(false); }
   };
 
   const remove = async (id) => {
-    if (!window.confirm('Delete this connection?')) return;
+    if (!globalThis.confirm('Delete this connection?')) return;
     setBusy(true); setError('');
     try {
-      await window.RelayAPI.deleteServer(id);
+      await globalThis.RelayAPI.deleteServer(id);
       await refreshServers();
     } catch (e) { setError(e.message); }
     finally { setBusy(false); }
@@ -109,7 +106,7 @@ function ConnectionManager({ open, onClose, onActivated, initialServers, initial
   const testConnection = async (id) => {
     setBusy(true); setError(''); setTestResult(null);
     try {
-      const res = await window.RelayAPI.testServer(id);
+      const res = await globalThis.RelayAPI.testServer(id);
       setTestResult(res);
     } catch (e) { setError(e.message); }
     finally { setBusy(false); }
@@ -118,7 +115,7 @@ function ConnectionManager({ open, onClose, onActivated, initialServers, initial
   const saveSettings = async () => {
     setBusy(true); setError('');
     try {
-      await window.RelayAPI.setSettings({
+      await globalThis.RelayAPI.setSettings({
         prometheusUrl: promUrl.trim(),
         prometheusHostLabel: promLabel.trim() || 'instance'
       });
@@ -129,14 +126,24 @@ function ConnectionManager({ open, onClose, onActivated, initialServers, initial
   if (!open) return null;
 
   return (
-    <div className="cp-scrim" onMouseDown={onClose}>
-      <div className="cm" onMouseDown={e => e.stopPropagation()}>
+    <div
+      className="cp-scrim"
+      role="presentation"
+      onMouseDown={onClose}
+    >
+      <div
+        className="cm"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Connections and settings"
+        onMouseDown={e => e.stopPropagation()}
+      >
         <div className="cm-head">
           <div className="seg">
-            <button className={tab === 'servers' ? 'on' : ''} onClick={() => setTab('servers')}>Ansible servers</button>
-            <button className={tab === 'settings' ? 'on' : ''} onClick={() => setTab('settings')}>Settings</button>
+            <button type="button" className={tab === 'servers' ? 'on' : ''} onClick={() => setTab('servers')}>Ansible servers</button>
+            <button type="button" className={tab === 'settings' ? 'on' : ''} onClick={() => setTab('settings')}>Settings</button>
           </div>
-          <button className="btn ghost small" onClick={onClose}><Icon name="x" size={14}/></button>
+          <button type="button" className="btn ghost small" onClick={onClose}><Icon name="x" size={14}/></button>
         </div>
         {error && <div className="cm-error mono">{error}</div>}
         {tab === 'servers' ? (
@@ -182,10 +189,10 @@ function ServersTab(props) {
             <div className="cm-row-actions">
               {s.id === activeId
                 ? <span className="pill ok">active</span>
-                : <button className="btn small" disabled={busy} onClick={() => onActivate(s.id)}>Activate</button>}
-              <button className="btn ghost small" disabled={busy} onClick={() => onTest(s.id)}>Test</button>
-              <button className="btn ghost small" disabled={busy} onClick={() => onEdit(s)}>Edit</button>
-              <button className="btn ghost small" disabled={busy} onClick={() => onDelete(s.id)}><Icon name="x" size={12}/></button>
+                : <button type="button" className="btn small" disabled={busy} onClick={() => onActivate(s.id)}>Activate</button>}
+              <button type="button" className="btn ghost small" disabled={busy} onClick={() => onTest(s.id)}>Test</button>
+              <button type="button" className="btn ghost small" disabled={busy} onClick={() => onEdit(s)}>Edit</button>
+              <button type="button" className="btn ghost small" disabled={busy} onClick={() => onDelete(s.id)}><Icon name="x" size={12}/></button>
             </div>
           </div>
         ))}
@@ -212,12 +219,12 @@ function SettingsTab({ promUrl, promLabel, busy, onChangeUrl, onChangeLabel, onS
           Live CPU / memory / load / uptime / OS are pulled from Prometheus and matched to inventory hosts by label.
           Leave blank to show static values only.
         </div>
-        <Field label="Prometheus URL" placeholder="http://prom.example.com:9090"
+        <Field id="prom-url" label="Prometheus URL" placeholder="http://prom.example.com:9090"
                value={promUrl} onChange={onChangeUrl}/>
-        <Field label="Host label" placeholder="instance"
+        <Field id="prom-label" label="Host label" placeholder="instance"
                value={promLabel} onChange={onChangeLabel}/>
         <div style={{ display: 'flex', gap: 8, marginTop: 14 }}>
-          <button className="btn primary small" disabled={busy} onClick={onSave}>Save</button>
+          <button type="button" className="btn primary small" disabled={busy} onClick={onSave}>Save</button>
         </div>
       </div>
     </div>
@@ -227,15 +234,15 @@ function SettingsTab({ promUrl, promLabel, busy, onChangeUrl, onChangeLabel, onS
 function ServerForm({ form, busy, onChange, onReset, onSubmit }) {
   return (
     <form onSubmit={(e) => { e.preventDefault(); onSubmit(); }}>
-      <Field label="Name" placeholder="prod-ansible" value={form.name} onChange={v => onChange({ name: v })}/>
+      <Field id="srv-name" label="Name" placeholder="prod-ansible" value={form.name} onChange={v => onChange({ name: v })}/>
       <div className="cm-row-grid">
-        <Field label="Host" placeholder="ansible.example.com" value={form.host} onChange={v => onChange({ host: v })}/>
-        <Field label="Port" type="number" value={form.port} onChange={v => onChange({ port: v })}/>
+        <Field id="srv-host" label="Host" placeholder="ansible.example.com" value={form.host} onChange={v => onChange({ host: v })}/>
+        <Field id="srv-port" label="Port" type="number" value={form.port} onChange={v => onChange({ port: v })}/>
       </div>
-      <Field label="SSH user" placeholder="ansible" value={form.user} onChange={v => onChange({ user: v })}/>
-      <Field label="Key path (optional)" placeholder="~/.ssh/id_ed25519" value={form.keyPath} onChange={v => onChange({ keyPath: v })}/>
-      <Field label="Working dir (playbook repo on remote)" placeholder="/home/ansible/ops" value={form.workDir} onChange={v => onChange({ workDir: v })}/>
-      <Field label="Inventory path (optional)" placeholder="inventory/production.yml" value={form.inventory} onChange={v => onChange({ inventory: v })}/>
+      <Field id="srv-user" label="SSH user" placeholder="ansible" value={form.user} onChange={v => onChange({ user: v })}/>
+      <Field id="srv-key" label="Key path (optional)" placeholder="~/.ssh/id_ed25519" value={form.keyPath} onChange={v => onChange({ keyPath: v })}/>
+      <Field id="srv-workdir" label="Working dir (playbook repo on remote)" placeholder="/home/ansible/ops" value={form.workDir} onChange={v => onChange({ workDir: v })}/>
+      <Field id="srv-inv" label="Inventory path (optional)" placeholder="inventory/production.yml" value={form.inventory} onChange={v => onChange({ inventory: v })}/>
       <div className="mute" style={{ fontSize: 11, marginTop: 6 }}>
         SSH auth uses your running ssh-agent by default; specify a key path for unattended keys.
       </div>
@@ -247,19 +254,20 @@ function ServerForm({ form, busy, onChange, onReset, onSubmit }) {
   );
 }
 
-function Field({ label, value, onChange, placeholder, type }) {
+function Field({ id, label, value, onChange, placeholder, type }) {
   return (
-    <label className="cm-field">
-      <span className="cm-field-label">{label}</span>
+    <div className="cm-field">
+      <label htmlFor={id} className="cm-field-label">{label}</label>
       <input
+        id={id}
         className="input mono"
         type={type || 'text'}
         value={value ?? ''}
         placeholder={placeholder}
         onChange={(e) => onChange(e.target.value)}
       />
-    </label>
+    </div>
   );
 }
 
-window.ConnectionManager = ConnectionManager;
+globalThis.ConnectionManager = ConnectionManager;

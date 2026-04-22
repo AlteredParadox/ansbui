@@ -1,5 +1,10 @@
-// App shell: sidebar navigation, top bar, theme + density + accent + layout
-// Owns global keyboard shortcuts (⌘K command palette, ⌘/ help, g+d/i/p etc.)
+// App shell: sidebar navigation + top bar.
+//
+// The upstream handoff bundle shipped an in-browser "tweaks" panel that
+// talked to the claude.ai design editor via window.parent.postMessage.
+// That protocol is irrelevant once we run standalone, and the wildcard
+// target origin ('*') is a genuine vulnerability (Sonar S2819), so the
+// panel is intentionally not rendered here.
 
 const { useState, useEffect, useRef, useCallback, useMemo } = React;
 
@@ -12,11 +17,18 @@ const NAV_BASE = [
   { id: 'vault', label: 'Secrets', icon: 'vault', hint: 'g s' }
 ];
 
+const TWEAK_DEFAULTS = {
+  theme: 'dark',
+  accentHue: 155,
+  density: 'balanced',
+  navLayout: 'sidebar'
+};
+
 function resolveNavItems() {
-  const d = window.AnsibleData || {};
+  const data = globalThis.AnsibleData || {};
   return NAV_BASE.map((item) => {
     if (!item.countKey) return item;
-    const list = d[item.countKey] || [];
+    const list = data[item.countKey] || [];
     return { ...item, count: list.length };
   });
 }
@@ -26,7 +38,7 @@ function Sidebar({ view, setView, collapsed }) {
   return (
     <aside className={`sidebar ${collapsed ? 'collapsed' : ''}`}>
       <div className="sb-brand">
-        <div className="brand-mark" aria-hidden>
+        <div className="brand-mark" aria-hidden="true">
           <svg viewBox="0 0 24 24" width="18" height="18">
             <path d="M4 19 12 4l8 15" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round"/>
             <path d="M7.8 15h8.4" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"/>
@@ -43,6 +55,7 @@ function Sidebar({ view, setView, collapsed }) {
         {items.map(item => (
           <button
             key={item.id}
+            type="button"
             className={`sb-item ${view === item.id ? 'active' : ''}`}
             onClick={() => setView(item.id)}
           >
@@ -57,21 +70,22 @@ function Sidebar({ view, setView, collapsed }) {
   );
 }
 
-function TopNav({ view, setView, onOpenPalette, breadcrumb, activeName, onManage }) {
+function TopNav({ onOpenPalette, breadcrumb, activeName, onManage }) {
+  const lastIndex = breadcrumb.length - 1;
   return (
     <header className="topnav">
       <div className="tn-left">
         <div className="tn-crumb">
-          {breadcrumb.map((c, i) => (
-            <React.Fragment key={i}>
+          {breadcrumb.map((crumb, i) => (
+            <React.Fragment key={`${i}-${crumb}`}>
               {i > 0 && <Icon name="chevron-right" size={12} className="mute-2" />}
-              <span className={i === breadcrumb.length - 1 ? 'tn-crumb-current' : 'mute'}>{c}</span>
+              <span className={i === lastIndex ? 'tn-crumb-current' : 'mute'}>{crumb}</span>
             </React.Fragment>
           ))}
         </div>
       </div>
       <div className="tn-center">
-        <button className="tn-search" onClick={onOpenPalette}>
+        <button type="button" className="tn-search" onClick={onOpenPalette}>
           <Icon name="search" size={13} />
           <span>Search hosts, playbooks, runs…</span>
           <span className="kbd">⌘</span><span className="kbd">K</span>
@@ -79,7 +93,7 @@ function TopNav({ view, setView, onOpenPalette, breadcrumb, activeName, onManage
       </div>
       <div className="tn-right">
         {activeName && (
-          <button className="btn ghost small" onClick={onManage} title="Manage ansible servers & settings">
+          <button type="button" className="btn ghost small" onClick={onManage} title="Manage ansible servers & settings">
             <Icon name="server" size={13} /> <span className="mono">{activeName}</span>
           </button>
         )}
@@ -93,90 +107,14 @@ function TopNav({ view, setView, onOpenPalette, breadcrumb, activeName, onManage
   );
 }
 
-// ---------- Tweaks panel ----------
-
-const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
-  "theme": "dark",
-  "accentHue": 155,
-  "density": "balanced",
-  "navLayout": "sidebar"
-}/*EDITMODE-END*/;
-
-const ACCENTS = [
-  { hue: 155, name: 'Moss' },
-  { hue: 235, name: 'Azure' },
-  { hue: 280, name: 'Iris' },
-  { hue: 25, name: 'Amber' },
-  { hue: 340, name: 'Rose' },
-  { hue: 190, name: 'Teal' }
-];
-
-function TweaksPanel({ visible, tweaks, setTweaks, onClose }) {
-  if (!visible) return null;
-  const update = (patch) => {
-    const next = { ...tweaks, ...patch };
-    setTweaks(next);
-    window.parent?.postMessage({ type: '__edit_mode_set_keys', edits: patch }, '*');
-  };
-  return (
-    <div className="tweaks">
-      <div className="tweaks-head">
-        <span className="section-title">Tweaks</span>
-        <button className="btn ghost small" onClick={onClose}><Icon name="x" size={12} /></button>
-      </div>
-
-      <div className="tweaks-row">
-        <div className="tweaks-label">Theme</div>
-        <div className="seg">
-          <button className={tweaks.theme === 'dark' ? 'on' : ''} onClick={() => update({ theme: 'dark' })}><Icon name="moon" size={12}/> Dark</button>
-          <button className={tweaks.theme === 'light' ? 'on' : ''} onClick={() => update({ theme: 'light' })}><Icon name="sun" size={12}/> Light</button>
-        </div>
-      </div>
-
-      <div className="tweaks-row">
-        <div className="tweaks-label">Accent</div>
-        <div className="swatches">
-          {ACCENTS.map(a => (
-            <button key={a.hue}
-              className={`sw ${tweaks.accentHue === a.hue ? 'on' : ''}`}
-              style={{ '--h': a.hue }}
-              title={a.name}
-              onClick={() => update({ accentHue: a.hue })}
-            />
-          ))}
-        </div>
-      </div>
-
-      <div className="tweaks-row">
-        <div className="tweaks-label">Density</div>
-        <div className="seg">
-          <button className={tweaks.density === 'compact' ? 'on' : ''} onClick={() => update({ density: 'compact' })}>Compact</button>
-          <button className={tweaks.density === 'balanced' ? 'on' : ''} onClick={() => update({ density: 'balanced' })}>Balanced</button>
-          <button className={tweaks.density === 'comfortable' ? 'on' : ''} onClick={() => update({ density: 'comfortable' })}>Roomy</button>
-        </div>
-      </div>
-
-      <div className="tweaks-row">
-        <div className="tweaks-label">Layout</div>
-        <div className="seg">
-          <button className={tweaks.navLayout === 'sidebar' ? 'on' : ''} onClick={() => update({ navLayout: 'sidebar' })}>Sidebar</button>
-          <button className={tweaks.navLayout === 'topnav' ? 'on' : ''} onClick={() => update({ navLayout: 'topnav' })}>Top nav</button>
-        </div>
-      </div>
-
-      <div className="tweaks-hint mute">
-        Toggle this panel from the toolbar <span className="kbd">Tweaks</span> switch.
-      </div>
-    </div>
-  );
-}
-
 function TopLayoutNav({ view, setView }) {
   const items = resolveNavItems();
   return (
     <nav className="tn-layout-nav">
       {items.map(item => (
-        <button key={item.id}
+        <button
+          key={item.id}
+          type="button"
           className={`tn-layout-item ${view === item.id ? 'active' : ''}`}
           onClick={() => setView(item.id)}
         >
@@ -189,8 +127,7 @@ function TopLayoutNav({ view, setView }) {
   );
 }
 
-window.Sidebar = Sidebar;
-window.TopNav = TopNav;
-window.TopLayoutNav = TopLayoutNav;
-window.TweaksPanel = TweaksPanel;
-window.TWEAK_DEFAULTS = TWEAK_DEFAULTS;
+globalThis.Sidebar = Sidebar;
+globalThis.TopNav = TopNav;
+globalThis.TopLayoutNav = TopLayoutNav;
+globalThis.TWEAK_DEFAULTS = TWEAK_DEFAULTS;

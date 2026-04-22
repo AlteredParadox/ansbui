@@ -1,11 +1,40 @@
-// Run history + individual job viewer with per-task + per-host state
+// Run history + individual job viewer.
+//
+// The upstream design synthesised a per-task / per-host matrix with
+// Math.random() to make the prototype look busy. Now that we have real
+// RunRecords from the backend, we show the actual streamed log instead
+// — no synthetic data, no weak-PRNG hotspot.
 
-const { useState: useStateH, useMemo: useMemoH } = React;
+const { useState: useStateH, useEffect: useEffectH } = React;
+
+const STATUS_LABELS = { ok: 'success', warn: 'changed', err: 'failed' };
+
+function runStatusLabel(status) {
+  return STATUS_LABELS[status] || status;
+}
+
+function filterRuns(runs, filter) {
+  if (filter === 'all') return runs;
+  return runs.filter(r => r.status === filter);
+}
 
 function HistoryView() {
-  const { RUNS, PLAYBOOKS } = window.AnsibleData;
+  const data = globalThis.AnsibleData || {};
+  const RUNS = data.RUNS || [];
   const [selectedId, setSelectedId] = useStateH(RUNS[0]?.id || '');
   const [filter, setFilter] = useStateH('all');
+  const [detail, setDetail] = useStateH(null);
+  const [error, setError] = useStateH('');
+
+  useEffectH(() => {
+    if (!selectedId || !globalThis.RelayAPI) { setDetail(null); return; }
+    let alive = true;
+    setError('');
+    globalThis.RelayAPI.getRun(selectedId)
+      .then(d => { if (alive) setDetail(d); })
+      .catch(e => { if (alive) { setDetail(null); setError(e.message); } });
+    return () => { alive = false; };
+  }, [selectedId]);
 
   if (!RUNS.length) {
     return (
@@ -20,23 +49,8 @@ function HistoryView() {
     );
   }
 
-  const rows = RUNS.filter(r => filter === 'all' || r.status === filter);
+  const rows = filterRuns(RUNS, filter);
   const run = RUNS.find(r => r.id === selectedId) || RUNS[0];
-  const pb = PLAYBOOKS.find(p => p.name === run.pb);
-
-  // Synthesize task+host matrix for the selected run
-  const tasks = useMemoH(() => {
-    if (!pb || !pb.yaml) return [];
-    const parsed = parseYamlTasks(pb.yaml);
-    const targetPrefix = (pb.targets || 'host').split(':')[0];
-    return parsed.slice(0, 8).map((t, i) => ({
-      ...t,
-      hosts: Array.from({ length: Math.min(12, run.ok + run.failed) }, (_, j) => {
-        const fail = run.failed > 0 && i === 1 && j < 2;
-        return { name: `${targetPrefix}-${String(j + 1).padStart(2, '0')}`, status: fail ? 'err' : (Math.random() < 0.2 ? 'changed' : 'ok'), duration: +(Math.random() * 2 + 0.2).toFixed(2) };
-      })
-    }));
-  }, [run.id]);
 
   return (
     <div className="view view-history">
@@ -47,19 +61,19 @@ function HistoryView() {
         </div>
         <div className="view-actions">
           <div className="seg">
-            <button className={filter === 'all' ? 'on' : ''} onClick={() => setFilter('all')}>All</button>
-            <button className={filter === 'ok' ? 'on' : ''} onClick={() => setFilter('ok')}>Success</button>
-            <button className={filter === 'warn' ? 'on' : ''} onClick={() => setFilter('warn')}>Warn</button>
-            <button className={filter === 'err' ? 'on' : ''} onClick={() => setFilter('err')}>Failed</button>
+            <button type="button" className={filter === 'all' ? 'on' : ''} onClick={() => setFilter('all')}>All</button>
+            <button type="button" className={filter === 'ok' ? 'on' : ''} onClick={() => setFilter('ok')}>Success</button>
+            <button type="button" className={filter === 'warn' ? 'on' : ''} onClick={() => setFilter('warn')}>Warn</button>
+            <button type="button" className={filter === 'err' ? 'on' : ''} onClick={() => setFilter('err')}>Failed</button>
           </div>
-          <button className="btn small"><Icon name="download" size={12}/> Export</button>
+          <button type="button" className="btn small"><Icon name="download" size={12}/> Export</button>
         </div>
       </div>
 
       <div className="history-body">
         <aside className="history-list card">
           {rows.map(r => (
-            <button key={r.id} className={`history-row ${selectedId === r.id ? 'active' : ''}`} onClick={() => setSelectedId(r.id)}>
+            <button type="button" key={r.id} className={`history-row ${selectedId === r.id ? 'active' : ''}`} onClick={() => setSelectedId(r.id)}>
               <span className={`dot ${r.status}`}/>
               <div className="history-row-main">
                 <div className="history-row-top">
@@ -95,9 +109,9 @@ function HistoryView() {
               </div>
             </div>
             <div className="history-detail-actions">
-              {run.status === 'err' && <button className="btn small"><Icon name="refresh" size={12}/> Retry failed</button>}
-              <button className="btn small"><Icon name="code" size={12}/> View playbook</button>
-              <button className="btn primary small"><Icon name="play" size={12}/> Re-run</button>
+              {run.status === 'err' && <button type="button" className="btn small"><Icon name="refresh" size={12}/> Retry failed</button>}
+              <button type="button" className="btn small"><Icon name="code" size={12}/> View playbook</button>
+              <button type="button" className="btn primary small"><Icon name="play" size={12}/> Re-run</button>
             </div>
           </div>
 
@@ -107,56 +121,22 @@ function HistoryView() {
             <div className="run-stat"><span className="section-title">failed</span><span className="mono" style={{ color: 'var(--err)' }}>{run.failed}</span></div>
             <div className="run-stat"><span className="section-title">skipped</span><span className="mono">{run.skipped}</span></div>
             <div className="run-stat"><span className="section-title">duration</span><span className="mono">{run.duration}</span></div>
-            <div className="run-stat"><span className="section-title">status</span><span className={`pill ${run.status}`}>{run.status === 'ok' ? 'success' : run.status === 'warn' ? 'changed' : 'failed'}</span></div>
-          </div>
-
-          <div className="section-title" style={{ marginBottom: 6 }}>Task × host matrix</div>
-          <div className="matrix-wrap">
-            <table className="matrix">
-              <thead>
-                <tr>
-                  <th className="matrix-task-col">Task</th>
-                  {tasks[0]?.hosts.map(h => (
-                    <th key={h.name} className="matrix-host-col"><span className="mono">{h.name}</span></th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {tasks.map((t, i) => (
-                  <tr key={i}>
-                    <td className="matrix-task-cell">
-                      <div className="mono mute-2" style={{ fontSize: 11 }}>{String(i + 1).padStart(2, '0')}</div>
-                      <div>
-                        <div className="matrix-task-name">{t.name}</div>
-                        <div className="mute mono" style={{ fontSize: 11 }}>{t.module || '—'}</div>
-                      </div>
-                    </td>
-                    {t.hosts.map((h, j) => (
-                      <td key={j} className={`matrix-cell matrix-${h.status}`}>
-                        <span className="mono" style={{ fontSize: 10.5 }}>{h.duration}s</span>
-                      </td>
-                    ))}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+            <div className="run-stat"><span className="section-title">status</span><span className={`pill ${run.status}`}>{runStatusLabel(run.status)}</span></div>
           </div>
 
           <div className="section-title" style={{ margin: '14px 0 6px' }}>Output</div>
-          <div className="terminal" style={{ height: 260 }}>
-            <div className="term-line term-meta"><span className="term-text">PLAY [{pb?.targets || 'all'}] ***************************************************</span></div>
-            <div className="term-line term-meta"><span className="term-text">TASK [Gathering Facts] **********************************************</span></div>
-            {tasks[0]?.hosts.map(h => (
-              <div key={h.name} className={`term-line term-${h.status === 'err' ? 'fail' : h.status}`}>
-                {h.status === 'err' ? <span className="term-prefix">fail</span> : <span className="term-prefix">{h.status}</span>}
-                <span className="term-text">{h.status === 'err' ? `fatal: [${h.name}]: UNREACHABLE! => ssh timeout` : `${h.status}: [${h.name}]`}</span>
-              </div>
-            ))}
-            <div className="term-line term-meta"><span className="term-text">TASK [{tasks[1]?.name || 'apply config'}] ***********</span></div>
-            {tasks[1]?.hosts.slice(0, 6).map(h => (
-              <div key={h.name} className={`term-line term-${h.status === 'err' ? 'fail' : h.status}`}>
-                {h.status === 'err' ? <span className="term-prefix">fail</span> : <span className="term-prefix">{h.status}</span>}
-                <span className="term-text">{h.status === 'err' ? `fatal: [${h.name}]: FAILED! => {"changed": false, "msg": "service unit not found"}` : `${h.status}: [${h.name}]`}</span>
+          {error && <div className="cm-error mono">{error}</div>}
+          <div className="terminal" style={{ height: 360 }}>
+            {!detail && !error && <div className="terminal-empty mute-2 mono"># loading log…</div>}
+            {detail && (!detail.log || detail.log.length === 0) && (
+              <div className="terminal-empty mute-2 mono"># no log captured for this run</div>
+            )}
+            {detail && detail.log && detail.log.map((evt, i) => (
+              <div key={`${i}-${evt.type}`} className={`term-line term-${evt.type}`}>
+                {evt.type === 'ok' && <span className="term-prefix">ok</span>}
+                {evt.type === 'changed' && <span className="term-prefix">changed</span>}
+                {evt.type === 'fail' && <span className="term-prefix">fail</span>}
+                <span className="term-text">{evt.text || ''}</span>
               </div>
             ))}
           </div>
@@ -166,34 +146,4 @@ function HistoryView() {
   );
 }
 
-// Reuse parser from Playbooks
-function parseYamlTasks(yaml) {
-  const lines = yaml.split('\n');
-  const blocks = [];
-  let current = null;
-  let section = null;
-  for (let i = 0; i < lines.length; i++) {
-    const l = lines[i];
-    const sec = l.match(/^(\s*)(tasks|pre_tasks|post_tasks|handlers):\s*$/);
-    if (sec) { section = sec[2]; continue; }
-    const task = l.match(/^(\s+)- name:\s+(.*)$/);
-    if (task && section) {
-      if (current) blocks.push(current);
-      current = { section, name: task[2].replace(/["']/g, ''), lines: [l] };
-    } else if (current) {
-      if (l.match(/^(\s*)- name:/) || /^\S/.test(l)) { blocks.push(current); current = null; i--; }
-      else current.lines.push(l);
-    }
-  }
-  if (current) blocks.push(current);
-  return blocks.map(b => {
-    let module = '';
-    for (const ln of b.lines) {
-      const m = ln.match(/^\s+(ansible\.[a-z_.]+|community\.[a-z_.]+):\s*$/) || ln.match(/^\s+(ansible\.[a-z_.]+|community\.[a-z_.]+):\s+/);
-      if (m) { module = m[1]; break; }
-    }
-    return { ...b, module };
-  });
-}
-
-window.HistoryView = HistoryView;
+globalThis.HistoryView = HistoryView;

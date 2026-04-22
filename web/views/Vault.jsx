@@ -2,8 +2,15 @@
 
 const { useState: useStateV } = React;
 
+const ICON_BY_TYPE = { 'ssh-key': 'key', cert: 'cert' };
+
+function iconFor(type) {
+  return ICON_BY_TYPE[type] || 'vault';
+}
+
 function VaultView() {
-  const { SECRETS } = window.AnsibleData;
+  const data = globalThis.AnsibleData || {};
+  const SECRETS = data.SECRETS || [];
   const [selectedId, setSelectedId] = useStateV(SECRETS[0]?.id || '');
   const [revealed, setRevealed] = useStateV(false);
   if (!SECRETS.length) {
@@ -19,8 +26,6 @@ function VaultView() {
     );
   }
   const s = SECRETS.find(x => x.id === selectedId) || SECRETS[0];
-
-  const iconFor = (t) => t === 'ssh-key' ? 'key' : t === 'cert' ? 'cert' : 'vault';
 
   return (
     <div className="view view-vault">
@@ -38,7 +43,7 @@ function VaultView() {
       <div className="vault-body">
         <aside className="vault-list card">
           {SECRETS.map(x => (
-            <button key={x.id} className={`vault-row ${selectedId === x.id ? 'active' : ''}`} onClick={() => setSelectedId(x.id)}>
+            <button type="button" key={x.id} className={`vault-row ${selectedId === x.id ? 'active' : ''}`} onClick={() => setSelectedId(x.id)}>
               <span className="vault-row-icon"><Icon name={iconFor(x.type)} size={14}/></span>
               <div className="vault-row-main">
                 <div className="vault-row-name mono">{x.name}</div>
@@ -133,4 +138,4 @@ function fakeValue(key) {
   return 'opaque-value-redacted';
 }
 
-window.VaultView = VaultView;
+globalThis.VaultView = VaultView;

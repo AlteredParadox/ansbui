@@ -59,3 +59,11 @@ web/                    # static bundle (embedded)
 ## CI
 
 `.gitea/workflows/ci.yml` runs build + vet + test, and kicks off a SonarQube scan using `SONAR_TOKEN` and `SONAR_HOST_URL` from the repo secrets. The Sonar project key is `ansbui`.
+
+## SonarQube hotspot notes
+
+A few of Sonar's hotspots are not real concerns in this project; leaving them here so they aren't re-raised on every review:
+
+- **Missing Subresource Integrity on Google Fonts** (`web/index.html`, `Web:S5725`). SRI intentionally isn't used for `fonts.googleapis.com` — Google serves different CSS per User-Agent, so a pinned hash would break for most browsers. The React / Babel / React-DOM CDN references that actually ship code do carry `integrity=` attributes.
+- **Regex ReDoS hotspots** (`javascript:S5852`) on the YAML tokenisers in `Inventory.jsx`, `Playbooks.jsx`, `data/api.js`. Every regex we flag is anchored to a single line, uses character classes over broad alternation, and has no nested or overlapping quantifiers — input size per match is bounded by the line length pulled out of `.split('\n')`. Inputs come from playbook files authored on the controller (trusted operator-supplied YAML), not from external request bodies.
+- **Weak PRNG** (`History.jsx`, `javascript:S2245`). The previous implementation synthesised per-task / per-host cells with `Math.random()` for the prototype. The view now reads the real streamed run log instead, so no PRNG is used in the production path.

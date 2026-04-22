@@ -225,6 +225,7 @@
   position: sticky; top: 0; z-index: 1;
   user-select: none;
   cursor: pointer;
+  white-space: nowrap;
 }
 .t th:hover { color: var(--text); }
 .t td {
@@ -234,7 +235,6 @@
   vertical-align: middle;
   white-space: nowrap;
 }
-.t th { white-space: nowrap; }
 .t-row-click { cursor: pointer; transition: background 80ms var(--ease); }
 .t-row-click:hover td { background: var(--bg-1); }
 .t-row-click.selected td { background: var(--accent-weak); }
@@ -302,7 +302,6 @@
 }
 .inv-main { min-width: 0; display: flex; flex-direction: column; }
 .map-wrap, .graph-wrap, .yaml-wrap, .tags-wrap { width: 100%; }
-.yaml-wrap .code-pane { width: 100%; }
 .inv-side { padding: 0; overflow: hidden; display: flex; flex-direction: column; }
 .inv-side-search { display: flex; align-items: center; padding: 8px 10px; gap: 6px; }
 .inv-side-search .input:focus { background: transparent; border-color: transparent; box-shadow: none; }
@@ -535,7 +534,7 @@
 .yml-v { color: var(--text); }
 
 .yaml-wrap { padding: 0; }
-.yaml-wrap .code-pane { height: calc(100vh - 220px); }
+.yaml-wrap .code-pane { width: 100%; height: calc(100vh - 220px); }
 
 /* ============ PLAYBOOKS ============ */
 .pb-body {
