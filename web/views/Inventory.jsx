@@ -1,6 +1,6 @@
 // Inventory view — 5 modes: Table+Tree, Graph, Map, Tags, YAML.
 
-const { useState: useStateI, useMemo: useMemoI } = React;
+const { useState: useStateI, useMemo: useMemoI, useEffect: useEffectI } = React;
 
 // Bounded, single-line regex for YAML highlighting — no nested
 // quantifiers, so linear-time (Sonar S5852).
@@ -511,6 +511,9 @@ function renderYamlValue(rest) {
 
 // ---------- Inventory View ----------
 function InventoryView({ onOpenAdhoc }) {
+  const [, setRefreshTick] = useStateI(0);
+  const [refreshing, setRefreshing] = useStateI(false);
+  const [refreshError, setRefreshError] = useStateI('');
   const data = globalThis.AnsibleData || {};
   const HOSTS = data.HOSTS || [];
   const GROUPS = data.GROUPS || [];
@@ -522,6 +525,19 @@ function InventoryView({ onOpenAdhoc }) {
   const [sort, setSort] = useStateI({ key: 'name', dir: 'asc' });
   const [detail, setDetail] = useStateI(null);
   const [filters, setFilters] = useStateI({ tags: [], os: [] });
+
+  const reload = async () => {
+    if (refreshing || !globalThis.RelayAPI) return;
+    setRefreshing(true); setRefreshError('');
+    try {
+      await globalThis.RelayAPI.bootstrap();
+      setRefreshTick(t => t + 1);
+    } catch (e) {
+      setRefreshError(e.message);
+    } finally {
+      setRefreshing(false);
+    }
+  };
 
   const filtered = useMemoI(() => {
     let rows = HOSTS.filter(h => selectedGroup === 'all' || (h.groups || []).includes(selectedGroup));
@@ -572,9 +588,13 @@ function InventoryView({ onOpenAdhoc }) {
             <button type="button" className={mode === 'tags' ? 'on' : ''} onClick={() => setMode('tags')}><Icon name="tag" size={12}/> Tags</button>
             <button type="button" className={mode === 'yaml' ? 'on' : ''} onClick={() => setMode('yaml')}><Icon name="code" size={12}/> YAML</button>
           </div>
+          <button type="button" className="btn small" onClick={reload} disabled={refreshing}>
+            <Icon name="refresh" size={12}/> {refreshing ? 'Reloading…' : 'Reload'}
+          </button>
           <button type="button" className="btn small"><Icon name="plus" size={12}/> Add host</button>
         </div>
       </div>
+      {refreshError && <div className="cm-error mono" style={{ marginBottom: 12 }}>{refreshError}</div>}
 
       <div className={`inventory-body ${(mode === 'map' || mode === 'yaml' || mode === 'tags') ? 'no-side' : ''}`}>
         {(mode === 'table' || mode === 'graph') && (

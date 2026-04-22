@@ -46,7 +46,8 @@ func (s *Server) inventory(w http.ResponseWriter, r *http.Request) {
 
 // metrics returns the raw per-host metric snapshot plus per-probe
 // diagnostics. The UI's settings panel uses this to explain why
-// Prometheus data may not be showing up.
+// Prometheus data may not be showing up, including a cross-reference
+// between the live Prometheus hosts and the current inventory.
 func (s *Server) metrics(w http.ResponseWriter, r *http.Request) {
 	url, _ := s.Config.Prometheus()
 	if url == "" {
@@ -61,17 +62,55 @@ func (s *Server) metrics(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"configured": true,
-			"error":      "prometheus client could not be constructed (check URL)",
+			"error":      "prometheus client could not be constructed (check URL / logs)",
 			"metrics":    map[string]any{},
 			"probes":     []any{},
 		})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	diagnosis := map[string]any{
 		"configured": true,
 		"metrics":    result.Metrics,
 		"probes":     result.Probes,
-	})
+	}
+	// Best-effort cross-reference: if we can resolve an active server,
+	// compute which inventory hostnames matched a Prom sample and which
+	// didn't, and list any Prom hosts that had no inventory entry.
+	if srv, err := s.resolveServer(r); err == nil {
+		if inv, err := ansible.FetchInventory(r.Context(), s.Pool, srv); err == nil {
+			matched, unmatchedInv, unmatchedProm := diffMetrics(inv, result.Metrics)
+			diagnosis["matched"] = matched
+			diagnosis["unmatchedInventory"] = unmatchedInv
+			diagnosis["unmatchedPrometheus"] = unmatchedProm
+		}
+	}
+	writeJSON(w, http.StatusOK, diagnosis)
+}
+
+// diffMetrics returns (matched, inventory-only, prometheus-only)
+// hostname slices so the UI can show the operator exactly where names
+// are diverging.
+func diffMetrics(inv ansible.Inventory, metrics map[string]prom.HostMetric) (matched, invOnly, promOnly []string) {
+	seen := make(map[string]bool, len(metrics))
+	for _, h := range inv.Hosts {
+		if _, ok := metrics[h.Name]; ok {
+			matched = append(matched, h.Name)
+			seen[h.Name] = true
+			continue
+		}
+		if _, ok := metrics[h.IP]; ok {
+			matched = append(matched, h.Name)
+			seen[h.IP] = true
+			continue
+		}
+		invOnly = append(invOnly, h.Name)
+	}
+	for k := range metrics {
+		if !seen[k] {
+			promOnly = append(promOnly, k)
+		}
+	}
+	return
 }
 
 func (s *Server) tryMetrics(ctx context.Context) (prom.MetricsResult, bool) {

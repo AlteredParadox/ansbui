@@ -256,7 +256,9 @@ function ProbeReport({ report }) {
   if (!report.configured) {
     return <div className="mute" style={{ marginTop: 12, fontSize: 12 }}>No Prometheus URL configured.</div>;
   }
-  const hosts = Object.keys(report.metrics || {});
+  const matched = report.matched || [];
+  const missInv = report.unmatchedInventory || [];
+  const missProm = report.unmatchedPrometheus || [];
   return (
     <div style={{ marginTop: 14 }}>
       <div className="section-title" style={{ marginBottom: 6 }}>Query results</div>
@@ -278,9 +280,30 @@ function ProbeReport({ report }) {
           ))}
         </tbody>
       </table>
-      <div className="mute" style={{ fontSize: 12 }}>
-        Matched hosts in Prometheus: <b style={{ color: 'var(--text)' }}>{hosts.length}</b>
-        {hosts.length > 0 && <> — <span className="mono">{hosts.slice(0, 5).join(', ')}{hosts.length > 5 ? `, +${hosts.length - 5}` : ''}</span></>}
+      <HostDiff label="Matched" color="var(--ok)" hosts={matched}/>
+      <HostDiff label="In inventory, missing in Prometheus" color="var(--warn)" hosts={missInv}/>
+      <HostDiff label="In Prometheus, not in inventory" color="var(--text-3)" hosts={missProm}/>
+      {matched.length === 0 && (missInv.length > 0 || missProm.length > 0) && (
+        <div className="mute" style={{ marginTop: 10, fontSize: 12 }}>
+          Nothing matched. Compare the lists above — the inventory host name (left column)
+          has to equal the Prometheus label value. If your Prometheus uses a shortname
+          while the inventory uses an FQDN (or vice versa), fix one side.
+        </div>
+      )}
+    </div>
+  );
+}
+
+function HostDiff({ label, color, hosts }) {
+  if (!hosts.length) return null;
+  const preview = hosts.slice(0, 8);
+  return (
+    <div style={{ marginTop: 8 }}>
+      <div className="mute" style={{ fontSize: 11.5 }}>
+        <span style={{ color, fontWeight: 550 }}>{label}</span> — {hosts.length}
+      </div>
+      <div className="mono" style={{ fontSize: 11.5, wordBreak: 'break-all' }}>
+        {preview.join(', ')}{hosts.length > preview.length ? `, +${hosts.length - preview.length}` : ''}
       </div>
     </div>
   );
