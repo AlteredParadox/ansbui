@@ -213,15 +213,30 @@ func (m *Manager) SetActive(id string) error {
 	return fmt.Errorf("unknown server id %q", id)
 }
 
-// SetPrometheus updates the Prometheus integration settings.
+// SetPrometheus updates the Prometheus integration settings. The URL is
+// normalised so that entries like "10.0.0.1:9090" (no scheme) and
+// trailing-slash variants all persist as a clean http(s):// URL.
 func (m *Manager) SetPrometheus(url, label string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.store.PrometheusURL = strings.TrimRight(strings.TrimSpace(url), "/")
+	m.store.PrometheusURL = normalisePromURL(url)
 	if label = strings.TrimSpace(label); label != "" {
 		m.store.PrometheusLabel = label
 	}
 	return m.persistLocked()
+}
+
+// normalisePromURL trims whitespace + trailing slashes and prepends
+// http:// when no scheme is present. Returns "" for empty input.
+func normalisePromURL(raw string) string {
+	s := strings.TrimRight(strings.TrimSpace(raw), "/")
+	if s == "" {
+		return ""
+	}
+	if !strings.Contains(s, "://") {
+		s = "http://" + s
+	}
+	return s
 }
 
 // Prometheus returns the configured Prometheus URL and host label.
