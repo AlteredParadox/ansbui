@@ -3,10 +3,13 @@
 package api
 
 import (
+	"bufio"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"log"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -91,6 +94,27 @@ type statusRecorder struct {
 func (r *statusRecorder) WriteHeader(code int) {
 	r.status = code
 	r.ResponseWriter.WriteHeader(code)
+}
+
+// Hijack delegates to the underlying ResponseWriter so gorilla/websocket
+// can upgrade the connection. Without this the Upgrader fails with
+// "response does not implement http.Hijacker" and the WebSocket never
+// opens (browser sees a 500 and fires 'error').
+func (r *statusRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	h, ok := r.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, fmt.Errorf("underlying ResponseWriter does not support hijacking")
+	}
+	return h.Hijack()
+}
+
+// Flush delegates so SSE / chunked responses keep working. Cheap to add
+// alongside Hijack since the same wrapper sits in front of every API
+// handler.
+func (r *statusRecorder) Flush() {
+	if f, ok := r.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
 }
 
 // writeJSON sends a JSON response. On encode error it logs — by the time
