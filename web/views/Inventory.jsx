@@ -813,12 +813,17 @@ function FactsPanel({ host }) {
     // component) — just the host identity.
   }, [host?.name, autoGather]);
 
+  let status;
+  if (loading) status = 'gathering…';
+  else if (facts) status = `${Object.keys(facts).length} keys`;
+  else status = 'not gathered';
+
   return (
     <>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
         <div className="section-title">Facts</div>
         <span className="mute mono" style={{ marginLeft: 'auto', fontSize: 11 }}>
-          {loading ? 'gathering…' : (facts ? `${Object.keys(facts).length} keys` : 'not gathered')}
+          {status}
         </span>
         <button
           type="button"

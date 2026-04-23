@@ -132,7 +132,7 @@ function ConnectionManager({ open, onClose, onActivated, initialServers, initial
       // Reflect the updated toggle in the in-memory cache so the host
       // drawer doesn't need to reload the page to see the change.
       globalThis.AnsbuiSettings = {
-        ...(globalThis.AnsbuiSettings || {}),
+        ...globalThis.AnsbuiSettings,
         autoGatherFacts,
         geoIpEnabled
       };
