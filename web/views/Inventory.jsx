@@ -191,13 +191,20 @@ function HostTable({ rows, selectedIds, toggleSelect, toggleAll, onRowClick, sor
               <td className="mute" style={{ fontSize: 12 }}>{h.region || ''}</td>
               <td>
                 <div className="tag-cluster">
-                  {(h.groups || []).filter(g => g !== 'all').slice(0, 3).map(g => <span key={g} className="mini-tag mono">{g}</span>)}
-                  {h.groups?.length > 4 && <span className="mini-tag mute mono">+{h.groups.length - 4}</span>}
+                  {(() => {
+                    const groups = (h.groups || []).filter(g => g !== 'all');
+                    return (
+                      <>
+                        {groups.slice(0, 3).map(g => <span key={g} className="mini-tag mono">{g}</span>)}
+                        {groups.length > 3 && <span className="mini-tag mute mono">+{groups.length - 3}</span>}
+                      </>
+                    );
+                  })()}
                 </div>
               </td>
               <td><MiniBar value={h.cpu} /></td>
               <td><MiniBar value={h.mem} warn={70} danger={90}/></td>
-              <td className="mono">{h.load.toFixed(2)}</td>
+              <td className="mono">{(h.load ?? 0).toFixed(2)}</td>
               <td className="mono mute">{h.lastPlaybook}</td>
             </tr>
           ))}

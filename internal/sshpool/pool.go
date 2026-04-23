@@ -62,7 +62,7 @@ func (p *Pool) Client(ctx context.Context, srv config.Server) (*ssh.Client, erro
 	if cli, ok := p.cached(srv); ok {
 		return cli, nil
 	}
-	p.evict(srv.ID)
+	p.Drop(srv.ID)
 	cli, err := dial(ctx, srv)
 	if err != nil {
 		return nil, err
@@ -93,15 +93,6 @@ func (p *Pool) cached(srv config.Server) (*ssh.Client, bool) {
 		return nil, false
 	}
 	return cli, true
-}
-
-func (p *Pool) evict(id string) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if e, ok := p.clients[id]; ok {
-		_ = e.client.Close()
-		delete(p.clients, id)
-	}
 }
 
 func (p *Pool) install(srv config.Server, cli *ssh.Client) {
