@@ -9,6 +9,7 @@ import (
 	"io"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/AlteredParadox/ansbui/internal/config"
@@ -84,11 +85,17 @@ func runStreaming(ctx context.Context, pool *sshpool.Pool, srv config.Server, cm
 		_ = stderrW.Close()
 	}()
 
-	go scanLines(stdoutR, "stdout", out)
-	go scanLines(stderrR, "stderr", out)
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); scanLines(ctx, stdoutR, "stdout", out) }()
+	go func() { defer wg.Done(); scanLines(ctx, stderrR, "stderr", out) }()
 
 	start := time.Now()
 	runErr := <-done
+	// Drain both pipe scanners before we send any further events —
+	// otherwise close(out) in our caller can race with an in-flight
+	// scanLines send and panic on "send on closed channel".
+	wg.Wait()
 	out <- Event{Type: "done", Text: fmt.Sprintf("completed in %.1fs", time.Since(start).Seconds())}
 	if runErr != nil && !errors.Is(runErr, context.Canceled) {
 		return runErr
@@ -108,12 +115,15 @@ var (
 	recapLine    = regexp.MustCompile(`^(\S+)\s*:\s+ok=(\d+)\s+changed=(\d+)\s+unreachable=(\d+)\s+failed=(\d+)`)
 )
 
-func scanLines(r io.Reader, stream string, out chan<- Event) {
+func scanLines(ctx context.Context, r io.Reader, stream string, out chan<- Event) {
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for sc.Scan() {
-		line := sc.Text()
-		out <- classify(line, stream)
+		select {
+		case out <- classify(sc.Text(), stream):
+		case <-ctx.Done():
+			return
+		}
 	}
 }
 
@@ -123,10 +133,14 @@ func classify(line, stream string) Event {
 		return Event{Type: "meta", Text: line, Stream: stream}
 	case recapLine.MatchString(line):
 		m := recapLine.FindStringSubmatch(line)
+		// Capture groups: 1=host, 2=ok, 3=changed, 4=unreachable, 5=failed.
+		// A task that failed *or* a host we couldn't reach both count
+		// as a recap-fail; changed>0 with no hard errors is recap-warn.
 		t := "recap"
-		if m[4] != "0" {
+		switch {
+		case m[5] != "0" || m[4] != "0":
 			t = "recap-fail"
-		} else if m[3] != "0" {
+		case m[3] != "0":
 			t = "recap-warn"
 		}
 		return Event{Type: t, Host: m[1], Text: line, Stream: stream}

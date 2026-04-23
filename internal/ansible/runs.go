@@ -10,6 +10,13 @@ import (
 	"time"
 )
 
+// ensureSorted keeps r.runs newest-first. Called once in NewRecorder
+// because on-disk order from older versions of the file might drift;
+// Append maintains the invariant by prepending.
+func (r *Recorder) ensureSorted() {
+	sort.Slice(r.runs, func(i, j int) bool { return r.runs[i].StartedAt.After(r.runs[j].StartedAt) })
+}
+
 // RunRecord summarises a single ad-hoc or playbook run. Fields for the
 // "other" kind are left at their zero value, so a UI can switch on
 // Kind and read only what's relevant.
@@ -63,16 +70,29 @@ func NewRecorder(path string) (*Recorder, error) {
 	if data, err := os.ReadFile(path); err == nil {
 		_ = json.Unmarshal(data, &r.runs)
 	}
+	r.ensureSorted()
 	return r, nil
 }
 
-// Append writes a new record and persists. The oldest records are
-// dropped once the limit is exceeded.
+// Append writes a new record and persists. Records are kept newest
+// first; since wall-clock time is effectively monotonic for our use
+// the record prepends cheaply, avoiding an O(n log n) sort on every
+// run. The oldest records are dropped once the limit is exceeded.
 func (r *Recorder) Append(rec RunRecord) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.runs = append(r.runs, rec)
-	sort.Slice(r.runs, func(i, j int) bool { return r.runs[i].StartedAt.After(r.runs[j].StartedAt) })
+	// Fast path: new record is at least as recent as the head — prepend.
+	if len(r.runs) == 0 || !rec.StartedAt.Before(r.runs[0].StartedAt) {
+		r.runs = append([]RunRecord{rec}, r.runs...)
+	} else {
+		// Out-of-order (clock skew / resumed run) — binary insert.
+		idx := sort.Search(len(r.runs), func(i int) bool {
+			return !r.runs[i].StartedAt.After(rec.StartedAt)
+		})
+		r.runs = append(r.runs, RunRecord{})
+		copy(r.runs[idx+1:], r.runs[idx:])
+		r.runs[idx] = rec
+	}
 	if len(r.runs) > r.limit {
 		r.runs = r.runs[:r.limit]
 	}
@@ -85,8 +105,23 @@ func (r *Recorder) saveLocked() error {
 		return fmt.Errorf("encode runs: %w", err)
 	}
 	tmp := r.path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return fmt.Errorf("write runs: %w", err)
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		return fmt.Errorf("open runs temp: %w", err)
+	}
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		return fmt.Errorf("write runs temp: %w", err)
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		return fmt.Errorf("sync runs temp: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("close runs temp: %w", err)
 	}
 	return os.Rename(tmp, r.path)
 }

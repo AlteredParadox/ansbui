@@ -4,7 +4,7 @@ import (
 	"context"
 	"log"
 	"net/http"
-	"strings"
+	"net/url"
 	"time"
 
 	"github.com/AlteredParadox/ansbui/internal/ansible"
@@ -21,13 +21,20 @@ var wsUpgrader = websocket.Upgrader{
 	CheckOrigin:     sameOriginCheck,
 }
 
+// sameOriginCheck compares the parsed Origin header host:port to the
+// request's Host. url.Parse makes the match resistant to the
+// HasSuffix-bypass trick ("http://evil.com//legit.host:8787"). A
+// missing Origin is allowed (non-browser / curl clients).
 func sameOriginCheck(r *http.Request) bool {
 	origin := r.Header.Get("Origin")
 	if origin == "" {
 		return true
 	}
-	host := r.Host
-	return strings.HasSuffix(origin, "//"+host) || strings.HasSuffix(origin, "://"+host)
+	u, err := url.Parse(origin)
+	if err != nil || u.Host == "" {
+		return false
+	}
+	return u.Host == r.Host
 }
 
 // runnerFunc is the shape of ansible.RunAdhoc / ansible.RunPlaybook:
@@ -69,7 +76,7 @@ func runWebSocket[T any](
 
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
-	watchPeer(conn, cancel)
+	watchPeer(ctx, conn, cancel)
 
 	record := buildRecord(srv, &req, ansible.NewID())
 	_ = conn.WriteJSON(map[string]string{"type": "run-id", "text": record.ID})
@@ -129,8 +136,15 @@ func buildPlaybookRecord(srv config.Server, req *ansible.PlaybookRequest, id str
 }
 
 // watchPeer cancels ctx if the websocket peer disconnects or sends a
-// close. The read loop is the canonical way to detect disconnects.
-func watchPeer(conn *websocket.Conn, cancel context.CancelFunc) {
+// close. A parallel goroutine nudges the read side with a deadline
+// when ctx ends on its own (run finished, parent cancelled) so the
+// blocking NextReader returns promptly instead of parking until the
+// deferred Close fires.
+func watchPeer(ctx context.Context, conn *websocket.Conn, cancel context.CancelFunc) {
+	go func() {
+		<-ctx.Done()
+		_ = conn.SetReadDeadline(time.Now())
+	}()
 	go func() {
 		for {
 			if _, _, err := conn.NextReader(); err != nil {
@@ -147,6 +161,7 @@ func consumeAndPersist(conn *websocket.Conn, events <-chan ansible.Event, run *a
 	for evt := range events {
 		if clientAlive {
 			if err := conn.WriteJSON(evt); err != nil {
+				log.Printf("ws: write to peer failed, draining run locally: %v", err)
 				clientAlive = false
 			}
 		}

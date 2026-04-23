@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -40,13 +41,22 @@ type Client struct {
 
 // NewClient constructs a Client. baseURL is the Prometheus root (e.g.
 // http://prom:9090). hostLabel is the label name to key on (default
-// "instance").
+// "instance"). Only http / https URLs are accepted; redirects are
+// disabled to prevent a misconfigured Prometheus from bouncing us at
+// a cloud metadata endpoint.
 func NewClient(baseURL, hostLabel string) (*Client, error) {
 	if strings.TrimSpace(baseURL) == "" {
 		return nil, errors.New("prometheus URL is empty")
 	}
-	if _, err := url.Parse(baseURL); err != nil {
+	u, err := url.Parse(baseURL)
+	if err != nil {
 		return nil, fmt.Errorf("invalid prometheus URL: %w", err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return nil, fmt.Errorf("prometheus URL scheme must be http or https, got %q", u.Scheme)
+	}
+	if u.Host == "" {
+		return nil, errors.New("prometheus URL is missing a host")
 	}
 	if hostLabel == "" {
 		hostLabel = "instance"
@@ -54,7 +64,12 @@ func NewClient(baseURL, hostLabel string) (*Client, error) {
 	return &Client{
 		base:  strings.TrimRight(baseURL, "/"),
 		label: hostLabel,
-		http:  &http.Client{Timeout: 8 * time.Second},
+		http: &http.Client{
+			Timeout: 8 * time.Second,
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		},
 	}, nil
 }
 
@@ -76,11 +91,10 @@ type MetricsResult struct {
 
 // Metrics issues the node_exporter queries and returns a map keyed by
 // host. Per-probe errors are captured into the result's Probes slice so
-// the caller can surface them rather than silently showing zero.
+// the caller can surface them rather than silently showing zero. All
+// probes fire in parallel so the whole call completes in the slowest
+// single probe's time, not the sum of them.
 func (c *Client) Metrics(ctx context.Context) (MetricsResult, error) {
-	out := make(map[string]HostMetric)
-	var probes []ProbeResult
-
 	type probe struct {
 		name  string
 		query string
@@ -114,38 +128,76 @@ func (c *Client) Metrics(ctx context.Context) (MetricsResult, error) {
 		},
 	}
 
-	for _, p := range defs {
-		samples, err := c.instantQuery(ctx, p.query)
-		pr := ProbeResult{Name: p.name, Query: p.query, Samples: len(samples)}
-		if err != nil {
-			pr.Error = err.Error()
-			probes = append(probes, pr)
-			continue
-		}
-		for host, value := range samples {
-			m := out[host]
-			m.Host = host
-			p.apply(host, value, &m)
-			out[host] = m
-		}
-		probes = append(probes, pr)
+	type valueResult struct {
+		idx     int
+		samples map[string]float64
+		err     error
 	}
 
-	// OS info comes from node_uname_info labels rather than a value.
-	labels, err := c.instantLabels(ctx, `node_uname_info`)
-	unamePR := ProbeResult{Name: "os", Query: "node_uname_info", Samples: len(labels)}
-	if err != nil {
-		unamePR.Error = err.Error()
+	valueProbes := make([]ProbeResult, len(defs))
+	results := make(chan valueResult, len(defs))
+	for i, p := range defs {
+		valueProbes[i] = ProbeResult{Name: p.name, Query: p.query}
+		go func(i int, q string) {
+			s, err := c.instantQuery(ctx, q)
+			results <- valueResult{idx: i, samples: s, err: err}
+		}(i, p.query)
+	}
+
+	type labelResult struct {
+		labels map[string]map[string]string
+		err    error
+	}
+	const unameQuery = "node_uname_info"
+	unameCh := make(chan labelResult, 1)
+	go func() {
+		l, err := c.instantLabels(ctx, unameQuery)
+		unameCh <- labelResult{labels: l, err: err}
+	}()
+
+	out := make(map[string]HostMetric)
+	var mu sync.Mutex
+	apply := func(host string, p probe, v float64) {
+		mu.Lock()
+		defer mu.Unlock()
+		m := out[host]
+		m.Host = host
+		p.apply(host, v, &m)
+		out[host] = m
+	}
+
+	for i := 0; i < len(defs); i++ {
+		r := <-results
+		pr := &valueProbes[r.idx]
+		if r.err != nil {
+			pr.Error = r.err.Error()
+			continue
+		}
+		pr.Samples = len(r.samples)
+		for host, value := range r.samples {
+			apply(host, defs[r.idx], value)
+		}
+	}
+
+	ur := <-unameCh
+	unamePR := ProbeResult{Name: "os", Query: unameQuery}
+	if ur.err != nil {
+		unamePR.Error = ur.err.Error()
 	} else {
-		for host, lbls := range labels {
+		unamePR.Samples = len(ur.labels)
+		mu.Lock()
+		for host, lbls := range ur.labels {
 			m := out[host]
 			m.Host = host
 			m.OS = strings.TrimSpace(lbls["sysname"] + " " + lbls["release"])
 			out[host] = m
 		}
+		mu.Unlock()
 	}
-	probes = append(probes, unamePR)
 
+	probes := make([]ProbeResult, 0, len(defs)+1)
+	probes = append(probes, valueProbes...)
+	probes = append(probes, unamePR)
 	return MetricsResult{Metrics: out, Probes: probes}, nil
 }
 

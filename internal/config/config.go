@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -141,11 +142,33 @@ func (m *Manager) persistLocked() error {
 	if err != nil {
 		return fmt.Errorf("encode config: %w", err)
 	}
-	tmp := m.path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return fmt.Errorf("write config: %w", err)
+	return atomicWrite(m.path, data)
+}
+
+// atomicWrite writes data to a sibling tmp file, fsyncs, then renames
+// over the target. Without the fsync, a crash between the rename and
+// the writeback can leave a zero-byte file on disk.
+func atomicWrite(path string, data []byte) error {
+	tmp := path + ".tmp"
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		return fmt.Errorf("open temp: %w", err)
 	}
-	return os.Rename(tmp, m.path)
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		return fmt.Errorf("write temp: %w", err)
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		return fmt.Errorf("sync temp: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("close temp: %w", err)
+	}
+	return os.Rename(tmp, path)
 }
 
 // Snapshot returns a deep copy of the current store.
@@ -254,10 +277,14 @@ func (m *Manager) SetActive(id string) error {
 // SetPrometheus updates the Prometheus integration settings. The URL is
 // normalised so that entries like "10.0.0.1:9090" (no scheme) and
 // trailing-slash variants all persist as a clean http(s):// URL.
-func (m *Manager) SetPrometheus(url, label string) error {
+func (m *Manager) SetPrometheus(rawURL, label string) error {
+	normalised, err := normalisePromURL(rawURL)
+	if err != nil {
+		return err
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.store.PrometheusURL = normalisePromURL(url)
+	m.store.PrometheusURL = normalised
 	if label = strings.TrimSpace(label); label != "" {
 		m.store.PrometheusLabel = label
 	}
@@ -266,15 +293,27 @@ func (m *Manager) SetPrometheus(url, label string) error {
 
 // normalisePromURL trims whitespace + trailing slashes and prepends
 // http:// when no scheme is present. Returns "" for empty input.
-func normalisePromURL(raw string) string {
+// Rejects anything other than http / https so a user can't sneak a
+// file:// or javascript: URL through the settings endpoint.
+func normalisePromURL(raw string) (string, error) {
 	s := strings.TrimRight(strings.TrimSpace(raw), "/")
 	if s == "" {
-		return ""
+		return "", nil
 	}
 	if !strings.Contains(s, "://") {
 		s = "http://" + s
 	}
-	return s
+	u, err := url.Parse(s)
+	if err != nil {
+		return "", fmt.Errorf("invalid prometheus URL: %w", err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return "", fmt.Errorf("prometheus URL scheme must be http or https, got %q", u.Scheme)
+	}
+	if u.Host == "" {
+		return "", errors.New("prometheus URL is missing a host")
+	}
+	return s, nil
 }
 
 // Prometheus returns the configured Prometheus URL and host label.

@@ -44,12 +44,12 @@ func (s *Server) Handler() http.Handler {
 
 	mux.HandleFunc("GET /api/health", s.health)
 	mux.HandleFunc("GET /api/servers", s.listServers)
-	mux.HandleFunc("POST /api/servers", s.upsertServer)
+	mux.HandleFunc("POST /api/servers", limitBody(smallBody, s.upsertServer))
 	mux.HandleFunc("DELETE /api/servers/{id}", s.deleteServer)
 	mux.HandleFunc("POST /api/servers/{id}/activate", s.activateServer)
 	mux.HandleFunc("POST /api/servers/{id}/test", s.testServer)
 	mux.HandleFunc("GET /api/settings", s.getSettings)
-	mux.HandleFunc("POST /api/settings", s.setSettings)
+	mux.HandleFunc("POST /api/settings", limitBody(smallBody, s.setSettings))
 
 	mux.HandleFunc("GET /api/inventory", s.inventory)
 	mux.HandleFunc("GET /api/metrics", s.metrics)
@@ -57,20 +57,38 @@ func (s *Server) Handler() http.Handler {
 
 	mux.HandleFunc("GET /api/playbooks", s.listPlaybooks)
 	mux.HandleFunc("GET /api/playbooks/content", s.getPlaybook)
-	mux.HandleFunc("PUT /api/playbooks/content", s.putPlaybook)
+	mux.HandleFunc("PUT /api/playbooks/content", limitBody(largeBody, s.putPlaybook))
 
 	mux.HandleFunc("GET /api/runs", s.listRuns)
 	mux.HandleFunc("GET /api/runs/{id}", s.getRun)
 
 	mux.HandleFunc("GET /api/vault", s.listVault)
-	mux.HandleFunc("POST /api/vault/view", s.viewVault)
-	mux.HandleFunc("POST /api/vault/content", s.writeVault)
+	mux.HandleFunc("POST /api/vault/view", limitBody(smallBody, s.viewVault))
+	mux.HandleFunc("POST /api/vault/content", limitBody(largeBody, s.writeVault))
 	mux.HandleFunc("GET /api/adhoc/stream", s.wsAdhoc)
 	mux.HandleFunc("GET /api/playbook/stream", s.wsPlaybook)
 
 	mux.Handle("/", s.staticHandler())
 
 	return withLogging(mux)
+}
+
+// Body size caps for POST / PUT handlers. Control-plane payloads
+// (server defs, settings, vault passwords) are tiny; playbook +
+// vault-write bodies can reasonably be a few hundred kilobytes.
+const (
+	smallBody = 64 * 1024
+	largeBody = 1 * 1024 * 1024
+)
+
+// limitBody wraps an http.HandlerFunc so the request body is capped
+// via http.MaxBytesReader. Requests over the cap get 413 before the
+// handler sees them.
+func limitBody(max int64, h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		r.Body = http.MaxBytesReader(w, r.Body, max)
+		h(w, r)
+	}
 }
 
 func (s *Server) staticHandler() http.Handler {

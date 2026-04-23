@@ -117,7 +117,7 @@ func (s *Server) setSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.Config.SetPrometheus(body.PrometheusURL, body.PrometheusLabel); err != nil {
-		writeError(w, http.StatusInternalServerError, err)
+		writeError(w, http.StatusBadRequest, err)
 		return
 	}
 	if err := s.Config.SetAutoGatherFacts(body.AutoGatherFacts); err != nil {

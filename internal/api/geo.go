@@ -40,23 +40,35 @@ func newGeoResolver() *geoResolver {
 //     answer — this is the common path for Tailscale / Netbird
 //     fleets where ansible_host is the mesh address
 //
-// Hosts whose candidates are all private are left untouched.
+// Hosts whose candidates are all private are left untouched. Lookups
+// fan out with a small concurrency cap so a large inventory doesn't
+// open hundreds of simultaneous ipinfo.io requests.
 func (g *geoResolver) enrichInventory(ctx context.Context, inv *ansible.Inventory) {
+	const maxConcurrent = 8
+	sem := make(chan struct{}, maxConcurrent)
+	var wg sync.WaitGroup
 	for i := range inv.Hosts {
 		h := &inv.Hosts[i]
 		if h.Region != "" {
 			continue
 		}
-		target := g.pickPublicIP(ctx, *h)
-		if target == "" {
-			continue
-		}
-		res, err := g.client.Lookup(ctx, target)
-		if err != nil || res.Label == "" {
-			continue
-		}
-		h.Region = res.Label
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(h *ansible.Host) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			target := g.pickPublicIP(ctx, *h)
+			if target == "" {
+				return
+			}
+			res, err := g.client.Lookup(ctx, target)
+			if err != nil || res.Label == "" {
+				return
+			}
+			h.Region = res.Label
+		}(h)
 	}
+	wg.Wait()
 }
 
 // pickPublicIP decides which address, if any, to geolocate for host.

@@ -8,11 +8,17 @@ import (
 	"fmt"
 	"path"
 	"strings"
+	"time"
 
 	"github.com/AlteredParadox/ansbui/internal/config"
 	"github.com/AlteredParadox/ansbui/internal/sshpool"
 	"golang.org/x/crypto/ssh"
 )
+
+// vaultRunTimeout bounds a single ansible-vault invocation.
+// Generous enough for large encrypted files on a slow link, but
+// bounded so a stuck remote shell can't hang the request forever.
+const vaultRunTimeout = 30 * time.Second
 
 // VaultFile is the summary shape the UI consumes for the vault list.
 // Only metadata — no decrypted content — is returned by list calls.
@@ -173,7 +179,7 @@ func ViewVault(ctx context.Context, pool *sshpool.Pool, srv config.Server, rel, 
 		`PASS=$(cat) && exec 3< <(cat <<< "$PASS") && ansible-vault view %s --vault-password-file=/dev/fd/3`,
 		shellQuote(full),
 	)
-	return runVaultScript(cli, script, password)
+	return runVaultScript(ctx, cli, script, password)
 }
 
 // WriteVault encrypts plaintext with the supplied password and writes
@@ -195,7 +201,7 @@ func WriteVault(ctx context.Context, pool *sshpool.Pool, srv config.Server, rel,
 		shellQuote(b64),
 		shellQuote(full),
 	)
-	if _, err := runVaultScript(cli, script, password); err != nil {
+	if _, err := runVaultScript(ctx, cli, script, password); err != nil {
 		return err
 	}
 	return nil
@@ -203,8 +209,12 @@ func WriteVault(ctx context.Context, pool *sshpool.Pool, srv config.Server, rel,
 
 // runVaultScript opens a session, pipes the password into stdin, runs
 // the supplied bash script and returns stdout / an error that carries
-// stderr so the UI can surface "wrong password" messages.
-func runVaultScript(cli *ssh.Client, script, password string) (string, error) {
+// stderr so the UI can surface "wrong password" messages. The run is
+// bounded by ctx and an internal timeout so a stuck remote shell
+// won't hang the request.
+func runVaultScript(ctx context.Context, cli *ssh.Client, script, password string) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, vaultRunTimeout)
+	defer cancel()
 	sess, err := cli.NewSession()
 	if err != nil {
 		return "", fmt.Errorf("new session: %w", err)
@@ -217,12 +227,32 @@ func runVaultScript(cli *ssh.Client, script, password string) (string, error) {
 	// bash is required for <(...) process substitution. /usr/bin/env
 	// resolves whichever bash is on PATH on the remote.
 	cmd := "/usr/bin/env bash -c " + shellQuote(script)
-	if err := sess.Run(cmd); err != nil {
-		msg := strings.TrimSpace(stderr.String())
-		if msg == "" {
-			msg = err.Error()
-		}
-		return stdout.String(), fmt.Errorf("ansible-vault: %s", msg)
+	if err := sess.Start(cmd); err != nil {
+		return "", fmt.Errorf("start ansible-vault: %w", err)
 	}
-	return stdout.String(), nil
+	done := make(chan error, 1)
+	go func() { done <- sess.Wait() }()
+	select {
+	case err := <-done:
+		if err != nil {
+			msg := strings.TrimSpace(stderr.String())
+			if msg == "" {
+				msg = err.Error()
+			}
+			return stdout.String(), fmt.Errorf("ansible-vault: %s", msg)
+		}
+		return stdout.String(), nil
+	case <-ctx.Done():
+		_ = sess.Signal(ssh.SIGTERM)
+		// Belt and suspenders: if the remote ignores SIGTERM we'd
+		// park forever on <-done. Forcibly close the session after a
+		// short grace so Wait() returns.
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			_ = sess.Close()
+			<-done
+		}
+		return stdout.String(), fmt.Errorf("ansible-vault: %w", ctx.Err())
+	}
 }

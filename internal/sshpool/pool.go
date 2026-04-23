@@ -26,8 +26,9 @@ import (
 
 // Pool caches clients keyed by server id.
 type Pool struct {
-	mu      sync.Mutex
-	clients map[string]*entry
+	mu       sync.Mutex
+	clients  map[string]*entry
+	dialLock map[string]*sync.Mutex
 }
 
 type entry struct {
@@ -37,28 +38,90 @@ type entry struct {
 
 // New constructs an empty pool.
 func New() *Pool {
-	return &Pool{clients: make(map[string]*entry)}
+	return &Pool{
+		clients:  make(map[string]*entry),
+		dialLock: make(map[string]*sync.Mutex),
+	}
 }
 
 // Client returns a live ssh.Client for the given server, dialing if
-// necessary. Callers must not Close() the returned client — the pool owns
-// it.
+// necessary. Callers must not Close() the returned client — the pool
+// owns it.
+//
+// The map mutex is only held for quick lookups / installs. Dialing
+// happens under a per-server mutex so a slow handshake to server A
+// does not block callers who need a cached client to server B.
 func (p *Pool) Client(ctx context.Context, srv config.Server) (*ssh.Client, error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if e, ok := p.clients[srv.ID]; ok && sameAuth(e.cfg, srv) && pingClient(e.client) {
-		return e.client, nil
+	if cli, ok := p.cached(srv); ok {
+		return cli, nil
 	}
-	if e, ok := p.clients[srv.ID]; ok {
-		_ = e.client.Close()
-		delete(p.clients, srv.ID)
+	dl := p.dialMutexFor(srv.ID)
+	dl.Lock()
+	defer dl.Unlock()
+	// Re-check: another caller may have raced us into the dial section.
+	if cli, ok := p.cached(srv); ok {
+		return cli, nil
 	}
+	p.evict(srv.ID)
 	cli, err := dial(ctx, srv)
 	if err != nil {
 		return nil, err
 	}
-	p.clients[srv.ID] = &entry{client: cli, cfg: srv}
+	p.install(srv, cli)
 	return cli, nil
+}
+
+func (p *Pool) cached(srv config.Server) (*ssh.Client, bool) {
+	p.mu.Lock()
+	e, ok := p.clients[srv.ID]
+	if !ok || !sameAuth(e.cfg, srv) {
+		p.mu.Unlock()
+		return nil, false
+	}
+	cli := e.client
+	// pingClient may block on a dead socket; drop the map mutex for
+	// the duration so other server ids keep moving.
+	p.mu.Unlock()
+	if !pingClient(cli) {
+		return nil, false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	// Confirm the entry didn't get swapped while we were unlocked.
+	cur, ok := p.clients[srv.ID]
+	if !ok || cur.client != cli {
+		return nil, false
+	}
+	return cli, true
+}
+
+func (p *Pool) evict(id string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if e, ok := p.clients[id]; ok {
+		_ = e.client.Close()
+		delete(p.clients, id)
+	}
+}
+
+func (p *Pool) install(srv config.Server, cli *ssh.Client) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if old, ok := p.clients[srv.ID]; ok {
+		_ = old.client.Close()
+	}
+	p.clients[srv.ID] = &entry{client: cli, cfg: srv}
+}
+
+func (p *Pool) dialMutexFor(id string) *sync.Mutex {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if m, ok := p.dialLock[id]; ok {
+		return m
+	}
+	m := &sync.Mutex{}
+	p.dialLock[id] = m
+	return m
 }
 
 // Drop closes and evicts a cached client, e.g. after its auth changes.
@@ -114,7 +177,15 @@ func Stream(ctx context.Context, client *ssh.Client, cmd string, stdout, stderr 
 	select {
 	case <-ctx.Done():
 		_ = sess.Signal(ssh.SIGTERM)
-		<-done
+		// If the remote ignores SIGTERM we'd park forever on
+		// <-done; force the session shut after a short grace so
+		// Wait() returns and we don't leak a goroutine.
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			_ = sess.Close()
+			<-done
+		}
 		return ctx.Err()
 	case err := <-done:
 		return err
