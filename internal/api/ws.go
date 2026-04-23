@@ -167,7 +167,10 @@ func consumeAndPersist(conn *websocket.Conn, events <-chan ansible.Event, run *a
 		}
 		tallyEvent(run, evt)
 		if len(logBuf) < 2000 {
-			logBuf = append(logBuf, evt)
+			// Redact before buffering: the live peer (above) already
+			// got the real value, but the copy destined for runs.json
+			// must not persist passwords/passphrases to disk.
+			logBuf = append(logBuf, ansible.RedactEvent(evt))
 		}
 	}
 	run.EndedAt = time.Now().UTC()
