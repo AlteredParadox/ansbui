@@ -150,14 +150,19 @@ func Run(client *ssh.Client, cmd string) (stdout, stderr string, err error) {
 }
 
 // Stream opens a session and runs cmd, forwarding stdout and stderr to
-// the supplied writers line-by-line. The session is aborted if ctx is
-// cancelled.
-func Stream(ctx context.Context, client *ssh.Client, cmd string, stdout, stderr io.Writer) error {
+// the supplied writers line-by-line. If stdin is non-nil it's wired to
+// the session's stdin — used for piping vault passwords without putting
+// them in argv; pass nil for commands that don't need input. The
+// session is aborted if ctx is cancelled.
+func Stream(ctx context.Context, client *ssh.Client, cmd string, stdin io.Reader, stdout, stderr io.Writer) error {
 	sess, err := client.NewSession()
 	if err != nil {
 		return fmt.Errorf("new session: %w", err)
 	}
 	defer sess.Close()
+	if stdin != nil {
+		sess.Stdin = stdin
+	}
 	sess.Stdout = stdout
 	sess.Stderr = stderr
 	if err := sess.Start(cmd); err != nil {

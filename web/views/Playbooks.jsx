@@ -486,6 +486,11 @@ function PlaybookRunner({ open, pb, seed, onClose }) {
   // that reason.
   const [vars, setVars] = useStateP(() => [newVarRow()]);
   const [varsError, setVarsError] = useStateP('');
+  // vaultPassword is held only in component state for the duration of
+  // the run; the dialog clears it on close, the backend pipes it via
+  // stdin (never argv), and buildPlaybookRecord deliberately omits it
+  // so it doesn't land in the persisted RunRecord.
+  const [vaultPassword, setVaultPassword] = useStateP('');
   const streamRef = useRefP(null);
   const outRef = useRefP(null);
 
@@ -512,6 +517,7 @@ function PlaybookRunner({ open, pb, seed, onClose }) {
       if (streamRef.current) { streamRef.current.close(); streamRef.current = null; }
       setOutput([]);
       setRunning(false);
+      setVaultPassword('');
     }
   }, [open]);
 
@@ -545,6 +551,7 @@ function PlaybookRunner({ open, pb, seed, onClose }) {
       check,
       become
     };
+    if (vaultPassword) payload.vaultPassword = vaultPassword;
 
     streamRef.current = globalThis.AnsbuiAPI.runCommand('playbook', payload, {
       onEntry: appendLog,
@@ -597,6 +604,19 @@ function PlaybookRunner({ open, pb, seed, onClose }) {
 
           <label htmlFor="pb-tags" className="cm-field-label">Tags (comma-separated, optional)</label>
           <input id="pb-tags" className="input mono" placeholder="deploy, config" value={tagsRaw} onChange={e => setTagsRaw(e.target.value)}/>
+
+          <label htmlFor="pb-vault-pw" className="cm-field-label" style={{ marginTop: 8 }}>
+            Vault password <span className="mute">(optional — only if the playbook references a $ANSIBLE_VAULT file)</span>
+          </label>
+          <input
+            id="pb-vault-pw"
+            type="password"
+            autoComplete="off"
+            className="input mono"
+            placeholder="leave blank if no vault is referenced"
+            value={vaultPassword}
+            onChange={e => setVaultPassword(e.target.value)}
+          />
 
           <div className="cm-field-label" style={{ marginTop: 8 }}>Extra variables (--extra-vars)</div>
           <div className="pb-vars">

@@ -29,13 +29,19 @@ type AdhocRequest struct {
 }
 
 // PlaybookRequest is a request to run `ansible-playbook <path>`.
+//
+// VaultPassword, when set, is fed to ansible-playbook via stdin + a
+// /dev/fd/3 password file so the value never appears in argv. It's
+// deliberately omitted from buildPlaybookRecord so the password isn't
+// copied into the persisted RunRecord.
 type PlaybookRequest struct {
-	Path      string         `json:"path"`
-	Limit     string         `json:"limit,omitempty"`
-	Tags      []string       `json:"tags,omitempty"`
-	ExtraVars map[string]any `json:"extraVars,omitempty"`
-	Check     bool           `json:"check"`
-	Become    bool           `json:"become"`
+	Path          string         `json:"path"`
+	Limit         string         `json:"limit,omitempty"`
+	Tags          []string       `json:"tags,omitempty"`
+	ExtraVars     map[string]any `json:"extraVars,omitempty"`
+	Check         bool           `json:"check"`
+	Become        bool           `json:"become"`
+	VaultPassword string         `json:"vaultPassword,omitempty"`
 }
 
 // Event is a single message streamed to the UI while a run is in flight.
@@ -55,20 +61,23 @@ func RunAdhoc(ctx context.Context, pool *sshpool.Pool, srv config.Server, req Ad
 	if err != nil {
 		return err
 	}
-	return runStreaming(ctx, pool, srv, cmd, out)
+	return runStreaming(ctx, pool, srv, cmd, "", out)
 }
 
-// RunPlaybook streams events from `ansible-playbook`.
+// RunPlaybook streams events from `ansible-playbook`. If
+// req.VaultPassword is set, the password is piped via stdin to a
+// bash-wrapped script that exposes it on /dev/fd/3 for
+// ansible-playbook's --vault-password-file. Argv stays clean.
 func RunPlaybook(ctx context.Context, pool *sshpool.Pool, srv config.Server, req PlaybookRequest, out chan<- Event) error {
 	defer close(out)
 	cmd, err := buildPlaybookCmd(srv, req)
 	if err != nil {
 		return err
 	}
-	return runStreaming(ctx, pool, srv, cmd, out)
+	return runStreaming(ctx, pool, srv, cmd, req.VaultPassword, out)
 }
 
-func runStreaming(ctx context.Context, pool *sshpool.Pool, srv config.Server, cmd string, out chan<- Event) error {
+func runStreaming(ctx context.Context, pool *sshpool.Pool, srv config.Server, cmd, stdin string, out chan<- Event) error {
 	cli, err := pool.Client(ctx, srv)
 	if err != nil {
 		return err
@@ -79,8 +88,12 @@ func runStreaming(ctx context.Context, pool *sshpool.Pool, srv config.Server, cm
 	stderrR, stderrW := io.Pipe()
 	done := make(chan error, 1)
 
+	var stdinR io.Reader
+	if stdin != "" {
+		stdinR = strings.NewReader(stdin)
+	}
 	go func() {
-		done <- sshpool.Stream(ctx, cli, cmd, stdoutW, stderrW)
+		done <- sshpool.Stream(ctx, cli, cmd, stdinR, stdoutW, stderrW)
 		_ = stdoutW.Close()
 		_ = stderrW.Close()
 	}()
@@ -231,8 +244,21 @@ func buildPlaybookCmd(srv config.Server, req PlaybookRequest) (string, error) {
 	if req.Become {
 		b.WriteString(" --become")
 	}
+	if req.VaultPassword != "" {
+		b.WriteString(" --vault-password-file=/dev/fd/3")
+	}
 	b.WriteString(" 2>&1")
-	return b.String(), nil
+	cmd := b.String()
+	if req.VaultPassword != "" {
+		// PASS=$(cat) reads the password from stdin into a shell var,
+		// then exec 3< <(cat <<< "$PASS") exposes it on FD 3 so
+		// ansible-playbook's --vault-password-file=/dev/fd/3 can read
+		// it. Process substitution requires bash, hence the env wrap.
+		// The password never appears in argv or in the saved log.
+		script := `PASS=$(cat) && exec 3< <(cat <<< "$PASS") && ` + cmd
+		cmd = "/usr/bin/env bash -c " + shellQuote(script)
+	}
+	return cmd, nil
 }
 
 var argKeyRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
