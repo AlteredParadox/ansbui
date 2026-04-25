@@ -176,7 +176,7 @@ func ViewVault(ctx context.Context, pool *sshpool.Pool, srv config.Server, rel, 
 	}
 	full := path.Join(srv.WorkDir, rel)
 	script := fmt.Sprintf(
-		`PASS=$(cat) && exec 3< <(cat <<< "$PASS") && ansible-vault view %s --vault-password-file=/dev/fd/3`,
+		`PASS=$(cat) && exec 3< <(printf '%%s' "$PASS") && ansible-vault view %s --vault-password-file=/dev/fd/3`,
 		shellQuote(full),
 	)
 	return runVaultScript(ctx, cli, script, password)
@@ -197,7 +197,7 @@ func WriteVault(ctx context.Context, pool *sshpool.Pool, srv config.Server, rel,
 	full := path.Join(srv.WorkDir, rel)
 	b64 := base64.StdEncoding.EncodeToString([]byte(plaintext))
 	script := fmt.Sprintf(
-		`PASS=$(cat) && exec 3< <(cat <<< "$PASS") && printf %%s %s | base64 -d | ansible-vault encrypt --output=%s --vault-password-file=/dev/fd/3 -`,
+		`PASS=$(cat) && exec 3< <(printf '%%s' "$PASS") && printf %%s %s | base64 -d | ansible-vault encrypt --output=%s --vault-password-file=/dev/fd/3 -`,
 		shellQuote(b64),
 		shellQuote(full),
 	)

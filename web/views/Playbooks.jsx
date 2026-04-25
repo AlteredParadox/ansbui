@@ -611,7 +611,7 @@ function PlaybookRunner({ open, pb, seed, onClose }) {
           <input
             id="pb-vault-pw"
             type="password"
-            autoComplete="off"
+            autoComplete="new-password"
             className="input mono"
             placeholder="leave blank if no vault is referenced"
             value={vaultPassword}

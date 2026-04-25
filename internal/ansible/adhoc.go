@@ -31,9 +31,10 @@ type AdhocRequest struct {
 // PlaybookRequest is a request to run `ansible-playbook <path>`.
 //
 // VaultPassword, when set, is fed to ansible-playbook via stdin + a
-// /dev/fd/3 password file so the value never appears in argv. It's
-// deliberately omitted from buildPlaybookRecord so the password isn't
-// copied into the persisted RunRecord.
+// /dev/fd/3 password file so the value never appears in argv. The
+// field is intentionally not copied into RunRecord by
+// buildPlaybookRecord (in internal/api/ws.go) — anyone adding new
+// persistence paths must keep that invariant.
 type PlaybookRequest struct {
 	Path          string         `json:"path"`
 	Limit         string         `json:"limit,omitempty"`
@@ -251,11 +252,14 @@ func buildPlaybookCmd(srv config.Server, req PlaybookRequest) (string, error) {
 	cmd := b.String()
 	if req.VaultPassword != "" {
 		// PASS=$(cat) reads the password from stdin into a shell var,
-		// then exec 3< <(cat <<< "$PASS") exposes it on FD 3 so
+		// then exec 3< <(printf '%s' "$PASS") exposes it on FD 3 so
 		// ansible-playbook's --vault-password-file=/dev/fd/3 can read
-		// it. Process substitution requires bash, hence the env wrap.
-		// The password never appears in argv or in the saved log.
-		script := `PASS=$(cat) && exec 3< <(cat <<< "$PASS") && ` + cmd
+		// it. printf is a bash builtin (no exec) writing into the FIFO
+		// from process substitution — keeps the value entirely in
+		// pipes, with no chance of a /tmp window even on older bash
+		// where here-strings (<<<) could spill to disk. The password
+		// never appears in argv or in the saved log.
+		script := `PASS=$(cat) && exec 3< <(printf '%s' "$PASS") && ` + cmd
 		cmd = "/usr/bin/env bash -c " + shellQuote(script)
 	}
 	return cmd, nil
