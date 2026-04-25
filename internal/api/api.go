@@ -65,7 +65,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/vault", s.listVault)
 	mux.HandleFunc("POST /api/vault/view", limitBody(smallBody, s.viewVault))
 	mux.HandleFunc("POST /api/vault/content", limitBody(largeBody, s.writeVault))
-	mux.HandleFunc("GET /api/vault/inline", s.listInlineVault)
+	mux.HandleFunc("POST /api/vault/inline/list", limitBody(smallBody, s.listInlineVault))
 	mux.HandleFunc("POST /api/vault/inline/decrypt", limitBody(smallBody, s.decryptInlineVault))
 	mux.HandleFunc("POST /api/vault/inline/upsert", limitBody(smallBody, s.upsertInlineVault))
 	mux.HandleFunc("GET /api/adhoc/stream", s.wsAdhoc)

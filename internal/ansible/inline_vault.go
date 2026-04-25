@@ -231,20 +231,31 @@ func spliceInlineSnippet(content, varName, snippet string) string {
 }
 
 // writeInlineVaultFile ships content to the remote and atomically
-// replaces the file at rel — content is base64'd into the shell command
-// so the bytes survive any shell-special characters intact, then
-// staged to a sibling tempfile and renamed over the original. Mode
-// bits are preserved via stat+chmod so a freshly-written file doesn't
-// drift to umask defaults.
+// replaces the file at rel. Hardening:
+//   - bash with `-eo pipefail` so a failure inside `printf | base64`
+//     stops the chain instead of falling through to chmod+mv.
+//   - EXIT trap removes the tempfile if anything aborts midway, so a
+//     half-decoded $TMP doesn't linger in the operator's workdir.
+//   - `[ -L "$FULL" ]` refuses to write through a symlink: validateRelPath
+//     blocks `..` and absolute paths in the supplied rel string, but it
+//     can't see what's already on disk, so an attacker (or an honest
+//     mistake) placing a symlink at the target would otherwise let
+//     `mv` overwrite the link's destination.
+//   - mode bits are preserved via stat+chmod so a freshly-written file
+//     doesn't drift to umask defaults.
 func writeInlineVaultFile(_ context.Context, cli *ssh.Client, srv config.Server, rel, content string) error {
 	full := path.Join(srv.WorkDir, rel)
 	b64 := base64.StdEncoding.EncodeToString([]byte(content))
+	q := shellQuote(full)
 	script := fmt.Sprintf(
-		`set -e; PERM=$(stat -c '%%a' %s) && TMP=%s.tmp.$$ && printf %%s %s | base64 -d > "$TMP" && chmod "$PERM" "$TMP" && mv "$TMP" %s`,
-		shellQuote(full),
-		shellQuote(full),
-		shellQuote(b64),
-		shellQuote(full),
+		`set -eo pipefail; trap '[ -n "${TMP:-}" ] && rm -f "$TMP"' EXIT; `+
+			`if [ -L %s ]; then echo "refusing to write through symlink" >&2; exit 2; fi; `+
+			`PERM=$(stat -c '%%a' %s); `+
+			`TMP=%s.tmp.$$; `+
+			`printf %%s %s | base64 -d > "$TMP"; `+
+			`chmod "$PERM" "$TMP"; `+
+			`mv "$TMP" %s`,
+		q, q, q, shellQuote(b64), q,
 	)
 	_, stderr, err := sshpool.Run(cli, script)
 	if err != nil {

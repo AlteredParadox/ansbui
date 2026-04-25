@@ -96,21 +96,30 @@ func (s *Server) writeVault(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
-// /api/vault/inline?path=<rel> — list every `!vault |` key in an
+type inlineListBody struct {
+	Path string `json:"path"`
+}
+
+// POST /api/vault/inline/list — list every `!vault |` key in an
 // inline vault file. Doesn't need a password; just text-parses the
-// file. Used by the UI to render the per-key editor.
+// file. POST (not GET) so the rel path doesn't show up in upstream
+// reverse-proxy access logs.
 func (s *Server) listInlineVault(w http.ResponseWriter, r *http.Request) {
 	srv, err := s.resolveServer(r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	pathParam := r.URL.Query().Get("path")
-	if pathParam == "" {
-		writeError(w, http.StatusBadRequest, errors.New("path query parameter is required"))
+	var body inlineListBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("decode body: %w", err))
 		return
 	}
-	keys, err := ansible.ListInlineVaultKeys(r.Context(), s.Pool, srv, pathParam)
+	if body.Path == "" {
+		writeError(w, http.StatusBadRequest, errors.New("path is required"))
+		return
+	}
+	keys, err := ansible.ListInlineVaultKeys(r.Context(), s.Pool, srv, body.Path)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, err)
 		return
