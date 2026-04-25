@@ -13,7 +13,9 @@ import (
 // writeFileAtomicViaStdin overwrites the absolute path `full` on the
 // remote with `content`, streamed over the session's stdin (so it
 // sidesteps the 128 KB MAX_ARG_STRLEN ceiling that any base64-in-argv
-// approach would hit).
+// approach would hit). Also creates the file if it doesn't exist —
+// the playbook Import flow relies on this to write a new file under
+// the workdir.
 //
 // Hardening:
 //   - `set -eo pipefail` so any pipeline failure aborts before chmod/mv.
@@ -27,9 +29,11 @@ import (
 //     racer can swap a regular file for a symlink between the check
 //     and the rename; accepted residual risk for a single-operator
 //     deployment.
-//   - mode bits preserved via stat+chmod. Owner is not preserved —
-//     the new file is owned by the SSH user; for ansbui's typical
-//     setup that's the operator who owns the workdir.
+//   - mode bits are preserved via stat+chmod for files that already
+//     exist; new files get 0644 (matches the umask-default that the
+//     previous `>`-based writers would have produced). Owner is not
+//     preserved — the new file is owned by the SSH user, which for
+//     ansbui's typical setup is the operator who owns the workdir.
 //
 // Returns trimmed stderr (empty if the run succeeded) plus any
 // underlying error from the SSH execution. Callers should wrap the
@@ -39,12 +43,12 @@ func writeFileAtomicViaStdin(ctx context.Context, cli *ssh.Client, full, content
 	script := fmt.Sprintf(
 		`set -eo pipefail; trap '[ -n "${TMP:-}" ] && rm -f "$TMP"' EXIT; `+
 			`if [ -L %s ]; then echo "refusing to write through symlink" >&2; exit 2; fi; `+
-			`PERM=$(stat -c '%%a' %s); `+
+			`if [ -e %s ]; then PERM=$(stat -c '%%a' %s); else PERM=0644; fi; `+
 			`TMP=%s.tmp.$$; `+
 			`cat > "$TMP"; `+
 			`chmod "$PERM" "$TMP"; `+
 			`mv "$TMP" %s`,
-		q, q, q, q,
+		q, q, q, q, q,
 	)
 	_, stderr, err = runRemoteScript(ctx, cli, script, content)
 	return stderr, err
