@@ -2,7 +2,6 @@ package ansible
 
 import (
 	"context"
-	"encoding/base64"
 	"fmt"
 	"path"
 	"regexp"
@@ -232,15 +231,17 @@ func spliceInlineSnippet(content, varName, snippet string) string {
 
 // writeInlineVaultFile ships content to the remote and atomically
 // replaces the file at rel. Hardening:
-//   - The script is wrapped in `bash -c` because `set -o pipefail` is
-//     a bashism. sshpool.Run dispatches via the SSH user's login shell,
-//     which on a hardened host may be dash/ash; without bash, the
-//     `pipefail` line aborts before the write.
-//   - `set -eo pipefail` so a failure inside `printf | base64`
-//     stops the chain instead of falling through to chmod+mv.
+//   - File content streams over the SSH session's stdin and lands
+//     via `cat > "$TMP"`, NOT base64-embedded in argv. Linux's
+//     MAX_ARG_STRLEN caps each argv element at 128 KB (PAGE_SIZE × 32),
+//     so a base64-in-argv approach would silently fail at the
+//     rewrite step on payloads larger than ~95 KB. Stdin has no such
+//     bound.
+//   - `set -eo pipefail` so a failure inside any pipeline stops the
+//     chain instead of falling through to chmod+mv.
 //   - EXIT trap removes the tempfile if anything aborts midway (other
-//     than SIGKILL, which bash can't catch) so a half-decoded
-//     `*.tmp.$$` doesn't linger in the operator's workdir.
+//     than SIGKILL, which bash can't catch) so a partial `*.tmp.$$`
+//     doesn't linger in the operator's workdir.
 //   - `[ -L "$FULL" ]` refuses to write when the destination is a
 //     symlink. rename(2) doesn't follow symlinks at the destination —
 //     it replaces the link itself with the source file — so this isn't
@@ -254,28 +255,25 @@ func spliceInlineSnippet(content, varName, snippet string) string {
 //     file doesn't drift to umask defaults. Owner is not preserved —
 //     the new file is owned by the SSH user; acceptable here because
 //     the SSH user is the operator and owns the workdir.
-func writeInlineVaultFile(_ context.Context, cli *ssh.Client, srv config.Server, rel, content string) error {
+func writeInlineVaultFile(ctx context.Context, cli *ssh.Client, srv config.Server, rel, content string) error {
 	full := path.Join(srv.WorkDir, rel)
-	b64 := base64.StdEncoding.EncodeToString([]byte(content))
 	q := shellQuote(full)
 	script := fmt.Sprintf(
 		`set -eo pipefail; trap '[ -n "${TMP:-}" ] && rm -f "$TMP"' EXIT; `+
 			`if [ -L %s ]; then echo "refusing to write through symlink" >&2; exit 2; fi; `+
 			`PERM=$(stat -c '%%a' %s); `+
 			`TMP=%s.tmp.$$; `+
-			`printf %%s %s | base64 -d > "$TMP"; `+
+			`cat > "$TMP"; `+
 			`chmod "$PERM" "$TMP"; `+
 			`mv "$TMP" %s`,
-		q, q, q, shellQuote(b64), q,
+		q, q, q, q,
 	)
-	cmd := "/usr/bin/env bash -c " + shellQuote(script)
-	_, stderr, err := sshpool.Run(cli, cmd)
+	_, stderr, err := runRemoteScript(ctx, cli, script, content)
 	if err != nil {
-		msg := strings.TrimSpace(stderr)
-		if msg == "" {
-			msg = err.Error()
+		if stderr == "" {
+			stderr = err.Error()
 		}
-		return fmt.Errorf("write %s: %s", rel, msg)
+		return fmt.Errorf("write %s: %s", rel, stderr)
 	}
 	return nil
 }

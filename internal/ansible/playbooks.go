@@ -2,7 +2,6 @@ package ansible
 
 import (
 	"context"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"path"
@@ -132,9 +131,11 @@ func LoadPlaybook(ctx context.Context, pool *sshpool.Pool, srv config.Server, re
 	return p, nil
 }
 
-// SavePlaybook writes YAML back to the remote file. Content is base64-
-// encoded over SSH so newlines and quotes survive transit without
-// further escaping.
+// SavePlaybook writes YAML back to the remote file. The YAML streams
+// over the SSH session's stdin and lands via `cat > <full>`, so
+// payloads larger than the ~95 KB MAX_ARG_STRLEN ceiling for argv go
+// through cleanly — older base64-in-argv versions would 413 / "Argument
+// list too long" on big playbooks.
 func SavePlaybook(ctx context.Context, pool *sshpool.Pool, srv config.Server, rel, yaml string) error {
 	if err := validateRelPath(rel); err != nil {
 		return err
@@ -144,11 +145,13 @@ func SavePlaybook(ctx context.Context, pool *sshpool.Pool, srv config.Server, re
 		return err
 	}
 	full := path.Join(srv.WorkDir, rel)
-	encoded := base64.StdEncoding.EncodeToString([]byte(yaml))
-	cmd := fmt.Sprintf("printf %%s %s | base64 -d > %s", shellQuote(encoded), shellQuote(full))
-	_, stderr, err := sshpool.Run(cli, cmd)
+	script := fmt.Sprintf(`cat > %s`, shellQuote(full))
+	_, stderr, err := runRemoteScript(ctx, cli, script, yaml)
 	if err != nil {
-		return fmt.Errorf("write playbook %s: %w (stderr: %s)", rel, err, strings.TrimSpace(stderr))
+		if stderr == "" {
+			stderr = err.Error()
+		}
+		return fmt.Errorf("write playbook %s: %s", rel, stderr)
 	}
 	return nil
 }

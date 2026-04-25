@@ -1,9 +1,7 @@
 package ansible
 
 import (
-	"bytes"
 	"context"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"path"
@@ -183,9 +181,13 @@ func ViewVault(ctx context.Context, pool *sshpool.Pool, srv config.Server, rel, 
 }
 
 // WriteVault encrypts plaintext with the supplied password and writes
-// the ciphertext to rel, creating it if necessary. Plaintext is
-// base64-encoded inline in the shell command (not via stdin — stdin
-// carries the password) to keep the two channels separate.
+// the ciphertext to rel, creating it if necessary. Both the password
+// and plaintext travel over the session's stdin: line 1 is the
+// password (consumed by `read -r`), the rest is the plaintext that
+// `ansible-vault encrypt -` reads from stdin and writes (encrypted)
+// to --output. This keeps the password out of argv and avoids the
+// 128 KB MAX_ARG_STRLEN ceiling that an embedded base64 plaintext
+// would hit on values larger than ~95 KB.
 func WriteVault(ctx context.Context, pool *sshpool.Pool, srv config.Server, rel, password, plaintext string) error {
 	if err := validateRelPath(rel); err != nil {
 		return err
@@ -195,64 +197,30 @@ func WriteVault(ctx context.Context, pool *sshpool.Pool, srv config.Server, rel,
 		return err
 	}
 	full := path.Join(srv.WorkDir, rel)
-	b64 := base64.StdEncoding.EncodeToString([]byte(plaintext))
 	script := fmt.Sprintf(
-		`PASS=$(cat) && exec 3< <(printf '%%s' "$PASS") && printf %%s %s | base64 -d | ansible-vault encrypt --output=%s --vault-password-file=/dev/fd/3 -`,
-		shellQuote(b64),
+		`IFS= read -r PASS && exec 3< <(printf '%%s' "$PASS") && ansible-vault encrypt --output=%s --vault-password-file=/dev/fd/3 -`,
 		shellQuote(full),
 	)
-	if _, err := runVaultScript(ctx, cli, script, password); err != nil {
+	if _, err := runVaultScript(ctx, cli, script, password+"\n"+plaintext); err != nil {
 		return err
 	}
 	return nil
 }
 
-// runVaultScript opens a session, pipes the password into stdin, runs
-// the supplied bash script and returns stdout / an error that carries
-// stderr so the UI can surface "wrong password" messages. The run is
-// bounded by ctx and an internal timeout so a stuck remote shell
-// won't hang the request.
-func runVaultScript(ctx context.Context, cli *ssh.Client, script, password string) (string, error) {
-	ctx, cancel := context.WithTimeout(ctx, vaultRunTimeout)
-	defer cancel()
-	sess, err := cli.NewSession()
-	if err != nil {
-		return "", fmt.Errorf("new session: %w", err)
+// runVaultScript is a thin wrapper over runRemoteScript that prefixes
+// errors with "ansible-vault:" so the UI surfaces vault-specific
+// messages ("wrong password", "no vault secrets found") with their
+// origin attached. `stdin` is the bytes piped to the bash script —
+// for vault scripts this is typically the password (consumed by
+// `PASS=$(cat)`) or the password followed by ciphertext / plaintext
+// (split via `read -r`).
+func runVaultScript(ctx context.Context, cli *ssh.Client, script, stdin string) (string, error) {
+	stdout, stderr, err := runRemoteScript(ctx, cli, script, stdin)
+	if err == nil {
+		return stdout, nil
 	}
-	defer sess.Close()
-	var stdout, stderr bytes.Buffer
-	sess.Stdout = &stdout
-	sess.Stderr = &stderr
-	sess.Stdin = bytes.NewBufferString(password)
-	// bash is required for <(...) process substitution. /usr/bin/env
-	// resolves whichever bash is on PATH on the remote.
-	cmd := "/usr/bin/env bash -c " + shellQuote(script)
-	if err := sess.Start(cmd); err != nil {
-		return "", fmt.Errorf("start ansible-vault: %w", err)
+	if stderr == "" {
+		stderr = err.Error()
 	}
-	done := make(chan error, 1)
-	go func() { done <- sess.Wait() }()
-	select {
-	case err := <-done:
-		if err != nil {
-			msg := strings.TrimSpace(stderr.String())
-			if msg == "" {
-				msg = err.Error()
-			}
-			return stdout.String(), fmt.Errorf("ansible-vault: %s", msg)
-		}
-		return stdout.String(), nil
-	case <-ctx.Done():
-		_ = sess.Signal(ssh.SIGTERM)
-		// Belt and suspenders: if the remote ignores SIGTERM we'd
-		// park forever on <-done. Forcibly close the session after a
-		// short grace so Wait() returns.
-		select {
-		case <-done:
-		case <-time.After(2 * time.Second):
-			_ = sess.Close()
-			<-done
-		}
-		return stdout.String(), fmt.Errorf("ansible-vault: %w", ctx.Err())
-	}
+	return stdout, fmt.Errorf("ansible-vault: %s", stderr)
 }
