@@ -14,9 +14,21 @@ import (
 // response has already been written, in which case the caller should
 // just `return`. Centralised so the wrapping format ("decode body:
 // %w") lives in one place — Sonar S1192 flagged the duplication.
+//
+// Strictness: DisallowUnknownFields catches client typos (a misspelled
+// field would otherwise silently default), and the trailing-content
+// check rejects clients that sneak a second JSON object past the first
+// (json.Decoder is happy to read a single value and stop, leaving
+// arbitrary bytes unread).
 func decodeJSONBody(w http.ResponseWriter, r *http.Request, dst any) bool {
-	if err := json.NewDecoder(r.Body).Decode(dst); err != nil {
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(dst); err != nil {
 		writeError(w, http.StatusBadRequest, fmt.Errorf("decode body: %w", err))
+		return false
+	}
+	if dec.More() {
+		writeError(w, http.StatusBadRequest, errors.New("decode body: unexpected trailing data"))
 		return false
 	}
 	return true
