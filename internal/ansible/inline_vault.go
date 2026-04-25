@@ -229,46 +229,12 @@ func spliceInlineSnippet(content, varName, snippet string) string {
 	return trimmed + "\n" + snippet + "\n"
 }
 
-// writeInlineVaultFile ships content to the remote and atomically
-// replaces the file at rel. Hardening:
-//   - File content streams over the SSH session's stdin and lands
-//     via `cat > "$TMP"`, NOT base64-embedded in argv. Linux's
-//     MAX_ARG_STRLEN caps each argv element at 128 KB (PAGE_SIZE × 32),
-//     so a base64-in-argv approach would silently fail at the
-//     rewrite step on payloads larger than ~95 KB. Stdin has no such
-//     bound.
-//   - `set -eo pipefail` so a failure inside any pipeline stops the
-//     chain instead of falling through to chmod+mv.
-//   - EXIT trap removes the tempfile if anything aborts midway (other
-//     than SIGKILL, which bash can't catch) so a partial `*.tmp.$$`
-//     doesn't linger in the operator's workdir.
-//   - `[ -L "$FULL" ]` refuses to write when the destination is a
-//     symlink. rename(2) doesn't follow symlinks at the destination —
-//     it replaces the link itself with the source file — so this isn't
-//     a "stop mv from clobbering the symlink target" guard. It's
-//     defense-in-depth: an honest-mistake symlink in the workdir
-//     would otherwise be silently destroyed and replaced with a
-//     regular file. A determined local racer can still swap a regular
-//     file for a symlink between this check and `mv`; that's an
-//     accepted risk for a single-operator deployment.
-//   - mode bits are preserved via stat+chmod so a freshly-written
-//     file doesn't drift to umask defaults. Owner is not preserved —
-//     the new file is owned by the SSH user; acceptable here because
-//     the SSH user is the operator and owns the workdir.
+// writeInlineVaultFile delegates the atomic write to the shared
+// stdin-streaming helper and wraps the error with the rel path so
+// the UI surfaces a useful message.
 func writeInlineVaultFile(ctx context.Context, cli *ssh.Client, srv config.Server, rel, content string) error {
 	full := path.Join(srv.WorkDir, rel)
-	q := shellQuote(full)
-	script := fmt.Sprintf(
-		`set -eo pipefail; trap '[ -n "${TMP:-}" ] && rm -f "$TMP"' EXIT; `+
-			`if [ -L %s ]; then echo "refusing to write through symlink" >&2; exit 2; fi; `+
-			`PERM=$(stat -c '%%a' %s); `+
-			`TMP=%s.tmp.$$; `+
-			`cat > "$TMP"; `+
-			`chmod "$PERM" "$TMP"; `+
-			`mv "$TMP" %s`,
-		q, q, q, q,
-	)
-	_, stderr, err := runRemoteScript(ctx, cli, script, content)
+	stderr, err := writeFileAtomicViaStdin(ctx, cli, full, content)
 	if err != nil {
 		if stderr == "" {
 			stderr = err.Error()

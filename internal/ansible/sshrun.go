@@ -10,6 +10,46 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
+// writeFileAtomicViaStdin overwrites the absolute path `full` on the
+// remote with `content`, streamed over the session's stdin (so it
+// sidesteps the 128 KB MAX_ARG_STRLEN ceiling that any base64-in-argv
+// approach would hit).
+//
+// Hardening:
+//   - `set -eo pipefail` so any pipeline failure aborts before chmod/mv.
+//   - EXIT trap removes the `*.tmp.$$` if anything goes wrong midway
+//     (other than SIGKILL, which bash can't trap).
+//   - `[ -L "$FULL" ]` refuses to write when the destination is a
+//     symlink. rename(2) wouldn't follow the link at the destination
+//     (it would replace the symlink with a regular file), so this is
+//     defense-in-depth against an honest-mistake symlink being
+//     destroyed and replaced with a regular file. A determined local
+//     racer can swap a regular file for a symlink between the check
+//     and the rename; accepted residual risk for a single-operator
+//     deployment.
+//   - mode bits preserved via stat+chmod. Owner is not preserved —
+//     the new file is owned by the SSH user; for ansbui's typical
+//     setup that's the operator who owns the workdir.
+//
+// Returns trimmed stderr (empty if the run succeeded) plus any
+// underlying error from the SSH execution. Callers should wrap the
+// error with their own context (e.g. "write playbook %s: %s").
+func writeFileAtomicViaStdin(ctx context.Context, cli *ssh.Client, full, content string) (stderr string, err error) {
+	q := shellQuote(full)
+	script := fmt.Sprintf(
+		`set -eo pipefail; trap '[ -n "${TMP:-}" ] && rm -f "$TMP"' EXIT; `+
+			`if [ -L %s ]; then echo "refusing to write through symlink" >&2; exit 2; fi; `+
+			`PERM=$(stat -c '%%a' %s); `+
+			`TMP=%s.tmp.$$; `+
+			`cat > "$TMP"; `+
+			`chmod "$PERM" "$TMP"; `+
+			`mv "$TMP" %s`,
+		q, q, q, q,
+	)
+	_, stderr, err = runRemoteScript(ctx, cli, script, content)
+	return stderr, err
+}
+
 // runRemoteScript opens a session, optionally feeds stdin, runs the
 // supplied script under /usr/bin/env bash -c, and returns stdout +
 // trimmed stderr + the underlying error.

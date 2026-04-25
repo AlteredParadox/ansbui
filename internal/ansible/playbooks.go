@@ -131,11 +131,12 @@ func LoadPlaybook(ctx context.Context, pool *sshpool.Pool, srv config.Server, re
 	return p, nil
 }
 
-// SavePlaybook writes YAML back to the remote file. The YAML streams
-// over the SSH session's stdin and lands via `cat > <full>`, so
-// payloads larger than the ~95 KB MAX_ARG_STRLEN ceiling for argv go
-// through cleanly — older base64-in-argv versions would 413 / "Argument
-// list too long" on big playbooks.
+// SavePlaybook writes YAML back to the remote file via the shared
+// atomic-write helper: stat+chmod preserves the playbook's mode,
+// the symlink guard refuses to clobber an operator-placed link,
+// and the tempfile+rename keeps a half-streamed save from
+// truncating the working file. YAML rides over the SSH session's
+// stdin so big playbooks don't hit MAX_ARG_STRLEN.
 func SavePlaybook(ctx context.Context, pool *sshpool.Pool, srv config.Server, rel, yaml string) error {
 	if err := validateRelPath(rel); err != nil {
 		return err
@@ -145,8 +146,7 @@ func SavePlaybook(ctx context.Context, pool *sshpool.Pool, srv config.Server, re
 		return err
 	}
 	full := path.Join(srv.WorkDir, rel)
-	script := fmt.Sprintf(`cat > %s`, shellQuote(full))
-	_, stderr, err := runRemoteScript(ctx, cli, script, yaml)
+	stderr, err := writeFileAtomicViaStdin(ctx, cli, full, yaml)
 	if err != nil {
 		if stderr == "" {
 			stderr = err.Error()
