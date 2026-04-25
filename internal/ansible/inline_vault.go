@@ -232,17 +232,28 @@ func spliceInlineSnippet(content, varName, snippet string) string {
 
 // writeInlineVaultFile ships content to the remote and atomically
 // replaces the file at rel. Hardening:
-//   - bash with `-eo pipefail` so a failure inside `printf | base64`
+//   - The script is wrapped in `bash -c` because `set -o pipefail` is
+//     a bashism. sshpool.Run dispatches via the SSH user's login shell,
+//     which on a hardened host may be dash/ash; without bash, the
+//     `pipefail` line aborts before the write.
+//   - `set -eo pipefail` so a failure inside `printf | base64`
 //     stops the chain instead of falling through to chmod+mv.
-//   - EXIT trap removes the tempfile if anything aborts midway, so a
-//     half-decoded $TMP doesn't linger in the operator's workdir.
-//   - `[ -L "$FULL" ]` refuses to write through a symlink: validateRelPath
-//     blocks `..` and absolute paths in the supplied rel string, but it
-//     can't see what's already on disk, so an attacker (or an honest
-//     mistake) placing a symlink at the target would otherwise let
-//     `mv` overwrite the link's destination.
-//   - mode bits are preserved via stat+chmod so a freshly-written file
-//     doesn't drift to umask defaults.
+//   - EXIT trap removes the tempfile if anything aborts midway (other
+//     than SIGKILL, which bash can't catch) so a half-decoded
+//     `*.tmp.$$` doesn't linger in the operator's workdir.
+//   - `[ -L "$FULL" ]` refuses to write when the destination is a
+//     symlink. rename(2) doesn't follow symlinks at the destination —
+//     it replaces the link itself with the source file — so this isn't
+//     a "stop mv from clobbering the symlink target" guard. It's
+//     defense-in-depth: an honest-mistake symlink in the workdir
+//     would otherwise be silently destroyed and replaced with a
+//     regular file. A determined local racer can still swap a regular
+//     file for a symlink between this check and `mv`; that's an
+//     accepted risk for a single-operator deployment.
+//   - mode bits are preserved via stat+chmod so a freshly-written
+//     file doesn't drift to umask defaults. Owner is not preserved —
+//     the new file is owned by the SSH user; acceptable here because
+//     the SSH user is the operator and owns the workdir.
 func writeInlineVaultFile(_ context.Context, cli *ssh.Client, srv config.Server, rel, content string) error {
 	full := path.Join(srv.WorkDir, rel)
 	b64 := base64.StdEncoding.EncodeToString([]byte(content))
@@ -257,7 +268,8 @@ func writeInlineVaultFile(_ context.Context, cli *ssh.Client, srv config.Server,
 			`mv "$TMP" %s`,
 		q, q, q, shellQuote(b64), q,
 	)
-	_, stderr, err := sshpool.Run(cli, script)
+	cmd := "/usr/bin/env bash -c " + shellQuote(script)
+	_, stderr, err := sshpool.Run(cli, cmd)
 	if err != nil {
 		msg := strings.TrimSpace(stderr)
 		if msg == "" {
