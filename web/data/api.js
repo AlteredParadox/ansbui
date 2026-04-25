@@ -48,6 +48,13 @@
   api.writeVault = (path, password, content) => json('/api/vault/content', {
     method: 'POST', body: JSON.stringify({ path, password, content })
   });
+  api.listInlineVaultKeys = (path) => json(`/api/vault/inline?path=${encodeURIComponent(path)}`);
+  api.decryptInlineVault = (path, name, password) => json('/api/vault/inline/decrypt', {
+    method: 'POST', body: JSON.stringify({ path, name, password })
+  });
+  api.upsertInlineVault = (path, name, value, password) => json('/api/vault/inline/upsert', {
+    method: 'POST', body: JSON.stringify({ path, name, value, password })
+  });
 
   api.gatherFacts = (host) => json(`/api/facts?host=${encodeURIComponent(host)}`);
 

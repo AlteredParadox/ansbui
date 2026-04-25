@@ -95,3 +95,89 @@ func (s *Server) writeVault(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
+
+// /api/vault/inline?path=<rel> — list every `!vault |` key in an
+// inline vault file. Doesn't need a password; just text-parses the
+// file. Used by the UI to render the per-key editor.
+func (s *Server) listInlineVault(w http.ResponseWriter, r *http.Request) {
+	srv, err := s.resolveServer(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	pathParam := r.URL.Query().Get("path")
+	if pathParam == "" {
+		writeError(w, http.StatusBadRequest, errors.New("path query parameter is required"))
+		return
+	}
+	keys, err := ansible.ListInlineVaultKeys(r.Context(), s.Pool, srv, pathParam)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"keys": keys})
+}
+
+type inlineDecryptBody struct {
+	Path     string `json:"path"`
+	Name     string `json:"name"`
+	Password string `json:"password"`
+}
+
+// /api/vault/inline/decrypt — decrypts a single `!vault |` value from
+// an inline file. POST so the password isn't logged in access logs.
+func (s *Server) decryptInlineVault(w http.ResponseWriter, r *http.Request) {
+	srv, err := s.resolveServer(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	var body inlineDecryptBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("decode body: %w", err))
+		return
+	}
+	if body.Path == "" || body.Name == "" || body.Password == "" {
+		writeError(w, http.StatusBadRequest, errors.New("path, name, and password are required"))
+		return
+	}
+	plaintext, err := ansible.DecryptInlineVaultValue(r.Context(), s.Pool, srv, body.Path, body.Name, body.Password)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"plaintext": plaintext})
+}
+
+type inlineUpsertBody struct {
+	Path     string `json:"path"`
+	Name     string `json:"name"`
+	Value    string `json:"value"`
+	Password string `json:"password"`
+}
+
+// /api/vault/inline/upsert — encrypts `value` under `name` with the
+// supplied vault password, then either replaces the existing block in
+// the inline file or appends a new one. The rest of the file
+// (comments, cleartext keys) is preserved verbatim.
+func (s *Server) upsertInlineVault(w http.ResponseWriter, r *http.Request) {
+	srv, err := s.resolveServer(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	var body inlineUpsertBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("decode body: %w", err))
+		return
+	}
+	if body.Path == "" || body.Name == "" || body.Password == "" {
+		writeError(w, http.StatusBadRequest, errors.New("path, name, and password are required"))
+		return
+	}
+	if err := ansible.UpsertInlineVaultValue(r.Context(), s.Pool, srv, body.Path, body.Name, body.Value, body.Password); err != nil {
+		writeError(w, http.StatusBadGateway, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}

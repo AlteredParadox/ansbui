@@ -156,7 +156,7 @@ function pluralise(noun, n) {
 
 function unlockDialogSubtitle({ file, inlineKind, unlocked }) {
   if (inlineKind) {
-    return `${file.path} — uses !vault inline encryption; whole-file unlock isn't possible.`;
+    return `${file.path} — per-value !vault | encryption. Each key is encrypted independently.`;
   }
   if (unlocked) return `Unlocked · ${file.path}`;
   return `Enter the vault password to decrypt ${file.path}.`;
@@ -229,24 +229,7 @@ function VaultUnlockDialog({ open, file, onClose }) {
     >
       {error && <div className="cm-error mono">{error}</div>}
 
-      {inlineKind && (
-        <div className="mute" style={{ fontSize: 12.5, lineHeight: 1.7 }}>
-          <div>
-            This file is <b>plain YAML with per-value <span className="mono">!vault |</span> encryption</b> — the common pattern for <span className="mono">group_vars/*/vault.yml</span>. <span className="mono">ansible-vault view</span> only works on whole-file vaults, so there's no single password to decrypt the whole thing.
-          </div>
-          <div style={{ marginTop: 10 }}>
-            To view or rotate individual values on the remote:
-            <pre className="code-block" style={HINT_CODE_STYLE}>{`# decrypt one value in place (writes plain YAML back)
-ansible-vault decrypt ${file.path} --ask-vault-pass
-# re-encrypt a specific key
-ansible-vault encrypt_string --ask-vault-pass 'new_value' --name 'var_name'`}</pre>
-            Per-key decrypt + edit inside ansbui is on the roadmap; for now the file will just show you which keys are encrypted when you pull it up in your editor.
-          </div>
-          <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
-            <button type="button" className="btn small" onClick={onClose}>Close</button>
-          </div>
-        </div>
-      )}
+      {inlineKind && <InlineVaultEditor file={file} onClose={onClose}/>}
 
       {!inlineKind && !unlocked && (
         <form onSubmit={(e) => { e.preventDefault(); unlock(); }}>
@@ -310,6 +293,211 @@ ansible-vault encrypt_string --ask-vault-pass 'new_value' --name 'var_name'`}</p
         </>
       )}
     </globalThis.AnsbuiCenterDialog>
+  );
+}
+
+// ---------- Inline-vault editor ----------
+//
+// An inline vault file is plain YAML with `!vault |` blocks for the
+// values that need to stay encrypted. ansibui treats those blocks as
+// individually addressable: list them by name, decrypt one at a time
+// to view, and re-encrypt to rotate or insert. Comments, cleartext
+// keys, and overall file structure are preserved across edits because
+// the patcher only touches the lines belonging to the targeted block.
+
+function InlineVaultEditor({ file, onClose }) {
+  const [keys, setKeys] = useStateV([]);
+  const [loading, setLoading] = useStateV(false);
+  const [error, setError] = useStateV('');
+  // active is null (list view), { mode: 'add' }, or { mode: 'edit', name }.
+  const [active, setActive] = useStateV(null);
+
+  const reload = async () => {
+    if (!globalThis.AnsbuiAPI) return;
+    setLoading(true); setError('');
+    try {
+      const res = await globalThis.AnsbuiAPI.listInlineVaultKeys(file.path);
+      setKeys(res.keys || []);
+    } catch (e) { setError(e.message); }
+    finally { setLoading(false); }
+  };
+
+  useEffectV(() => { reload(); }, [file?.path]);
+
+  if (active) {
+    return (
+      <InlineVaultRowEditor
+        file={file}
+        mode={active.mode}
+        existingName={active.name || ''}
+        onClose={() => setActive(null)}
+        onSaved={() => { setActive(null); reload(); }}
+      />
+    );
+  }
+
+  return (
+    <div>
+      {error && <div className="cm-error mono">{error}</div>}
+      <div className="mute" style={{ fontSize: 12.5, lineHeight: 1.6, marginBottom: 12 }}>
+        Each key is encrypted independently with <span className="mono">ansible-vault encrypt_string</span>. Adding a new value or rotating an existing one only touches that key&rsquo;s block — comments and cleartext keys elsewhere in the file are left untouched.
+      </div>
+      {loading && <div className="mute mono" style={{ fontSize: 12 }}>Listing keys…</div>}
+      {!loading && keys.length === 0 && (
+        <div className="mute" style={{ fontSize: 12.5, marginBottom: 12 }}>
+          No <span className="mono">!vault |</span> blocks in this file yet. Use <b>Add encrypted value</b> below to create the first one.
+        </div>
+      )}
+      {keys.length > 0 && (
+        <div style={{ display: 'grid', gap: 6, marginBottom: 12 }}>
+          {keys.map(k => (
+            <button
+              key={k.name}
+              type="button"
+              className="card"
+              style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '8px 12px', textAlign: 'left' }}
+              onClick={() => setActive({ mode: 'edit', name: k.name })}
+            >
+              <span className="mono" style={{ fontWeight: 550 }}>{k.name}</span>
+              <span className="mute mono" style={{ fontSize: 11 }}>
+                lines {k.startLine}–{k.endLine} · click to decrypt + edit
+              </span>
+            </button>
+          ))}
+        </div>
+      )}
+      <div style={{ display: 'flex', gap: 8 }}>
+        <button type="button" className="btn primary small" onClick={() => setActive({ mode: 'add' })}>
+          <Icon name="plus" size={12}/> Add encrypted value
+        </button>
+        <button type="button" className="btn small" onClick={reload} disabled={loading}>
+          <Icon name="refresh" size={12}/> Reload
+        </button>
+        <button type="button" className="btn small" style={{ marginLeft: 'auto' }} onClick={onClose}>
+          Close
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// InlineVaultRowEditor handles both the "add new" and "rotate existing"
+// flows. For rotation it first prompts for the password, decrypts the
+// current value, and shows it editable; for add it shows name+value+
+// password fields up front. Save calls upsertInlineVault which the
+// backend turns into a single ansible-vault encrypt_string + atomic
+// in-place rewrite of the file.
+function InlineVaultRowEditor({ file, mode, existingName, onClose, onSaved }) {
+  const isAdd = mode === 'add';
+  const [name, setName] = useStateV(existingName);
+  const [password, setPassword] = useStateV('');
+  const [value, setValue] = useStateV('');
+  const [decrypted, setDecrypted] = useStateV(isAdd); // skip the decrypt step for adds
+  const [busy, setBusy] = useStateV(false);
+  const [error, setError] = useStateV('');
+
+  useEffectV(() => {
+    setName(existingName);
+    setPassword('');
+    setValue('');
+    setDecrypted(isAdd);
+    setError('');
+    setBusy(false);
+  }, [existingName, isAdd]);
+
+  const decrypt = async () => {
+    if (!password) { setError('Password is required.'); return; }
+    setBusy(true); setError('');
+    try {
+      const res = await globalThis.AnsbuiAPI.decryptInlineVault(file.path, name, password);
+      setValue(res.plaintext || '');
+      setDecrypted(true);
+    } catch (e) { setError(e.message); }
+    finally { setBusy(false); }
+  };
+
+  const save = async () => {
+    if (!name) { setError('Name is required.'); return; }
+    if (!password) { setError('Password is required.'); return; }
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
+      setError('Name must be a valid ansible variable (letters, digits, underscore; no leading digit).');
+      return;
+    }
+    setBusy(true); setError('');
+    try {
+      await globalThis.AnsbuiAPI.upsertInlineVault(file.path, name, value, password);
+      onSaved?.();
+    } catch (e) { setError(e.message); }
+    finally { setBusy(false); }
+  };
+
+  return (
+    <div>
+      <div className="mute" style={{ fontSize: 12.5, marginBottom: 10 }}>
+        {isAdd
+          ? <>Adding a new <span className="mono">!vault |</span> block. The password is also used to encrypt subsequent values; existing blocks aren&rsquo;t re-keyed.</>
+          : <>Rotating <span className="mono">{existingName}</span>. The current ciphertext is decrypted with the supplied password, the value you save is re-encrypted with the same password.</>}
+      </div>
+
+      {error && <div className="cm-error mono">{error}</div>}
+
+      <label htmlFor="ive-name" className="cm-field-label">Variable name</label>
+      <input
+        id="ive-name"
+        className="input mono"
+        value={name}
+        onChange={(e) => setName(e.target.value)}
+        readOnly={!isAdd}
+        placeholder="db_password"
+        autoFocus={isAdd}
+      />
+
+      <label htmlFor="ive-pw" className="cm-field-label" style={{ marginTop: 10 }}>Vault password</label>
+      <input
+        id="ive-pw"
+        className="input mono"
+        type="password"
+        autoComplete="new-password"
+        value={password}
+        onChange={(e) => setPassword(e.target.value)}
+        autoFocus={!isAdd}
+      />
+
+      {!decrypted && (
+        <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+          <button type="button" className="btn primary small" disabled={busy || !password} onClick={decrypt}>
+            <Icon name="key" size={12}/> {busy ? 'Decrypting…' : 'Decrypt'}
+          </button>
+          <button type="button" className="btn small" onClick={onClose}>Cancel</button>
+        </div>
+      )}
+
+      {decrypted && (
+        <>
+          <label htmlFor="ive-value" className="cm-field-label" style={{ marginTop: 10 }}>
+            {isAdd ? 'Plaintext value' : 'Plaintext value (decrypted — edit and save to re-encrypt)'}
+          </label>
+          <textarea
+            id="ive-value"
+            className="yaml-textarea"
+            spellCheck="false"
+            style={{ minHeight: 140 }}
+            value={value}
+            onChange={(e) => setValue(e.target.value)}
+            placeholder={isAdd ? 'secret-value' : ''}
+          />
+          <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+            <button type="button" className="btn primary small" disabled={busy} onClick={save}>
+              <Icon name="check" size={12}/> {busy ? 'Saving…' : (isAdd ? 'Encrypt + add' : 'Re-encrypt + save')}
+            </button>
+            <button type="button" className="btn small" disabled={busy} onClick={onClose}>Cancel</button>
+          </div>
+          <div className="mute" style={{ fontSize: 11.5, marginTop: 8 }}>
+            Plaintext stays in this dialog only. It&rsquo;s dropped on close and never sent back to the server unencrypted.
+          </div>
+        </>
+      )}
+    </div>
   );
 }
 
