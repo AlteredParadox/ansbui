@@ -9,6 +9,19 @@ import (
 	"github.com/AlteredParadox/ansbui/internal/ansible"
 )
 
+// decodeJSONBody is the per-handler boilerplate for "read JSON request
+// body or 400 with a wrapped decode error". Returns false if the
+// response has already been written, in which case the caller should
+// just `return`. Centralised so the wrapping format ("decode body:
+// %w") lives in one place — Sonar S1192 flagged the duplication.
+func decodeJSONBody(w http.ResponseWriter, r *http.Request, dst any) bool {
+	if err := json.NewDecoder(r.Body).Decode(dst); err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("decode body: %w", err))
+		return false
+	}
+	return true
+}
+
 // /api/vault — list vault-encrypted files discovered in the active
 // server's workDir. Metadata only; no plaintext is read. The response
 // also echoes the workDir so the UI can tell the operator where we
@@ -49,8 +62,7 @@ func (s *Server) viewVault(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body viewVaultBody
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeError(w, http.StatusBadRequest, fmt.Errorf("decode body: %w", err))
+	if !decodeJSONBody(w, r, &body) {
 		return
 	}
 	if body.Path == "" || body.Password == "" {
@@ -81,8 +93,7 @@ func (s *Server) writeVault(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body writeVaultBody
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeError(w, http.StatusBadRequest, fmt.Errorf("decode body: %w", err))
+	if !decodeJSONBody(w, r, &body) {
 		return
 	}
 	if body.Path == "" || body.Password == "" {
@@ -111,8 +122,7 @@ func (s *Server) listInlineVault(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body inlineListBody
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeError(w, http.StatusBadRequest, fmt.Errorf("decode body: %w", err))
+	if !decodeJSONBody(w, r, &body) {
 		return
 	}
 	if body.Path == "" {
@@ -142,8 +152,7 @@ func (s *Server) decryptInlineVault(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body inlineDecryptBody
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeError(w, http.StatusBadRequest, fmt.Errorf("decode body: %w", err))
+	if !decodeJSONBody(w, r, &body) {
 		return
 	}
 	if body.Path == "" || body.Name == "" || body.Password == "" {
@@ -176,8 +185,7 @@ func (s *Server) upsertInlineVault(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body inlineUpsertBody
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeError(w, http.StatusBadRequest, fmt.Errorf("decode body: %w", err))
+	if !decodeJSONBody(w, r, &body) {
 		return
 	}
 	if body.Path == "" || body.Name == "" || body.Password == "" {

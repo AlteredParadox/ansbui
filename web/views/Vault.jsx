@@ -419,7 +419,7 @@ function InlineVaultRowEditor({ file, mode, existingName, onClose, onSaved }) {
   const save = async () => {
     if (!name) { setError('Name is required.'); return; }
     if (!password) { setError('Password is required.'); return; }
-    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
+    if (!/^[A-Za-z_]\w*$/.test(name)) {
       setError('Name must be a valid ansible variable (letters, digits, underscore; no leading digit).');
       return;
     }
@@ -472,7 +472,12 @@ function InlineVaultRowEditor({ file, mode, existingName, onClose, onSaved }) {
         </div>
       )}
 
-      {decrypted && (
+      {decrypted && (() => {
+        let saveLabel;
+        if (busy) saveLabel = 'Saving…';
+        else if (isAdd) saveLabel = 'Encrypt + add';
+        else saveLabel = 'Re-encrypt + save';
+        return (
         <>
           <label htmlFor="ive-value" className="cm-field-label" style={{ marginTop: 10 }}>
             {isAdd ? 'Plaintext value' : 'Plaintext value (decrypted — edit and save to re-encrypt)'}
@@ -488,7 +493,7 @@ function InlineVaultRowEditor({ file, mode, existingName, onClose, onSaved }) {
           />
           <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
             <button type="button" className="btn primary small" disabled={busy} onClick={save}>
-              <Icon name="check" size={12}/> {busy ? 'Saving…' : (isAdd ? 'Encrypt + add' : 'Re-encrypt + save')}
+              <Icon name="check" size={12}/> {saveLabel}
             </button>
             <button type="button" className="btn small" disabled={busy} onClick={onClose}>Cancel</button>
           </div>
@@ -496,7 +501,8 @@ function InlineVaultRowEditor({ file, mode, existingName, onClose, onSaved }) {
             Plaintext stays in this dialog only. It&rsquo;s dropped on close and never sent back to the server unencrypted.
           </div>
         </>
-      )}
+        );
+      })()}
     </div>
   );
 }
