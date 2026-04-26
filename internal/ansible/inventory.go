@@ -158,6 +158,7 @@ func collectHosts(hostGroups map[string][]string, hostVars map[string]map[string
 			Name:   name,
 			IP:     stringVar(vars, "ansible_host", name),
 			Groups: dedupe(append([]string{}, groups...)),
+			Region: RegionFromHostname(name),
 			OS:     stringVar(vars, "ansible_distribution", ""),
 			Status: "ok",
 			Vars:   vars,
