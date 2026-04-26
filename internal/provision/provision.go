@@ -146,22 +146,12 @@ func Run(ctx context.Context, pool *sshpool.Pool, srv config.Server, req Request
 	}
 
 	emit("meta", fmt.Sprintf("Connecting to %s@%s:%d...", req.Username, req.IP, req.Port))
-	sudoPw := ""
-	if req.UseSudo {
-		sudoPw = req.SudoPassword
-	}
-	target, err := dialPasswordTarget(ctx, req.IP, req.Port, req.Username, req.Password, sudoPw)
+	target, err := connectAndPrecheck(ctx, req, emit)
 	if err != nil {
-		emit("fail", err.Error())
 		return err
 	}
 	defer target.Close()
 	emit("ok", "connected.")
-
-	if err := target.requireSudo(ctx); err != nil {
-		emit("fail", err.Error())
-		return err
-	}
 
 	emit("meta", "Detecting distro...")
 	distroOut, _, err := target.runRoot(ctx, "cat /etc/os-release", "")
@@ -263,6 +253,28 @@ func validateRequest(req Request) error {
 		return errors.New("hostname must not contain whitespace")
 	}
 	return nil
+}
+
+// connectAndPrecheck dials the target, then verifies sudo is
+// reachable for non-root sessions. Extracted from Run so the
+// orchestrator's cognitive-complexity budget stays under the
+// Sonar S3776 ceiling. The caller closes the returned session.
+func connectAndPrecheck(ctx context.Context, req Request, emit func(string, string)) (*targetSession, error) {
+	sudoPw := ""
+	if req.UseSudo {
+		sudoPw = req.SudoPassword
+	}
+	target, err := dialPasswordTarget(ctx, req.IP, req.Port, req.Username, req.Password, sudoPw)
+	if err != nil {
+		emit("fail", err.Error())
+		return nil, err
+	}
+	if err := target.requireSudo(ctx); err != nil {
+		_ = target.Close()
+		emit("fail", err.Error())
+		return nil, err
+	}
+	return target, nil
 }
 
 // ensureARecord makes the porkbun A record set for fqdn match ip.
