@@ -182,3 +182,21 @@ func (s *targetSession) run(ctx context.Context, cmd, stdin string) (string, str
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'"
 }
+
+// shellQuotePath is shellQuote with leading tilde expansion. The
+// shell only expands `~` on UNQUOTED leading tildes, so naive
+// quoting of `~/.ssh/ansible_ed25519` produces a literal path and
+// `cat` fails with "No such file or directory". We split off the
+// tilde and emit `"$HOME/"` (double-quoted so $HOME expands)
+// concatenated with the single-quoted suffix — gives the same
+// metacharacter safety as shellQuote without breaking tilde paths
+// the operator entered in the settings field.
+func shellQuotePath(p string) string {
+	if p == "~" {
+		return `"$HOME"`
+	}
+	if strings.HasPrefix(p, "~/") {
+		return `"$HOME"/` + shellQuote(p[2:])
+	}
+	return shellQuote(p)
+}

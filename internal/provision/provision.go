@@ -321,7 +321,7 @@ func readControlNodePrivkey(ctx context.Context, pool *sshpool.Pool, srv config.
 	if err != nil {
 		return nil, err
 	}
-	stdout, stderr, err := sshpool.Run(cli, "cat "+shellQuote(path))
+	stdout, stderr, err := sshpool.Run(cli, "cat "+shellQuotePath(path))
 	if err != nil {
 		msg := strings.TrimSpace(stderr)
 		if msg == "" {
