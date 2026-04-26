@@ -125,7 +125,8 @@ func runReinstall(ctx context.Context, target *targetSession, opts ReinstallOpts
 	emit("ok", "reboot scheduled")
 
 	emit("meta", fmt.Sprintf("Waiting for OS install + reboot, then SSH on :%d (key auth as root). Timeout: 30 minutes.", reinstallSSHPort))
-	newTarget, err := waitForKeyTarget(ctx, host, reinstallSSHPort, privKey, emit)
+	emit("meta", fmt.Sprintf("(reinstall.sh exposes SSH on :%d from its installer env so you can screen -r the install — we'll keep checking /etc/os-release until it reports the target distro.)", reinstallSSHPort))
+	newTarget, err := waitForReinstallTarget(ctx, host, reinstallSSHPort, privKey, opts.OS, emit)
 	if err != nil {
 		return nil, err
 	}
@@ -157,21 +158,27 @@ func reinstallPrepScript(opts ReinstallOpts, pubKey string) string {
 	}, "; ")
 }
 
-// waitForKeyTarget polls the target on (host:port) until SSH
-// answers with key auth, or until ctx is cancelled / the 30-minute
-// budget elapses. The first 60 seconds are an unconditional sleep
-// — the box is going down, dialing during that window just
-// produces noise.
+// waitForReinstallTarget polls the target on (host:port) until SSH
+// answers with key auth AND /etc/os-release reports the requested
+// target OS, or until ctx is cancelled / the 30-minute budget
+// elapses. The os-release check is what distinguishes the
+// reinstaller's live environment (where reinstall.sh exposes SSH
+// on :4242 with the same key for `screen -r` monitoring) from the
+// freshly-installed target OS that comes up after the second
+// reboot. Without it we'd attach to the live env mid-install and
+// run `apt install` against an alpine initramfs.
 //
-// Subsequent retries are 15s apart; with dialKeyTarget's 15s dial
-// timeout the worst-case loop iteration is 30s. A heartbeat fires
-// every 60s so the operator sees progress.
-func waitForKeyTarget(ctx context.Context, host string, port int, privKey []byte, emit func(typ, text string)) (*targetSession, error) {
+// The first 60 seconds are an unconditional sleep — the original
+// box is going down, dialing during that window just produces
+// noise. Subsequent retries are 15s apart; with dialKeyTarget's
+// 15s dial timeout the worst-case loop iteration is 30s. A
+// heartbeat fires every 60s so the operator sees progress.
+func waitForReinstallTarget(ctx context.Context, host string, port int, privKey []byte, expectedOS string, emit func(typ, text string)) (*targetSession, error) {
 	const (
-		initialWait      = 60 * time.Second
-		retryInterval    = 15 * time.Second
-		heartbeatPeriod  = 60 * time.Second
-		totalBudget      = 30 * time.Minute
+		initialWait     = 60 * time.Second
+		retryInterval   = 15 * time.Second
+		heartbeatPeriod = 60 * time.Second
+		totalBudget     = 30 * time.Minute
 	)
 	deadline := time.Now().Add(totalBudget)
 	select {
@@ -181,21 +188,21 @@ func waitForKeyTarget(ctx context.Context, host string, port int, privKey []byte
 	}
 	startedAt := time.Now()
 	lastBeat := time.Now()
-	var lastErr error
+	var lastStatus string
 	for {
 		if time.Now().After(deadline) {
-			if lastErr == nil {
+			if lastStatus == "" {
 				return nil, errors.New("timeout waiting for SSH after 30 minutes")
 			}
-			return nil, fmt.Errorf("timeout waiting for SSH after 30 minutes: last error: %w", lastErr)
+			return nil, fmt.Errorf("timeout waiting for target OS after 30 minutes: last status: %s", lastStatus)
 		}
-		target, err := dialKeyTarget(ctx, host, port, privKey)
-		if err == nil {
+		target, status := tryReinstallReady(ctx, host, port, privKey, expectedOS)
+		if target != nil {
 			return target, nil
 		}
-		lastErr = err
+		lastStatus = status
 		if time.Since(lastBeat) >= heartbeatPeriod {
-			emit("meta", fmt.Sprintf("still waiting for SSH on :%d (%s elapsed) — last error: %v", port, friendly(time.Since(startedAt)), err))
+			emit("meta", fmt.Sprintf("waiting for %s on :%d (%s elapsed) — %s", expectedOS, port, friendly(time.Since(startedAt)), status))
 			lastBeat = time.Now()
 		}
 		select {
@@ -204,6 +211,31 @@ func waitForKeyTarget(ctx context.Context, host string, port int, privKey []byte
 			return nil, ctx.Err()
 		}
 	}
+}
+
+// tryReinstallReady performs one dial + os-release probe. Returns
+// (target, "") when the target OS matches expectedOS — the caller
+// owns the session. Returns (nil, status) when we should keep
+// waiting, where status describes the current state for the
+// heartbeat ("connection refused", "still in installer (alpine)",
+// etc.). The session is closed on the not-ready paths so we don't
+// leak SSH connections during the wait loop.
+func tryReinstallReady(ctx context.Context, host string, port int, privKey []byte, expectedOS string) (*targetSession, string) {
+	target, err := dialKeyTarget(ctx, host, port, privKey)
+	if err != nil {
+		return nil, "dial: " + err.Error()
+	}
+	osRelease, _, err := target.runRoot(ctx, "cat /etc/os-release", "")
+	if err != nil {
+		_ = target.Close()
+		return nil, "cat /etc/os-release: " + err.Error()
+	}
+	distro := detectDistro(osRelease)
+	if distro == expectedOS {
+		return target, ""
+	}
+	_ = target.Close()
+	return nil, fmt.Sprintf("still in installer env (detected: %s)", distro)
 }
 
 // startHeartbeat fires a "still running" emit every 30s until the
