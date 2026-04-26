@@ -50,6 +50,13 @@ type Store struct {
 	// host IPs to ipinfo.io to populate the Region column. Off by
 	// default — IPs leave the local network to a third-party.
 	GeoIPEnabled bool `json:"geoIpEnabled,omitempty"`
+	// ControlPrivKeyPath is the path on the active control node to
+	// the SSH private key whose public counterpart gets installed
+	// into the ansible user's authorized_keys during provisioning.
+	// Used by the post-reinstall reconnect step to dial the freshly-
+	// installed target on :4242 with key auth. Empty means use the
+	// default (~/.ssh/ansible_ed25519).
+	ControlPrivKeyPath string `json:"controlPrivKeyPath,omitempty"`
 }
 
 // Manager loads, persists, and mutates the config store.
@@ -336,6 +343,16 @@ func (m *Manager) SetGeoIPEnabled(v bool) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.store.GeoIPEnabled = v
+	return m.persistLocked()
+}
+
+// SetControlPrivKeyPath persists the path on the control node to
+// the SSH private key used for post-reinstall reconnection. Empty
+// strings are stored as-is and resolved to the default at read time.
+func (m *Manager) SetControlPrivKeyPath(path string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.store.ControlPrivKeyPath = strings.TrimSpace(path)
 	return m.persistLocked()
 }
 

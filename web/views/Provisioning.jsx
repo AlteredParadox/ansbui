@@ -10,6 +10,17 @@ const { useState: useStateProv, useEffect: useEffectProv, useRef: useRefProv } =
 
 const PROVISION_JOB_KEY = 'ansbui.provisionJobId';
 
+// REINSTALL_MATRIX must mirror reinstallOSMatrix in
+// internal/provision/reinstall.go — the backend re-validates, so a
+// drift here just means the form rejects something the backend
+// would accept (or vice versa). Versions are listed newest-first
+// because the version dropdown defaults to index 0.
+const REINSTALL_MATRIX = {
+  debian: ['12', '11'],
+  ubuntu: ['24.04', '22.04']
+};
+const REINSTALL_OS_LIST = Object.keys(REINSTALL_MATRIX);
+
 function ProvisioningView() {
   const [provider, setProvider] = useStateProv('');
   const [ip, setIp] = useStateProv('');
@@ -20,6 +31,9 @@ function ProvisioningView() {
   const [sudoPassword, setSudoPassword] = useStateProv('');
   const [hostname, setHostname] = useStateProv('');
   const [vaultPassword, setVaultPassword] = useStateProv('');
+  const [reinstallEnabled, setReinstallEnabled] = useStateProv(false);
+  const [reinstallOS, setReinstallOS] = useStateProv(REINSTALL_OS_LIST[0]);
+  const [reinstallVersion, setReinstallVersion] = useStateProv(REINSTALL_MATRIX[REINSTALL_OS_LIST[0]][0]);
   const [running, setRunning] = useStateProv(false);
   const [output, setOutput] = useStateProv([]);
   const [error, setError] = useStateProv('');
@@ -30,6 +44,15 @@ function ProvisioningView() {
   useEffectProv(() => {
     if (username === 'root' && useSudo) setUseSudo(false);
   }, [username, useSudo]);
+
+  // Reset version when OS changes — the previous selection isn't
+  // valid for the new OS's version list.
+  useEffectProv(() => {
+    const versions = REINSTALL_MATRIX[reinstallOS] || [];
+    if (!versions.includes(reinstallVersion)) {
+      setReinstallVersion(versions[0] || '');
+    }
+  }, [reinstallOS, reinstallVersion]);
 
   useEffectProv(() => () => { if (streamRef.current) streamRef.current.close(); }, []);
 
@@ -118,6 +141,10 @@ function ProvisioningView() {
     if (useSudo && !sudoPassword) { setError('Sudo password is required when using sudo.'); return; }
     if (!hostname.trim() || !hostname.includes('.')) { setError('Hostname must be fully-qualified (include the domain).'); return; }
     if (!vaultPassword) { setError('Vault password is required (used to decrypt porkbun credentials).'); return; }
+    if (reinstallEnabled) {
+      if (!REINSTALL_MATRIX[reinstallOS]) { setError('Pick a reinstall OS.'); return; }
+      if (!REINSTALL_MATRIX[reinstallOS].includes(reinstallVersion)) { setError('Pick a reinstall version.'); return; }
+    }
 
     setOutput([]); setRunning(true);
 
@@ -130,7 +157,10 @@ function ProvisioningView() {
       useSudo,
       sudoPassword: useSudo ? sudoPassword : '',
       hostname: hostname.trim(),
-      vaultPassword
+      vaultPassword,
+      reinstall: reinstallEnabled
+        ? { enabled: true, os: reinstallOS, version: reinstallVersion }
+        : { enabled: false }
     };
 
     try {
@@ -244,6 +274,34 @@ function ProvisioningView() {
           <div className="mute" style={{ fontSize: 11, marginTop: 4 }}>
             Read from <span className="mono">inventory/group_vars/all/vault.yml</span> on the active control node.
           </div>
+        </div>
+
+        <div style={{ marginTop: 14 }}>
+          <label className="opt" htmlFor="prov-reinstall">
+            <input id="prov-reinstall" type="checkbox" checked={reinstallEnabled} onChange={e => setReinstallEnabled(e.target.checked)} disabled={running}/>
+            <span className="mono">reinstall the OS first</span> <span className="mute">(via <a href="https://github.com/bin456789/reinstall" target="_blank" rel="noreferrer">bin456789/reinstall</a>)</span>
+          </label>
+          {reinstallEnabled && (
+            <div style={{ marginTop: 8 }}>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+                <div>
+                  <label htmlFor="prov-reinstall-os" className="cm-field-label">OS</label>
+                  <select id="prov-reinstall-os" className="input mono" value={reinstallOS} onChange={e => setReinstallOS(e.target.value)} disabled={running}>
+                    {REINSTALL_OS_LIST.map(os => <option key={os} value={os}>{os}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <label htmlFor="prov-reinstall-ver" className="cm-field-label">Version</label>
+                  <select id="prov-reinstall-ver" className="input mono" value={reinstallVersion} onChange={e => setReinstallVersion(e.target.value)} disabled={running}>
+                    {(REINSTALL_MATRIX[reinstallOS] || []).map(v => <option key={v} value={v}>{v}</option>)}
+                  </select>
+                </div>
+              </div>
+              <div className="mute" style={{ fontSize: 11, marginTop: 6 }}>
+                The target reboots into the chosen OS, sshd is set to <span className="mono">:4242</span> with the ansible public key in root&rsquo;s <span className="mono">authorized_keys</span>, then provisioning continues. Expect 10&ndash;30 minutes; the run lives on the backend so you can close this tab and re-attach later. <b>Assumes your provider preserves the IP through reinstall.</b>
+              </div>
+            </div>
+          )}
         </div>
 
         <div style={{ display: 'flex', gap: 8, marginTop: 14 }}>

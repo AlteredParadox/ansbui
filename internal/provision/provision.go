@@ -30,33 +30,37 @@ import (
 	"github.com/AlteredParadox/ansbui/internal/config"
 	"github.com/AlteredParadox/ansbui/internal/porkbun"
 	"github.com/AlteredParadox/ansbui/internal/sshpool"
+	"golang.org/x/crypto/ssh"
 )
 
 // Request is the operator-supplied form payload for one
 // provisioning run.
 type Request struct {
-	Provider      string `json:"provider"`
-	IP            string `json:"ip"`
-	Port          int    `json:"port"`
-	Username      string `json:"username"`
-	Password      string `json:"password"`
-	UseSudo       bool   `json:"useSudo"`
-	SudoPassword  string `json:"sudoPassword"`
-	Hostname      string `json:"hostname"`
-	VaultPassword string `json:"vaultPassword"`
+	Provider      string         `json:"provider"`
+	IP            string         `json:"ip"`
+	Port          int            `json:"port"`
+	Username      string         `json:"username"`
+	Password      string         `json:"password"`
+	UseSudo       bool           `json:"useSudo"`
+	SudoPassword  string         `json:"sudoPassword"`
+	Hostname      string         `json:"hostname"`
+	VaultPassword string         `json:"vaultPassword"`
+	Reinstall     ReinstallOpts  `json:"reinstall"`
 }
 
 // Defaults: where porkbun creds live, what they're named, where
 // the control node's public key sits. Hardcoded for now — if a
 // future operator's setup diverges these become server-config
-// fields.
+// fields. The private-key path IS configurable via Store.
+// ControlPrivKeyPath; this constant is the fallback when unset.
 const (
-	defaultPorkbunVaultPath  = "inventory/group_vars/all/vault.yml"
-	defaultPorkbunAPIKeyVar  = "porkbun_api_key"
-	defaultPorkbunSecretVar  = "porkbun_secret_key"
-	defaultControlPubKeyPath = "~/.ssh/ansible_ed25519.pub"
-	targetSSHPort            = 4242
-	dnsTTLSeconds            = 300
+	defaultPorkbunVaultPath   = "inventory/group_vars/all/vault.yml"
+	defaultPorkbunAPIKeyVar   = "porkbun_api_key"
+	defaultPorkbunSecretVar   = "porkbun_secret_key"
+	defaultControlPubKeyPath  = "~/.ssh/ansible_ed25519.pub"
+	defaultControlPrivKeyPath = "~/.ssh/ansible_ed25519"
+	targetSSHPort             = 4242
+	dnsTTLSeconds             = 300
 )
 
 // targetMu serialises provisioning runs against the same target.
@@ -96,7 +100,7 @@ func lockTarget(key string) *sync.Mutex {
 // includes the operator's password — the redact pass guards
 // against future debug-log regressions and against the live event
 // landing in browser memory in a recoverable form.
-func Run(ctx context.Context, pool *sshpool.Pool, srv config.Server, req Request, rawEmit func(typ, text string)) error {
+func Run(ctx context.Context, pool *sshpool.Pool, srv config.Server, req Request, ctrlPrivKeyPath string, rawEmit func(typ, text string)) error {
 	emit := func(t, text string) {
 		rawEmit(t, ansible.RedactText(text))
 	}
@@ -141,38 +145,6 @@ func Run(ctx context.Context, pool *sshpool.Pool, srv config.Server, req Request
 		return err
 	}
 
-	emit("meta", fmt.Sprintf("Connecting to %s@%s:%d...", req.Username, req.IP, req.Port))
-	target, err := connectAndPrecheck(ctx, req, emit)
-	if err != nil {
-		return err
-	}
-	defer target.Close()
-	emit("ok", "connected.")
-
-	emit("meta", "Detecting distro...")
-	distroOut, _, err := target.runRoot(ctx, "cat /etc/os-release", "")
-	if err != nil {
-		emit("fail", "read /etc/os-release: "+err.Error())
-		return err
-	}
-	distro := detectDistro(distroOut)
-	emit("ok", "distro: "+distro)
-	if !isDebianFamily(distro) {
-		emit("fail", fmt.Sprintf("unsupported distro %q — v1 only handles debian/ubuntu", distro))
-		return errors.New("unsupported distro")
-	}
-
-	emit("meta", "Installing sudo + python3 via apt...")
-	_, stderr, err := target.runRoot(ctx,
-		"DEBIAN_FRONTEND=noninteractive apt-get update -qq && "+
-			"DEBIAN_FRONTEND=noninteractive apt-get install -y -qq sudo python3",
-		"")
-	if err != nil {
-		emit("fail", "apt install: "+stderr)
-		return err
-	}
-	emit("ok", "sudo + python3 installed")
-
 	emit("meta", "Reading control-node public key...")
 	pubKey, err := readControlNodePubkey(ctx, pool, srv)
 	if err != nil {
@@ -181,26 +153,31 @@ func Run(ctx context.Context, pool *sshpool.Pool, srv config.Server, req Request
 	}
 	emit("ok", "public key loaded")
 
-	emit("meta", "Creating ansible user with passwordless sudo + key auth...")
-	randomPw, err := generatePassword()
+	emit("meta", fmt.Sprintf("Connecting to %s@%s:%d...", req.Username, req.IP, req.Port))
+	target, err := connectAndPrecheck(ctx, req, emit)
 	if err != nil {
-		emit("fail", err.Error())
 		return err
 	}
-	_, stderr, err = target.runRoot(ctx, ansibleUserSetupScript(pubKey), randomPw+"\n")
-	if err != nil {
-		emit("fail", "ansible-user setup: "+stderr)
-		return err
-	}
-	emit("ok", "ansible user ready")
+	// The defer captures the variable, not the value, so swapping
+	// `target` after a reinstall closes the post-reinstall session
+	// at function return rather than the pre-reinstall one (already
+	// dead from reboot by then).
+	defer func() { _ = target.Close() }()
+	emit("ok", "connected.")
 
-	emit("meta", "Configuring sshd to listen on port 4242...")
-	portOut, stderr, err := target.runRoot(ctx, sshdPortScript(targetSSHPort), "")
-	if err != nil {
-		emit("fail", "sshd port change: "+stderr)
+	if req.Reinstall.Enabled {
+		newTarget, err := doReinstall(ctx, target, req, pool, srv, pubKey, ctrlPrivKeyPath, emit)
+		if err != nil {
+			emit("fail", err.Error())
+			return err
+		}
+		_ = target.Close()
+		target = newTarget
+	}
+
+	if err := bootstrapTarget(ctx, target, pubKey, emit); err != nil {
 		return err
 	}
-	emit("ok", strings.TrimSpace(portOut))
 
 	providerGroup := normalizeProviderName(req.Provider)
 	emit("meta", fmt.Sprintf("Adding %s to inventory under group %q...", req.Hostname, providerGroup))
@@ -248,7 +225,125 @@ func validateRequest(req Request) error {
 	if strings.ContainsAny(req.Hostname, " \t") {
 		return errors.New("hostname must not contain whitespace")
 	}
+	if err := validateReinstall(req.Reinstall); err != nil {
+		return err
+	}
 	return nil
+}
+
+// bootstrapTarget runs the distro-detect + apt + ansible-user +
+// sshd-port pipeline against a connected target. Extracted from
+// Run so the orchestrator stays under the cognitive-complexity
+// budget after the reinstall branch landed; same script either
+// way (post-reinstall the sshd-port flip is a no-op since
+// reinstall.sh already baked :4242 into the new image).
+func bootstrapTarget(ctx context.Context, target *targetSession, pubKey string, emit func(typ, text string)) error {
+	emit("meta", "Detecting distro...")
+	distroOut, _, err := target.runRoot(ctx, "cat /etc/os-release", "")
+	if err != nil {
+		emit("fail", "read /etc/os-release: "+err.Error())
+		return err
+	}
+	distro := detectDistro(distroOut)
+	emit("ok", "distro: "+distro)
+	if !isDebianFamily(distro) {
+		err := fmt.Errorf("unsupported distro %q — v1 only handles debian/ubuntu", distro)
+		emit("fail", err.Error())
+		return err
+	}
+
+	emit("meta", "Installing sudo + python3 via apt...")
+	_, stderr, err := target.runRoot(ctx,
+		"DEBIAN_FRONTEND=noninteractive apt-get update -qq && "+
+			"DEBIAN_FRONTEND=noninteractive apt-get install -y -qq sudo python3",
+		"")
+	if err != nil {
+		emit("fail", "apt install: "+stderr)
+		return err
+	}
+	emit("ok", "sudo + python3 installed")
+
+	emit("meta", "Creating ansible user with passwordless sudo + key auth...")
+	randomPw, err := generatePassword()
+	if err != nil {
+		emit("fail", err.Error())
+		return err
+	}
+	_, stderr, err = target.runRoot(ctx, ansibleUserSetupScript(pubKey), randomPw+"\n")
+	if err != nil {
+		emit("fail", "ansible-user setup: "+stderr)
+		return err
+	}
+	emit("ok", "ansible user ready")
+
+	emit("meta", fmt.Sprintf("Configuring sshd to listen on port %d...", targetSSHPort))
+	portOut, stderr, err := target.runRoot(ctx, sshdPortScript(targetSSHPort), "")
+	if err != nil {
+		emit("fail", "sshd port change: "+stderr)
+		return err
+	}
+	emit("ok", strings.TrimSpace(portOut))
+	return nil
+}
+
+// doReinstall reads the configured private key from the control
+// node, then drives reinstall.sh + reboot + wait-for-ssh against
+// the target. On success the caller should swap to the returned
+// session and close the original. The privkey is held only for
+// the duration of this call; runReinstall doesn't retain it.
+func doReinstall(ctx context.Context, target *targetSession, req Request, pool *sshpool.Pool, srv config.Server, pubKey, ctrlPrivKeyPath string, emit func(typ, text string)) (*targetSession, error) {
+	privKeyPath := ctrlPrivKeyPath
+	if privKeyPath == "" {
+		privKeyPath = defaultControlPrivKeyPath
+	}
+	emit("meta", fmt.Sprintf("Reading control-node private key from %s...", privKeyPath))
+	privKey, err := readControlNodePrivkey(ctx, pool, srv, privKeyPath)
+	if err != nil {
+		return nil, err
+	}
+	emit("ok", "private key loaded")
+	return runReinstall(ctx, target, req.Reinstall, pubKey, privKey, req.IP, emit)
+}
+
+// readControlNodePrivkey reads the SSH private key file from the
+// active control node and validates that it parses as an OpenSSH
+// key. The bytes are returned to the caller, who passes them to
+// dialKeyTarget for the post-reinstall reconnect. The key never
+// touches disk on ansbui's side and goes out of scope when the
+// provisioning run finishes.
+//
+// The early ssh.ParsePrivateKey check converts a vague "auth
+// failed" 30 minutes from now into a fast, specific error before
+// the reinstall is even kicked off. Encrypted keys are rejected
+// with a hint — we can't prompt for the passphrase mid-run.
+func readControlNodePrivkey(ctx context.Context, pool *sshpool.Pool, srv config.Server, path string) ([]byte, error) {
+	cli, err := pool.Client(ctx, srv)
+	if err != nil {
+		return nil, err
+	}
+	stdout, stderr, err := sshpool.Run(cli, "cat "+shellQuote(path))
+	if err != nil {
+		msg := strings.TrimSpace(stderr)
+		if msg == "" {
+			msg = err.Error()
+		}
+		return nil, fmt.Errorf("read %s on control node: %s", path, msg)
+	}
+	body := []byte(stdout)
+	if len(body) == 0 {
+		return nil, fmt.Errorf("control node private key %s is empty", path)
+	}
+	if _, err := ssh.ParsePrivateKey(body); err != nil {
+		// Encrypted keys surface as a specific error from
+		// crypto/ssh; rather than prompting (which would force a
+		// whole new field on the form) we ask the operator to
+		// generate or unlock an unencrypted key.
+		if strings.Contains(err.Error(), "encrypted") {
+			return nil, fmt.Errorf("control node private key %s is passphrase-protected — provisioning needs an unencrypted key for the post-reinstall reconnect", path)
+		}
+		return nil, fmt.Errorf("parse private key at %s: %w", path, err)
+	}
+	return body, nil
 }
 
 // connectAndPrecheck dials the target, then verifies sudo is

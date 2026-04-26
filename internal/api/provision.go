@@ -40,8 +40,13 @@ func (s *Server) httpProvisionStart(w http.ResponseWriter, r *http.Request) {
 		"server":   srv.Name,
 	}
 	pool := s.Pool
+	// Snapshot the global control-node settings at start time so the
+	// orchestrator goroutine doesn't need to hold a Manager
+	// reference, and a config edit mid-run can't change which
+	// privkey the post-reinstall reconnect uses.
+	ctrlPrivKey := s.Config.Snapshot().ControlPrivKeyPath
 	job := s.Jobs.Start("provision", summary, func(ctx context.Context, emit func(typ, text string)) error {
-		return provision.Run(ctx, pool, srv, req, emit)
+		return provision.Run(ctx, pool, srv, req, ctrlPrivKey, emit)
 	})
 	writeJSON(w, http.StatusOK, map[string]string{"jobId": job.ID})
 }

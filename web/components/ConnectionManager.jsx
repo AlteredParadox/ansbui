@@ -34,6 +34,7 @@ function ConnectionManager({ open, onClose, onActivated, initialServers, initial
   const [promLabel, setPromLabel] = useStateCM('instance');
   const [autoGatherFacts, setAutoGatherFacts] = useStateCM(false);
   const [geoIpEnabled, setGeoIpEnabled] = useStateCM(false);
+  const [controlPrivKeyPath, setControlPrivKeyPath] = useStateCM('');
   const [tab, setTab] = useStateCM('servers');
 
   const refreshServers = useCallbackCM(async () => {
@@ -50,6 +51,7 @@ function ConnectionManager({ open, onClose, onActivated, initialServers, initial
       setPromLabel(s.prometheusHostLabel || 'instance');
       setAutoGatherFacts(!!s.autoGatherFacts);
       setGeoIpEnabled(!!s.geoIpEnabled);
+      setControlPrivKeyPath(s.controlPrivKeyPath || '');
     }).catch(() => {});
   }, [open, refreshServers]);
 
@@ -127,7 +129,8 @@ function ConnectionManager({ open, onClose, onActivated, initialServers, initial
         prometheusUrl: promUrl.trim(),
         prometheusHostLabel: promLabel.trim() || 'instance',
         autoGatherFacts,
-        geoIpEnabled
+        geoIpEnabled,
+        controlPrivKeyPath: controlPrivKeyPath.trim()
       });
       // Reflect the updated toggle in the in-memory cache so the host
       // drawer doesn't need to reload the page to see the change.
@@ -171,10 +174,12 @@ function ConnectionManager({ open, onClose, onActivated, initialServers, initial
             promUrl={promUrl} promLabel={promLabel}
             autoGatherFacts={autoGatherFacts}
             geoIpEnabled={geoIpEnabled}
+            controlPrivKeyPath={controlPrivKeyPath}
             busy={busy}
             onChangeUrl={setPromUrl} onChangeLabel={setPromLabel}
             onChangeAutoGather={setAutoGatherFacts}
             onChangeGeoIp={setGeoIpEnabled}
+            onChangeControlPrivKeyPath={setControlPrivKeyPath}
             onSave={saveSettings}
           />
         )}
@@ -227,7 +232,7 @@ function ServersTab(props) {
   );
 }
 
-function SettingsTab({ promUrl, promLabel, autoGatherFacts, geoIpEnabled, busy, onChangeUrl, onChangeLabel, onChangeAutoGather, onChangeGeoIp, onSave }) {
+function SettingsTab({ promUrl, promLabel, autoGatherFacts, geoIpEnabled, controlPrivKeyPath, busy, onChangeUrl, onChangeLabel, onChangeAutoGather, onChangeGeoIp, onChangeControlPrivKeyPath, onSave }) {
   const [probe, setProbe] = useStateCM(null);
   const [probing, setProbing] = useStateCM(false);
 
@@ -287,6 +292,14 @@ function SettingsTab({ promUrl, promLabel, autoGatherFacts, geoIpEnabled, busy, 
           />
           <span>Look up host regions via ipinfo.io</span>
         </label>
+
+        <div className="divider" style={{ margin: '16px 0 12px' }}/>
+        <div className="section-title">Provisioning</div>
+        <div className="mute" style={{ fontSize: 12, marginBottom: 8 }}>
+          Path on the active control node to the SSH private key whose public counterpart is installed in each provisioned host&rsquo;s <span className="mono">authorized_keys</span>. Used by the OS-reinstall flow to dial the freshly-installed target on <span className="mono">:4242</span> with key auth. Defaults to <span className="mono">~/.ssh/ansible_ed25519</span>.
+        </div>
+        <Field id="prov-privkey" label="Control-node private key path" placeholder="~/.ssh/ansible_ed25519"
+               value={controlPrivKeyPath} onChange={onChangeControlPrivKeyPath}/>
 
         <div style={{ display: 'flex', gap: 8, marginTop: 14 }}>
           <button type="button" className="btn primary small" disabled={busy} onClick={onSave}>Save</button>

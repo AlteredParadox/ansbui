@@ -94,19 +94,21 @@ func (s *Server) testServer(w http.ResponseWriter, r *http.Request) {
 }
 
 type settingsBody struct {
-	PrometheusURL   string `json:"prometheusUrl"`
-	PrometheusLabel string `json:"prometheusHostLabel"`
-	AutoGatherFacts bool   `json:"autoGatherFacts"`
-	GeoIPEnabled    bool   `json:"geoIpEnabled"`
+	PrometheusURL      string `json:"prometheusUrl"`
+	PrometheusLabel    string `json:"prometheusHostLabel"`
+	AutoGatherFacts    bool   `json:"autoGatherFacts"`
+	GeoIPEnabled       bool   `json:"geoIpEnabled"`
+	ControlPrivKeyPath string `json:"controlPrivKeyPath"`
 }
 
 func (s *Server) getSettings(w http.ResponseWriter, _ *http.Request) {
 	snap := s.Config.Snapshot()
 	writeJSON(w, http.StatusOK, settingsBody{
-		PrometheusURL:   snap.PrometheusURL,
-		PrometheusLabel: snap.PrometheusLabel,
-		AutoGatherFacts: snap.AutoGatherFacts,
-		GeoIPEnabled:    snap.GeoIPEnabled,
+		PrometheusURL:      snap.PrometheusURL,
+		PrometheusLabel:    snap.PrometheusLabel,
+		AutoGatherFacts:    snap.AutoGatherFacts,
+		GeoIPEnabled:       snap.GeoIPEnabled,
+		ControlPrivKeyPath: snap.ControlPrivKeyPath,
 	})
 }
 
@@ -125,6 +127,10 @@ func (s *Server) setSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.Config.SetGeoIPEnabled(body.GeoIPEnabled); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if err := s.Config.SetControlPrivKeyPath(body.ControlPrivKeyPath); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}

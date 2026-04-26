@@ -32,6 +32,39 @@ func dialPasswordTarget(ctx context.Context, host string, port int, user, passwo
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(), //nolint:gosec // first-contact provisioning — see package doc
 		Timeout:         15 * time.Second,
 	}
+	return dialTargetWithConfig(ctx, host, port, sudoPassword, cfg)
+}
+
+// dialKeyTarget opens an SSH connection to host:port as root using
+// the supplied OpenSSH private key bytes. Used by the post-reinstall
+// reconnect: reinstall.sh has installed the public counterpart into
+// the freshly-installed system's /root/.ssh/authorized_keys, sshd is
+// already listening on the requested port, and we need to drive the
+// rest of the provisioning steps (ansible user setup, sshd flip if
+// not already on 4242, inventory edit) from this new session.
+//
+// Host-key verification is still disabled — the reinstall replaces
+// the host's keys, so any pin we'd cached pre-reinstall is now
+// stale, and there's no safe way to know the new fingerprint
+// without an out-of-band channel.
+func dialKeyTarget(ctx context.Context, host string, port int, privKey []byte) (*targetSession, error) {
+	signer, err := ssh.ParsePrivateKey(privKey)
+	if err != nil {
+		return nil, fmt.Errorf("parse private key: %w", err)
+	}
+	cfg := &ssh.ClientConfig{
+		User:            "root",
+		Auth:            []ssh.AuthMethod{ssh.PublicKeys(signer)},
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(), //nolint:gosec // post-reinstall — see comment above
+		Timeout:         15 * time.Second,
+	}
+	return dialTargetWithConfig(ctx, host, port, "", cfg)
+}
+
+// dialTargetWithConfig is the shared dial path. Centralising
+// keeps dialPasswordTarget and dialKeyTarget bit-identical apart
+// from the auth method.
+func dialTargetWithConfig(ctx context.Context, host string, port int, sudoPassword string, cfg *ssh.ClientConfig) (*targetSession, error) {
 	addr := net.JoinHostPort(host, fmt.Sprintf("%d", port))
 	dialer := net.Dialer{Timeout: cfg.Timeout}
 	conn, err := dialer.DialContext(ctx, "tcp", addr)
