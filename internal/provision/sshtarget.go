@@ -59,16 +59,33 @@ func (s *targetSession) Close() error {
 
 // runRoot runs cmd with root privileges and returns stdout +
 // trimmed stderr. If the session is non-root and a sudo password
-// was supplied, cmd is wrapped in `sudo -S -p '' bash -c '<cmd>'`
-// and the sudo password is prepended to the stdin payload — sudo
-// reads the first line, the rest passes through to the wrapped
-// command. Sudo password never appears in argv.
+// was supplied, the sudo handshake is decoupled from the inner
+// command's stdin so a warm sudo cache can't desync the password
+// stream:
+//
+//   - the operator's sudo password is the first line of stdin,
+//     read by the wrapper into a shell variable
+//   - that variable is fed into `sudo -S -p '' -v` via printf and
+//     a fresh pipe — sudo only reads from this pipe when it
+//     actually prompts, so a cache-warm `sudo -nv` no-ops without
+//     touching the outer SSH stdin
+//   - the wrapper then `exec sudo bash -c '<cmd>'`, replacing
+//     itself with sudo. The remaining stdin (everything after
+//     line 1) flows through unmolested into the inner command,
+//     which can `read -r` its own secrets without contention
+//
+// Without that decoupling, a warm sudo cache would skip the
+// password prompt, leaving `<sudo-pw>\n` in stdin — the inner
+// command's `read -r` would then consume the operator's sudo
+// password, e.g. as the new ansible user's password. That landed
+// the operator's sudo password in /etc/shadow on every target
+// box; this rewrite eliminates that path.
 func (s *targetSession) runRoot(ctx context.Context, cmd, stdin string) (stdout, stderr string, err error) {
 	if s.sudoPassword == "" {
 		return s.run(ctx, cmd, stdin)
 	}
-	wrapped := "sudo -S -p '' bash -c " + shellQuote(cmd)
-	return s.run(ctx, wrapped, s.sudoPassword+"\n"+stdin)
+	wrapper := `set -e; IFS= read -r SUDO_PW; printf '%s\n' "$SUDO_PW" | sudo -S -p '' -v; unset SUDO_PW; exec sudo bash -c ` + shellQuote(cmd)
+	return s.run(ctx, wrapper, s.sudoPassword+"\n"+stdin)
 }
 
 // run executes cmd with the given stdin. Returns stdout + trimmed

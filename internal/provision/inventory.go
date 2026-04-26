@@ -47,6 +47,17 @@ func addHostToInventoryYAML(content []byte, provider, fqdn string) ([]byte, erro
 		return nil, errors.New("inventory top-level must be a YAML mapping (e.g. `all:`)")
 	}
 
+	// Refuse to bifurcate if any umbrella group already lives at the
+	// top level (legacy pre-`all` inventory layout). Creating a
+	// nested copy would split the fleet across two same-named
+	// groups and ansible's behaviour on duplicates is parser-
+	// dependent.
+	for _, group := range inventoryUmbrellaGroups {
+		if existing := findMapValue(top, group); existing != nil {
+			return nil, fmt.Errorf("inventory has top-level group %q — move it under all.children before provisioning so the new host doesn't get added to a duplicate group", group)
+		}
+	}
+
 	cur := findOrCreateMapValue(top, "all")
 	for _, group := range inventoryUmbrellaGroups {
 		cur = findOrCreateMapValue(cur, "children")

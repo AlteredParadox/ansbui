@@ -121,6 +121,9 @@ function ProvisioningView() {
           <div>
             <label htmlFor="prov-ip" className="cm-field-label">IP address</label>
             <input id="prov-ip" className="input mono" placeholder="203.0.113.42" value={ip} onChange={e => setIp(e.target.value)} disabled={running}/>
+            <div className="mute" style={{ fontSize: 11, marginTop: 4 }}>
+              First contact — the target&rsquo;s SSH host key is not verified, so use a trusted network.
+            </div>
           </div>
           <div>
             <label htmlFor="prov-port" className="cm-field-label">SSH port</label>

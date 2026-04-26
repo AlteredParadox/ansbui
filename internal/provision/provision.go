@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"path"
 	"strings"
+	"sync"
 
 	"github.com/AlteredParadox/ansbui/internal/ansible"
 	"github.com/AlteredParadox/ansbui/internal/config"
@@ -58,14 +59,48 @@ const (
 	dnsTTLSeconds            = 300
 )
 
+// targetMu serialises provisioning runs against the same target.
+// Two operators (or a single one with two browser tabs) submitting
+// the same form would otherwise race the SSH bootstrap — `chpasswd`
+// runs twice with different random passwords, the sshd-port flip
+// can interleave with another reload, etc. The mutex is keyed on
+// `<ip>:<port>`; a process-local sync.Mutex per key is enough
+// because the WS handler always lives in this process.
+var (
+	targetMuRegistry sync.Mutex
+	targetMu         = map[string]*sync.Mutex{}
+)
+
+// lockTarget returns a mutex specific to the IP:port pair. The
+// caller takes ownership and is responsible for unlocking; a Done
+// channel from ctx isn't honoured because provisioning steps are
+// short and a queued operator behind a lock is the correct UX.
+func lockTarget(key string) *sync.Mutex {
+	targetMuRegistry.Lock()
+	defer targetMuRegistry.Unlock()
+	m, ok := targetMu[key]
+	if !ok {
+		m = &sync.Mutex{}
+		targetMu[key] = m
+	}
+	return m
+}
+
 // Run executes the full provisioning workflow, streaming progress
 // events on `out`. The channel is closed when Run returns. ctx
 // cancels the workflow.
 func Run(ctx context.Context, pool *sshpool.Pool, srv config.Server, req Request, out chan<- ansible.Event) error {
 	defer close(out)
 	emit := func(t, text string) {
+		// stderr from sudo / sshd / apt sometimes contains the
+		// password the operator typed — RedactText strips
+		// password:/passphrase: shapes before the event lands in
+		// the WebSocket. The orchestrator never persists events,
+		// but the redact pass guards against future "let's add a
+		// debug log here" regressions and against the live event
+		// landing in browser memory in a recoverable form.
 		select {
-		case out <- ansible.Event{Type: t, Text: text}:
+		case out <- ansible.Event{Type: t, Text: ansible.RedactText(text)}:
 		case <-ctx.Done():
 		}
 	}
@@ -74,6 +109,10 @@ func Run(ctx context.Context, pool *sshpool.Pool, srv config.Server, req Request
 		emit("fail", err.Error())
 		return err
 	}
+
+	mu := lockTarget(fmt.Sprintf("%s:%d", req.IP, req.Port))
+	mu.Lock()
+	defer mu.Unlock()
 
 	emit("meta", "Decrypting porkbun credentials from "+defaultPorkbunVaultPath+"...")
 	apiKey, secretKey, err := readPorkbunCreds(ctx, pool, srv, req.VaultPassword)
@@ -205,23 +244,25 @@ func validateRequest(req Request) error {
 	return nil
 }
 
-// ensureARecord makes the porkbun A record for fqdn (= subdomain
-// under domain) match ip. Three outcomes:
-//   - no record yet → create one and emit ok
-//   - record points at the same ip → emit ok
-//   - record points elsewhere → emit fail and return; the operator
-//     fixes the typo or stale entry before retrying instead of
-//     letting us silently overwrite something they care about
+// ensureARecord makes the porkbun A record set for fqdn match ip.
+// Three outcomes:
+//   - no records → create one and emit ok
+//   - all existing records point at ip → emit ok (idempotent)
+//   - any record points elsewhere → emit fail and return, listing
+//     every conflicting IP. The operator fixes the typo / stale
+//     entry / multi-A round-robin manually before retrying
 //
-// Extracted from Run() so the Sonar S3776 cognitive-complexity
-// budget on the orchestrator stays under the threshold.
+// We refuse to add a parallel record when one already conflicts
+// because porkbun allows multiple A records under the same name —
+// silently appending a "correct" one alongside a stale one would
+// round-robin traffic between the new box and a stranger.
 func ensureARecord(ctx context.Context, pb *porkbun.Client, domain, subdomain, ip, fqdn string, emit func(string, string)) error {
-	rec, err := pb.FindARecord(ctx, domain, subdomain)
+	records, err := pb.FindARecords(ctx, domain, subdomain, fqdn)
 	if err != nil {
 		emit("fail", err.Error())
 		return err
 	}
-	if rec == nil {
+	if len(records) == 0 {
 		emit("meta", "No record exists; creating...")
 		if err := pb.CreateARecord(ctx, domain, subdomain, ip, dnsTTLSeconds); err != nil {
 			emit("fail", err.Error())
@@ -230,8 +271,14 @@ func ensureARecord(ctx context.Context, pb *porkbun.Client, domain, subdomain, i
 		emit("ok", fmt.Sprintf("created A record %s -> %s", fqdn, ip))
 		return nil
 	}
-	if rec.Content != ip {
-		msg := fmt.Sprintf("A record exists pointing to %s, not %s — update via porkbun manually before retrying", rec.Content, ip)
+	var conflicts []string
+	for _, r := range records {
+		if r.Content != ip {
+			conflicts = append(conflicts, r.Content)
+		}
+	}
+	if len(conflicts) > 0 {
+		msg := fmt.Sprintf("A record(s) exist pointing to %s, not %s — update via porkbun manually before retrying", strings.Join(conflicts, ", "), ip)
 		emit("fail", msg)
 		return errors.New(msg)
 	}
@@ -239,12 +286,15 @@ func ensureARecord(ctx context.Context, pb *porkbun.Client, domain, subdomain, i
 	return nil
 }
 
-// normalizeProviderName lowercases the operator's free-form provider
-// label and collapses whitespace runs into single underscores so
-// "Little Creek Hosting" becomes "little_creek_hosting" — matching
-// the existing fleet's group naming convention. Any other character
-// classes are left alone (hyphens, digits, etc.) so legitimate
-// provider names like "racknerd-east" survive.
+// normalizeProviderName lowercases the operator's free-form
+// provider label, collapses whitespace runs into single
+// underscores, and drops any character outside [a-z0-9_-]. So
+// "Little Creek Hosting" becomes "little_creek_hosting" and a
+// hostile/sloppy label like "foo;rm" → "foorm". The strict
+// character class avoids producing YAML keys that need quoting
+// (e.g. starting with `!` or containing `:`) and stops shell-meta
+// characters from sneaking through any future code path that
+// might splice the name into a command.
 func normalizeProviderName(s string) string {
 	s = strings.ToLower(strings.TrimSpace(s))
 	var b strings.Builder
@@ -259,7 +309,14 @@ func normalizeProviderName(s string) string {
 			continue
 		}
 		prevSpace = false
-		b.WriteRune(r)
+		switch {
+		case r >= 'a' && r <= 'z':
+			b.WriteRune(r)
+		case r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r == '_' || r == '-':
+			b.WriteRune(r)
+		}
 	}
 	return b.String()
 }
@@ -303,10 +360,13 @@ func readPorkbunCreds(ctx context.Context, pool *sshpool.Pool, srv config.Server
 	return strings.TrimSpace(apiKey), strings.TrimSpace(secretKey), nil
 }
 
-// readControlNodePubkey cats the control node's public key file. We
-// expand `~/` to whatever the SSH user's home is (relying on the
-// remote shell's tilde expansion is unreliable when the command is
-// run through bash -c). Empty result -> caller errors out.
+// readControlNodePubkey cats the control node's public key file
+// and validates that it looks like an OpenSSH public key (starts
+// with one of the known key-type prefixes). The sanity check
+// catches honest mistakes — e.g. the operator pointed the constant
+// at the private key by accident, or the file was overwritten with
+// a comment-only stub — before the orchestrator splices the
+// content into a target's authorized_keys and corrupts it.
 func readControlNodePubkey(ctx context.Context, pool *sshpool.Pool, srv config.Server) (string, error) {
 	cli, err := pool.Client(ctx, srv)
 	if err != nil {
@@ -324,7 +384,23 @@ func readControlNodePubkey(ctx context.Context, pool *sshpool.Pool, srv config.S
 	if pub == "" {
 		return "", fmt.Errorf("control node public key %s is empty", defaultControlPubKeyPath)
 	}
+	if !looksLikePublicKey(pub) {
+		return "", fmt.Errorf("control node file %s does not look like an OpenSSH public key (expected ssh-ed25519 / ssh-rsa / ecdsa-sha2-* prefix)", defaultControlPubKeyPath)
+	}
 	return pub, nil
+}
+
+// looksLikePublicKey is a coarse check on whatever
+// readControlNodePubkey just cat'd. We only want to catch
+// "operator pointed at the wrong file" mistakes — full key
+// parsing is sshd's job.
+func looksLikePublicKey(s string) bool {
+	for _, prefix := range []string{"ssh-ed25519 ", "ssh-rsa ", "ssh-dss ", "ecdsa-sha2-nistp256 ", "ecdsa-sha2-nistp384 ", "ecdsa-sha2-nistp521 ", "sk-ssh-ed25519@openssh.com ", "sk-ecdsa-sha2-nistp256@openssh.com "} {
+		if strings.HasPrefix(s, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // updateInventoryFile reads the configured inventory, adds the host
@@ -408,7 +484,7 @@ func ansibleUserSetupScript(pubKey string) string {
 		`install -d -m 700 -o ansible -g ansible /home/ansible/.ssh`,
 		`PUBKEY=` + shellQuote(pubKey),
 		`touch /home/ansible/.ssh/authorized_keys`,
-		`grep -qF "$PUBKEY" /home/ansible/.ssh/authorized_keys || printf '%s\n' "$PUBKEY" >> /home/ansible/.ssh/authorized_keys`,
+		`grep -qxF "$PUBKEY" /home/ansible/.ssh/authorized_keys || printf '%s\n' "$PUBKEY" >> /home/ansible/.ssh/authorized_keys`,
 		`chown -R ansible:ansible /home/ansible/.ssh`,
 		`chmod 600 /home/ansible/.ssh/authorized_keys`,
 		`printf 'ansible ALL=(ALL) NOPASSWD:ALL\n' > /etc/sudoers.d/ansible`,

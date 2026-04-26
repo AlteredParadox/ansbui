@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -47,11 +48,22 @@ type Record struct {
 	TTL     string `json:"ttl"`
 }
 
-// FindARecord returns the first A record matching the given
-// (domain, subdomain) tuple, or (nil, nil) if no record exists.
-// `subdomain` is the prefix below the registered domain — pass ""
-// to look up the apex.
-func (c *Client) FindARecord(ctx context.Context, domain, subdomain string) (*Record, error) {
+// FindARecords returns every A record whose Name exactly matches
+// fqdn. Two reasons it returns a slice rather than a single record:
+//
+//  1. The apex endpoint (`/dns/retrieveByNameType/<domain>/A`)
+//     returns every A record under the domain, not just the apex.
+//     Filtering by Name is the only way to isolate the apex from
+//     all the subdomains.
+//  2. Multi-A round-robin is legal — a given hostname may have
+//     several A records pointing at different IPs. The caller
+//     needs to inspect all of them to know whether ANY conflict
+//     with the IP they're about to bootstrap.
+//
+// fqdn is the full hostname (e.g. "vps01.example.com" or just
+// "example.com" for the apex); subdomain is the prefix porkbun
+// uses for the URL path ("" for the apex).
+func (c *Client) FindARecords(ctx context.Context, domain, subdomain, fqdn string) ([]Record, error) {
 	path := fmt.Sprintf("/dns/retrieveByNameType/%s/A", domain)
 	if subdomain != "" {
 		path += "/" + subdomain
@@ -71,10 +83,14 @@ func (c *Client) FindARecord(ctx context.Context, domain, subdomain string) (*Re
 	if resp.Status != "SUCCESS" {
 		return nil, fmt.Errorf("porkbun: %s", resp.Message)
 	}
-	if len(resp.Records) == 0 {
-		return nil, nil
+	wantedName := strings.ToLower(strings.TrimSuffix(fqdn, "."))
+	var out []Record
+	for _, r := range resp.Records {
+		if strings.ToLower(r.Name) == wantedName {
+			out = append(out, r)
+		}
 	}
-	return &resp.Records[0], nil
+	return out, nil
 }
 
 // CreateARecord adds a new A record under domain pointing at ip.

@@ -68,7 +68,14 @@
   };
   api.openStream = (kind, request) => {
     const wsProto = globalThis.location.protocol === 'https:' ? 'wss' : 'ws';
-    const path = STREAM_PATHS[kind] || STREAM_PATHS.playbook;
+    const path = STREAM_PATHS[kind];
+    if (!path) {
+      // Refusing the open is the right move — the form payload
+      // for provisioning carries multiple secrets and a typo in
+      // `kind` would otherwise have shipped them to whichever
+      // handler the fallback selected.
+      throw new Error(`api.openStream: unknown stream kind "${kind}"`);
+    }
     const ws = new WebSocket(`${wsProto}://${globalThis.location.host}${path}`);
     const listeners = new Set();
     ws.addEventListener('open', () => ws.send(JSON.stringify(request)));
