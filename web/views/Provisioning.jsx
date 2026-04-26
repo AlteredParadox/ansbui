@@ -14,10 +14,12 @@ const PROVISION_JOB_KEY = 'ansbui.provisionJobId';
 // internal/provision/reinstall.go — the backend re-validates, so a
 // drift here just means the form rejects something the backend
 // would accept (or vice versa). Versions are listed newest-first
-// because the version dropdown defaults to index 0.
+// because the version dropdown defaults to index 0; the set
+// matches reinstall.sh's README (Debian 9-13, Ubuntu LTS
+// 18.04-26.04).
 const REINSTALL_MATRIX = {
-  debian: ['12', '11'],
-  ubuntu: ['24.04', '22.04']
+  debian: ['13', '12', '11', '10', '9'],
+  ubuntu: ['26.04', '24.04', '22.04', '20.04', '18.04']
 };
 const REINSTALL_OS_LIST = Object.keys(REINSTALL_MATRIX);
 

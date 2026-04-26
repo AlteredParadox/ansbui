@@ -36,11 +36,12 @@ type ReinstallOpts struct {
 // successful reinstall followed by an apt-install failure on the
 // next step. When the bootstrap is generalised this list grows.
 //
-// Versions are listed newest-first because the UI tends to default
-// to the first entry.
+// Versions match what reinstall.sh's README advertises (Debian
+// 9-13, Ubuntu LTS 18.04-26.04). Listed newest-first because the
+// UI tends to default to the first entry.
 var reinstallOSMatrix = map[string][]string{
-	"debian": {"12", "11"},
-	"ubuntu": {"24.04", "22.04"},
+	"debian": {"13", "12", "11", "10", "9"},
+	"ubuntu": {"26.04", "24.04", "22.04", "20.04", "18.04"},
 }
 
 // reinstallScriptURL is the canonical raw URL for bin456789's
