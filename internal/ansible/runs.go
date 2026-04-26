@@ -54,12 +54,16 @@ type RunRecord struct {
 	ExtraVars map[string]any    `json:"extraVars,omitempty"`
 }
 
-// Recorder is a thread-safe on-disk list of RunRecords.
+// Recorder is a thread-safe on-disk list of RunRecords plus a small
+// hostname → most-recent-playbook index that the inventory endpoint
+// reads on every request. The index is maintained incrementally so a
+// poll never has to walk the whole event log under the mutex.
 type Recorder struct {
-	path  string
-	mu    sync.Mutex
-	runs  []RunRecord
-	limit int
+	path     string
+	mu       sync.Mutex
+	runs     []RunRecord
+	limit    int
+	lastPlay map[string]LastPlay
 }
 
 // NewRecorder loads or creates the run log at the given path.
@@ -67,11 +71,12 @@ func NewRecorder(path string) (*Recorder, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, fmt.Errorf("create runs dir: %w", err)
 	}
-	r := &Recorder{path: path, limit: 200}
+	r := &Recorder{path: path, limit: 200, lastPlay: make(map[string]LastPlay)}
 	if data, err := os.ReadFile(path); err == nil {
 		_ = json.Unmarshal(data, &r.runs)
 	}
 	r.ensureSorted()
+	r.rebuildLastPlay()
 	return r, nil
 }
 
@@ -79,6 +84,11 @@ func NewRecorder(path string) (*Recorder, error) {
 // first; since wall-clock time is effectively monotonic for our use
 // the record prepends cheaply, avoiding an O(n log n) sort on every
 // run. The oldest records are dropped once the limit is exceeded.
+//
+// The lastPlay index is updated incrementally for the new record on
+// the common path. When the limit kicks in and a record is dropped,
+// the index is rebuilt from scratch to clear references to the
+// evicted run.
 func (r *Recorder) Append(rec RunRecord) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -94,8 +104,15 @@ func (r *Recorder) Append(rec RunRecord) error {
 		copy(r.runs[idx+1:], r.runs[idx:])
 		r.runs[idx] = rec
 	}
+	evicted := false
 	if len(r.runs) > r.limit {
 		r.runs = r.runs[:r.limit]
+		evicted = true
+	}
+	if evicted {
+		r.rebuildLastPlay()
+	} else {
+		r.applyRunToLastPlay(rec)
 	}
 	return r.saveLocked()
 }
@@ -172,35 +189,50 @@ type LastPlay struct {
 // the runner *attempted* the host, which is what the UI's "Last
 // play" column wants to show.
 //
-// The mutex is held only long enough to snapshot the runs slice (a
-// header-level copy; underlying RunRecord values are immutable
-// after Append). The nested event scan happens outside the lock so
-// concurrent Append calls from streaming runs aren't blocked even
-// when an inventory request triggers this on a large run history.
+// The result is a snapshot of the incrementally-maintained
+// r.lastPlay index, so the call is O(distinct hosts) under the
+// mutex with no Log iteration. That keeps inventory polls from
+// stalling streaming Append calls on a large run history.
 func (r *Recorder) LastPlayPerHost() map[string]LastPlay {
 	r.mu.Lock()
-	runs := make([]RunRecord, len(r.runs))
-	copy(runs, r.runs)
-	r.mu.Unlock()
-
-	out := make(map[string]LastPlay)
-	for _, run := range runs {
-		if run.Kind != "playbook" {
-			continue
-		}
-		for _, evt := range run.Log {
-			if evt.Host == "" || !strings.HasPrefix(evt.Type, "recap") {
-				continue
-			}
-			if _, seen := out[evt.Host]; seen {
-				continue
-			}
-			out[evt.Host] = LastPlay{
-				Playbook: run.Playbook,
-				At:       run.StartedAt,
-				Status:   run.Status,
-			}
-		}
+	defer r.mu.Unlock()
+	out := make(map[string]LastPlay, len(r.lastPlay))
+	for k, v := range r.lastPlay {
+		out[k] = v
 	}
 	return out
+}
+
+// applyRunToLastPlay folds rec's PLAY RECAP entries into the index.
+// Caller must hold r.mu. A host's existing entry is preserved when
+// the existing run is at least as recent as rec — the merge stays
+// "newest play wins" even when rec arrived out of order.
+func (r *Recorder) applyRunToLastPlay(rec RunRecord) {
+	if rec.Kind != "playbook" {
+		return
+	}
+	for _, evt := range rec.Log {
+		if evt.Host == "" || !strings.HasPrefix(evt.Type, "recap") {
+			continue
+		}
+		if existing, ok := r.lastPlay[evt.Host]; ok && !rec.StartedAt.After(existing.At) {
+			continue
+		}
+		r.lastPlay[evt.Host] = LastPlay{
+			Playbook: rec.Playbook,
+			At:       rec.StartedAt,
+			Status:   rec.Status,
+		}
+	}
+}
+
+// rebuildLastPlay reconstructs the index from r.runs. Used at
+// startup (NewRecorder) and after the limit-cap eviction in Append
+// drops one or more records — rebuilding lets the index forget
+// about runs that no longer exist on disk. Caller must hold r.mu.
+func (r *Recorder) rebuildLastPlay() {
+	r.lastPlay = make(map[string]LastPlay)
+	for _, run := range r.runs {
+		r.applyRunToLastPlay(run)
+	}
 }
