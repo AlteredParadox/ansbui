@@ -18,6 +18,9 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"fmt"
+	"log"
+	"runtime/debug"
 	"sort"
 	"sync"
 	"time"
@@ -291,11 +294,34 @@ func (m *Manager) Start(kind string, summary map[string]string, fn Func) (*Job, 
 	m.mu.Unlock()
 	go func() {
 		defer cancel()
-		err := fn(ctx, job.emit)
-		job.finish(err, ctx.Err())
+		// Recover from panics inside fn so a single bad
+		// orchestrator (a future regression introducing a nil
+		// deref, or a malformed external response that trips a
+		// downstream library) doesn't crash the whole process
+		// and take every other in-flight run with it. We wrap
+		// only `fn` in the recover and call finish+afterFinish
+		// from a single site so the cap accounting can't be
+		// corrupted by a double-call.
+		fnErr := runFnSafely(ctx, fn, job)
+		job.finish(fnErr, ctx.Err())
 		m.afterFinish(job.ID)
 	}()
 	return job, nil
+}
+
+// runFnSafely runs fn under a recover so a panic surfaces as a
+// regular error instead of crashing the process. Stack traces
+// are logged for the operator's reference; the panic value is
+// folded into the error returned to job.finish so the manager's
+// terminal-state machinery handles it as an ordinary failure.
+func runFnSafely(ctx context.Context, fn Func, job *Job) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("job %s (%s) panic: %v\n%s", job.ID, job.Kind, r, debug.Stack())
+			err = fmt.Errorf("orchestrator panic: %v", r)
+		}
+	}()
+	return fn(ctx, job.emit)
 }
 
 // afterFinish accounts a finished job and evicts the oldest
