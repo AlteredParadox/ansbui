@@ -158,7 +158,7 @@ function ProvisioningView() {
           <label htmlFor="prov-vaultpw" className="cm-field-label">Vault password</label>
           <input id="prov-vaultpw" className="input mono" type="password" autoComplete="new-password" placeholder="decrypts porkbun_api_key + porkbun_secret_key" value={vaultPassword} onChange={e => setVaultPassword(e.target.value)} disabled={running}/>
           <div className="mute" style={{ fontSize: 11, marginTop: 4 }}>
-            Read from <span className="mono">group_vars/all/vault.yml</span> on the active control node.
+            Read from <span className="mono">inventory/group_vars/all/vault.yml</span> on the active control node.
           </div>
         </div>
 

@@ -50,7 +50,7 @@ type Request struct {
 // future operator's setup diverges these become server-config
 // fields.
 const (
-	defaultPorkbunVaultPath  = "group_vars/all/vault.yml"
+	defaultPorkbunVaultPath  = "inventory/group_vars/all/vault.yml"
 	defaultPorkbunAPIKeyVar  = "porkbun_api_key"
 	defaultPorkbunSecretVar  = "porkbun_secret_key"
 	defaultControlPubKeyPath = "~/.ssh/id_ed25519.pub"
