@@ -29,17 +29,18 @@ func TestParseIncludeHosts(t *testing.T) {
 }
 
 func TestMergeLimitHosts(t *testing.T) {
+	const wantMerged = "vps01,localhost,prometheus"
 	cases := []struct {
 		userLimit string
 		include   []string
 		want      string
 	}{
-		{"vps01", []string{"localhost", "prometheus"}, "vps01,localhost,prometheus"},
+		{"vps01", []string{"localhost", "prometheus"}, wantMerged},
 		{"", []string{"localhost", "prometheus"}, "localhost,prometheus"},
 		{"vps01", nil, "vps01"},
-		{"vps01,localhost", []string{"localhost", "prometheus"}, "vps01,localhost,prometheus"},     // dedup
-		{"  vps01  ,  localhost ", []string{"prometheus"}, "vps01,localhost,prometheus"},          // trim
-		{"localhost", []string{"localhost"}, "localhost"},                                         // single dedup
+		{"vps01,localhost", []string{"localhost", "prometheus"}, wantMerged}, // dedup
+		{"  vps01  ,  localhost ", []string{"prometheus"}, wantMerged},       // trim
+		{"localhost", []string{"localhost"}, "localhost"},                    // single dedup
 	}
 	for _, tc := range cases {
 		got := MergeLimitHosts(tc.userLimit, tc.include)

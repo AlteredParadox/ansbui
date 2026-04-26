@@ -617,9 +617,13 @@ function PlaybookRunner({ open, pb, seed, onClose }) {
           {includeHosts.length > 0 && (
             <div style={{ marginBottom: 8 }}>
               <div className="cm-field-label" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                Always included
+                <span>Always included</span>
                 <span className="mute" style={{ fontWeight: 'normal', fontSize: 11 }}>
-                  (from <span className="mono">{'# ansbui-include:'}</span> in the playbook — merged into <span className="mono">--limit</span> at run time)
+                  <span>(from </span>
+                  <span className="mono">{'# ansbui-include:'}</span>
+                  <span> in the playbook — merged into </span>
+                  <span className="mono">--limit</span>
+                  <span> at run time)</span>
                 </span>
               </div>
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginTop: 4 }}>
