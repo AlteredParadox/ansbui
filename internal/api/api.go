@@ -70,6 +70,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/vault/inline/upsert", limitBody(largeBody, s.upsertInlineVault))
 	mux.HandleFunc("GET /api/adhoc/stream", s.wsAdhoc)
 	mux.HandleFunc("GET /api/playbook/stream", s.wsPlaybook)
+	mux.HandleFunc("GET /api/provision/stream", s.wsProvision)
 
 	mux.Handle("/", s.staticHandler())
 

@@ -10,6 +10,23 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
+// WriteRemoteFile is the exported entry point to the same atomic
+// write helper inline-vault edits use — the provisioning package
+// calls it to persist a modified inventory file. Returns trimmed
+// stderr so callers can surface "refusing to write through symlink"
+// or other shell-level diagnostics. Wraps the underlying error in
+// the caller's context.
+func WriteRemoteFile(ctx context.Context, cli *ssh.Client, full, content string) error {
+	stderr, err := writeFileAtomicViaStdin(ctx, cli, full, content)
+	if err != nil {
+		if stderr == "" {
+			stderr = err.Error()
+		}
+		return fmt.Errorf("write %s: %s", full, stderr)
+	}
+	return nil
+}
+
 // writeFileAtomicViaStdin overwrites the absolute path `full` on the
 // remote with `content`, streamed over the session's stdin (so it
 // sidesteps the 128 KB MAX_ARG_STRLEN ceiling that any base64-in-argv

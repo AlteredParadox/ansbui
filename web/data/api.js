@@ -60,10 +60,15 @@
 
   api.gatherFacts = (host) => json(`/api/facts?host=${encodeURIComponent(host)}`);
 
-  // Open a WebSocket to stream ad-hoc / playbook output.
+  // Open a WebSocket to stream ad-hoc / playbook / provisioning output.
+  const STREAM_PATHS = {
+    adhoc: '/api/adhoc/stream',
+    playbook: '/api/playbook/stream',
+    provision: '/api/provision/stream'
+  };
   api.openStream = (kind, request) => {
     const wsProto = globalThis.location.protocol === 'https:' ? 'wss' : 'ws';
-    const path = kind === 'adhoc' ? '/api/adhoc/stream' : '/api/playbook/stream';
+    const path = STREAM_PATHS[kind] || STREAM_PATHS.playbook;
     const ws = new WebSocket(`${wsProto}://${globalThis.location.host}${path}`);
     const listeners = new Set();
     ws.addEventListener('open', () => ws.send(JSON.stringify(request)));
