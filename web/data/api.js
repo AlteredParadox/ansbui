@@ -95,19 +95,18 @@
   };
 
   // Provisioning is backed by a server-side job manager so the run
-  // outlives the operator's tab — important for the upcoming
-  // reinstall flow which reboots the target and waits up to ~30
-  // minutes for SSH to come back. Lifecycle:
+  // outlives the operator's tab — important for the reinstall flow
+  // which reboots the target and waits up to ~30 minutes for SSH
+  // to come back. Lifecycle:
   //   1. startProvisionJob(payload)    POST creates the job
   //   2. attachProvisionJob(jobId)     WS subscribes (replay + tail)
   //   3. cancelProvisionJob(jobId)     POST signals ctx-cancel
   // Closing the WS does NOT cancel; only the explicit cancel call
-  // does. listProvisionJobs / getProvisionJob support the "you
-  // have an active run" UI surface on view re-mount.
+  // does. getProvisionJob backs the on-mount re-attach probe in
+  // Provisioning.jsx.
   api.startProvisionJob = (payload) => json('/api/provision/start', {
     method: 'POST', body: JSON.stringify(payload)
   });
-  api.listProvisionJobs = () => json('/api/provision/jobs');
   api.getProvisionJob = (id) => json(`/api/provision/jobs/${encodeURIComponent(id)}`);
   api.cancelProvisionJob = (id) => json(`/api/provision/jobs/${encodeURIComponent(id)}/cancel`, {
     method: 'POST'

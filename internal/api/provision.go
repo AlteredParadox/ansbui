@@ -8,6 +8,7 @@ import (
 
 	"github.com/AlteredParadox/ansbui/internal/jobs"
 	"github.com/AlteredParadox/ansbui/internal/provision"
+	"github.com/gorilla/websocket"
 )
 
 // errUnknownJobID is returned to clients that hit /jobs/{id} for
@@ -188,8 +189,8 @@ func (s *Server) wsProvisionStream(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func writeJobEvent(conn wsWriter, e jobs.Event) error {
-	return conn.WriteJSON(map[string]any{
+func writeJobEvent(conn *websocket.Conn, e jobs.Event) error {
+	return wsWriteJSON(conn, map[string]any{
 		"type": e.Type,
 		"text": e.Text,
 		"seq":  e.Seq,
@@ -197,25 +198,18 @@ func writeJobEvent(conn wsWriter, e jobs.Event) error {
 	})
 }
 
-func writeTerminalEvent(conn wsWriter, snap jobs.Snapshot) error {
+func writeTerminalEvent(conn *websocket.Conn, snap jobs.Snapshot) error {
 	switch snap.Status {
 	case jobs.StatusSucceeded:
-		return conn.WriteJSON(map[string]any{"type": "done", "text": "complete"})
+		return wsWriteJSON(conn, map[string]any{"type": "done", "text": "complete"})
 	case jobs.StatusCancelled:
-		return conn.WriteJSON(map[string]any{"type": "fail", "text": "cancelled"})
+		return wsWriteJSON(conn, map[string]any{"type": "fail", "text": "cancelled"})
 	case jobs.StatusFailed:
 		text := snap.Error
 		if text == "" {
 			text = "failed"
 		}
-		return conn.WriteJSON(map[string]any{"type": "fail", "text": text})
+		return wsWriteJSON(conn, map[string]any{"type": "fail", "text": text})
 	}
 	return nil
-}
-
-// wsWriter is the minimal interface we use against
-// *websocket.Conn — keeps writeJobEvent / writeTerminalEvent
-// trivially testable.
-type wsWriter interface {
-	WriteJSON(v any) error
 }

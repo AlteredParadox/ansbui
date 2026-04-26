@@ -1,7 +1,6 @@
 package api
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -19,8 +18,7 @@ func (s *Server) listServers(w http.ResponseWriter, _ *http.Request) {
 
 func (s *Server) upsertServer(w http.ResponseWriter, r *http.Request) {
 	var srv config.Server
-	if err := json.NewDecoder(r.Body).Decode(&srv); err != nil {
-		writeError(w, http.StatusBadRequest, fmt.Errorf("decode body: %w", err))
+	if !decodeJSONBody(w, r, &srv) {
 		return
 	}
 	saved, err := s.Config.UpsertServer(srv)
@@ -114,8 +112,7 @@ func (s *Server) getSettings(w http.ResponseWriter, _ *http.Request) {
 
 func (s *Server) setSettings(w http.ResponseWriter, r *http.Request) {
 	var body settingsBody
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeError(w, http.StatusBadRequest, fmt.Errorf("decode body: %w", err))
+	if !decodeJSONBody(w, r, &body) {
 		return
 	}
 	if err := s.Config.SetPrometheus(body.PrometheusURL, body.PrometheusLabel); err != nil {

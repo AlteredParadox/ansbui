@@ -119,13 +119,12 @@ func runReinstall(ctx context.Context, target *targetSession, opts ReinstallOpts
 	emit("meta", "Triggering reboot (detached) — SSH session will drop in ~1s...")
 	// Fire-and-forget: the inner `&` should background the reboot
 	// inside the remote shell so the wrapper exits cleanly. But a
-	// fast reboot or half-closed SSH channel can still surface
-	// EOF / *ExitMissingError from runRoot — the side-effect has
-	// already been scheduled, so treat any error as a warning and
-	// proceed to the reconnect wait. Mis-classifying a real
-	// failure as "rebooting" is OK because waitForReinstallTarget
-	// will time out on its 30-minute budget if the box never
-	// actually reboots.
+	// fast reboot or half-closed SSH channel can still surface an
+	// error from runRoot — the side-effect has already been
+	// scheduled, so we treat any error as a warning and proceed to
+	// the reconnect wait. Mis-classifying a real failure as
+	// "rebooting" is OK because waitForReinstallTarget will time
+	// out on its 30-minute budget if the box never actually reboots.
 	if _, _, err := target.runRoot(ctx, "(sleep 1; reboot) >/dev/null 2>&1 &", ""); err != nil {
 		emit("meta", fmt.Sprintf("reboot scheduling returned %v — proceeding (the reboot itself is detached)", err))
 	} else {

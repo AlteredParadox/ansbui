@@ -1,9 +1,7 @@
 package api
 
 import (
-	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 
 	"github.com/AlteredParadox/ansbui/internal/ansible"
@@ -52,8 +50,7 @@ func (s *Server) putPlaybook(w http.ResponseWriter, r *http.Request) {
 		Path string `json:"path"`
 		YAML string `json:"yaml"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeError(w, http.StatusBadRequest, fmt.Errorf("decode body: %w", err))
+	if !decodeJSONBody(w, r, &body) {
 		return
 	}
 	if err := ansible.SavePlaybook(r.Context(), s.Pool, srv, body.Path, body.YAML); err != nil {

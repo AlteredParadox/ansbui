@@ -32,6 +32,23 @@ var wsUpgrader = websocket.Upgrader{
 // legitimate request.
 const wsMaxMessageBytes = 64 * 1024
 
+// wsWriteWait bounds how long we'll block on a single WebSocket
+// write. Without it, a slow / unresponsive peer (full TCP receive
+// buffer, dropped network) wedges the writer indefinitely — and
+// because event fan-out is on the orchestrator goroutine path,
+// that's a hung run, not just a hung handler. 10 seconds is
+// generous for a healthy LAN write while still bounding the worst
+// case enough that ctx-cancel can clean up promptly.
+const wsWriteWait = 10 * time.Second
+
+// wsWriteJSON applies the write deadline before delegating to
+// gorilla's WriteJSON. Centralised so every WS write site picks up
+// the bound; gorilla's connection-level timeout knob doesn't exist.
+func wsWriteJSON(conn *websocket.Conn, v any) error {
+	_ = conn.SetWriteDeadline(time.Now().Add(wsWriteWait))
+	return conn.WriteJSON(v)
+}
+
 // sameOriginCheck compares the parsed Origin header host:port to the
 // request's Host. url.Parse makes the match resistant to the
 // HasSuffix-bypass trick ("http://evil.com//legit.host:8787"). A
@@ -82,7 +99,7 @@ func runWebSocket[T any](
 
 	var req T
 	if err := conn.ReadJSON(&req); err != nil {
-		_ = conn.WriteJSON(ansible.Event{Type: "error", Text: "decode request: " + err.Error()})
+		_ = wsWriteJSON(conn, ansible.Event{Type: "error", Text: "decode request: " + err.Error()})
 		return
 	}
 
@@ -91,7 +108,7 @@ func runWebSocket[T any](
 	watchPeer(ctx, conn, cancel)
 
 	record := buildRecord(srv, &req, ansible.NewID())
-	_ = conn.WriteJSON(map[string]string{"type": "run-id", "text": record.ID})
+	_ = wsWriteJSON(conn, map[string]string{"type": "run-id", "text": record.ID})
 
 	events := make(chan ansible.Event, 64)
 	go func() {
@@ -172,7 +189,7 @@ func consumeAndPersist(conn *websocket.Conn, events <-chan ansible.Event, run *a
 	clientAlive := true
 	for evt := range events {
 		if clientAlive {
-			if err := conn.WriteJSON(evt); err != nil {
+			if err := wsWriteJSON(conn, evt); err != nil {
 				log.Printf("ws: write to peer failed, draining run locally: %v", err)
 				clientAlive = false
 			}
@@ -193,7 +210,7 @@ func consumeAndPersist(conn *websocket.Conn, events <-chan ansible.Event, run *a
 		log.Printf("persist run: %v", err)
 	}
 	if clientAlive {
-		_ = conn.WriteJSON(map[string]any{"type": "run-complete", "id": run.ID, "status": run.Status})
+		_ = wsWriteJSON(conn, map[string]any{"type": "run-complete", "id": run.ID, "status": run.Status})
 	}
 }
 

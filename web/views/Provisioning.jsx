@@ -23,6 +23,13 @@ const REINSTALL_MATRIX = {
 };
 const REINSTALL_OS_LIST = Object.keys(REINSTALL_MATRIX);
 
+// IPV4_RE matches dotted-quad with each octet 0-255. The backend's
+// Validate runs the canonical net.ParseIP check; this is the same
+// rule mirrored client-side so the operator gets immediate
+// feedback for a hostname / typo / IPv6 paste instead of the
+// 400-after-submit. Bounded — no nested repetition (S5852-safe).
+const IPV4_RE = /^(?:(?:25[0-5]|2[0-4]\d|[01]?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d?\d)$/;
+
 function ProvisioningView() {
   const [provider, setProvider] = useStateProv('');
   const [ip, setIp] = useStateProv('');
@@ -135,6 +142,7 @@ function ProvisioningView() {
   const validateForm = () => {
     if (!provider.trim()) return { error: 'Provider is required.' };
     if (!ip.trim()) return { error: 'IP address is required.' };
+    if (!IPV4_RE.test(ip.trim())) return { error: 'IP must be in dotted-quad form (e.g. 203.0.113.42) — hostnames and IPv6 are not supported.' };
     const portNum = Number.parseInt(port, 10);
     const portOk = Number.isInteger(portNum) && portNum > 0 && portNum <= 65535;
     if (!portOk) return { error: 'SSH port must be a valid TCP port.' };

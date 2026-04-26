@@ -128,7 +128,10 @@ func Run(ctx context.Context, pool *sshpool.Pool, srv config.Server, req Request
 	// A forged / stale client could submit `username=root` together
 	// with `useSudo=true`. Root never needs sudo; coerce to false so
 	// the orchestrator skips the wrapper entirely instead of running
-	// `sudo` as root just to wrap a noop.
+	// `sudo` as root just to wrap a noop. Trim first so a sloppy
+	// `"root "` doesn't bypass the coercion and produce confusing
+	// SSH-auth-as-"root " errors downstream.
+	req.Username = strings.TrimSpace(req.Username)
 	if req.Username == "root" {
 		req.UseSudo = false
 		req.SudoPassword = ""
@@ -219,15 +222,22 @@ func Validate(req Request) error {
 	if strings.TrimSpace(req.Provider) == "" {
 		return errors.New("provider is required")
 	}
-	if strings.TrimSpace(req.IP) == "" {
+	trimmedIP := strings.TrimSpace(req.IP)
+	if trimmedIP == "" {
 		return errors.New("IP address is required")
 	}
 	// porkbun A records are IPv4-only and the SSH bootstrap
-	// connects directly to this address — accept only IPv4
-	// literals, rejecting hostnames (which could resolve away
-	// post-reinstall) and IPv6 (no AAAA path yet).
-	if ip := net.ParseIP(strings.TrimSpace(req.IP)); ip == nil || ip.To4() == nil {
-		return errors.New("IP must be a valid IPv4 literal address — A records do not support IPv6 and hostnames are rejected so DNS changes can't move the box mid-run")
+	// connects directly to this address — accept only dotted-quad
+	// literals. Rejecting hostnames stops a DNS change from moving
+	// the box mid-run; rejecting IPv6 (including IPv4-mapped
+	// `::ffff:1.2.3.4` forms that net.ParseIP would otherwise
+	// accept) avoids a confusing failure later when porkbun
+	// rejects the A record content.
+	if strings.Contains(trimmedIP, ":") {
+		return errors.New("IP must be in dotted-quad form (e.g. 203.0.113.42) — IPv6 addresses, including IPv4-mapped forms like ::ffff:1.2.3.4, are not supported")
+	}
+	if ip := net.ParseIP(trimmedIP); ip == nil || ip.To4() == nil {
+		return errors.New("IP must be a valid IPv4 literal address — hostnames are rejected so DNS changes can't move the box mid-run")
 	}
 	if req.Port <= 0 || req.Port > 65535 {
 		return errors.New("invalid SSH port")

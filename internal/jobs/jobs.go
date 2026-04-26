@@ -18,7 +18,6 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
-	"fmt"
 	"log"
 	"runtime/debug"
 	"sort"
@@ -95,12 +94,13 @@ type Job struct {
 }
 
 // waiter is one attached subscriber's delivery slot. ch is
-// buffered; if the consumer can't keep up we set dropped and skip
-// — they re-attach for a fresh backlog rather than blocking
-// emit and back-pressuring the orchestrator.
+// buffered; if the consumer can't keep up we drop the event so
+// emit doesn't back-pressure the orchestrator. Dropped events
+// aren't surfaced — re-subscribing returns a fresh backlog from
+// the canonical events log, so a slow consumer's recovery path
+// is "close + reopen".
 type waiter struct {
-	ch      chan Event
-	dropped bool
+	ch chan Event
 }
 
 // Snapshot is a JSON-friendly view of a Job. EventCount is useful
@@ -216,7 +216,8 @@ func (j *Job) emit(typ, text string) {
 		select {
 		case w.ch <- e:
 		default:
-			w.dropped = true
+			// Drop on slow consumer — no back-pressure into
+			// the orchestrator. Caller recovers via reconnect.
 		}
 	}
 }
@@ -320,15 +321,18 @@ func (m *Manager) Start(kind string, summary map[string]string, fn Func) (*Job, 
 }
 
 // runFnSafely runs fn under a recover so a panic surfaces as a
-// regular error instead of crashing the process. Stack traces
-// are logged for the operator's reference; the panic value is
-// folded into the error returned to job.finish so the manager's
-// terminal-state machinery handles it as an ordinary failure.
+// regular error instead of crashing the process. The panic value
+// + stack go to the server log; the user-visible error is
+// deliberately generic because `r` could be anything (including a
+// formatted string that was carrying secrets at the moment the
+// panic happened) and the WS terminal event lands in the operator's
+// browser. "Check server log" is the right level of detail for the
+// UI; the operator with shell access can correlate.
 func runFnSafely(ctx context.Context, fn Func, job *Job) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			log.Printf("job %s (%s) panic: %v\n%s", job.ID, job.Kind, r, debug.Stack())
-			err = fmt.Errorf("orchestrator panic: %v", r)
+			err = errors.New("orchestrator panic — check server log for details")
 		}
 	}()
 	return fn(ctx, job.emit)
@@ -374,20 +378,6 @@ func (m *Manager) List() []Snapshot {
 	sort.Slice(out, func(i, k int) bool {
 		return out[i].StartedAt.After(out[k].StartedAt)
 	})
-	return out
-}
-
-// ListActive returns snapshots of jobs that are still running.
-// Helpful for the UI's "you have a run in progress" banner so it
-// doesn't have to filter the full list client-side.
-func (m *Manager) ListActive() []Snapshot {
-	all := m.List()
-	out := make([]Snapshot, 0, len(all))
-	for _, s := range all {
-		if s.Status == StatusRunning {
-			out = append(out, s)
-		}
-	}
 	return out
 }
 
