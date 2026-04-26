@@ -136,7 +136,12 @@ func (j *Job) Subscribe() (backlog []Event, events <-chan Event, unsub func()) {
 		// Job already ended — close the channel immediately so the
 		// consumer's range exits after draining the backlog.
 		close(w.ch)
-		return backlog, w.ch, func() {}
+		return backlog, w.ch, func() {
+			// No-op unsub: the waiter was never registered (we
+			// short-circuited before append) and the channel is
+			// already closed above, so there is nothing for the
+			// caller's defer to undo.
+		}
 	}
 	j.waiters = append(j.waiters, w)
 	return backlog, w.ch, j.makeUnsub(w)

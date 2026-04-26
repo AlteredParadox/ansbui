@@ -11,6 +11,11 @@ import (
 	"github.com/AlteredParadox/ansbui/internal/provision"
 )
 
+// errUnknownJobID is returned to clients that hit /jobs/{id} for
+// an ID the manager doesn't have in its registry — typically a
+// stale localStorage entry from before a backend restart.
+var errUnknownJobID = errors.New("unknown job id")
+
 // httpProvisionStart kicks off a provisioning run as a backend
 // job and returns the job ID. The orchestrator goroutine survives
 // the request lifetime — the operator's tab can disconnect at any
@@ -71,7 +76,7 @@ func (s *Server) httpProvisionGet(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	job, ok := s.Jobs.Get(id)
 	if !ok {
-		writeError(w, http.StatusNotFound, errors.New("unknown job id"))
+		writeError(w, http.StatusNotFound, errUnknownJobID)
 		return
 	}
 	writeJSON(w, http.StatusOK, job.Snapshot())
@@ -83,7 +88,7 @@ func (s *Server) httpProvisionCancel(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	job, ok := s.Jobs.Get(id)
 	if !ok {
-		writeError(w, http.StatusNotFound, errors.New("unknown job id"))
+		writeError(w, http.StatusNotFound, errUnknownJobID)
 		return
 	}
 	job.Cancel()
@@ -99,7 +104,7 @@ func (s *Server) wsProvisionStream(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	job, ok := s.Jobs.Get(id)
 	if !ok {
-		writeError(w, http.StatusNotFound, errors.New("unknown job id"))
+		writeError(w, http.StatusNotFound, errUnknownJobID)
 		return
 	}
 	conn, err := wsUpgrader.Upgrade(w, r, nil)

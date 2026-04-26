@@ -71,7 +71,7 @@ function ProvisioningView() {
     let cancelled = false;
     globalThis.AnsbuiAPI.getProvisionJob(id).then(snap => {
       if (cancelled) return;
-      if (!snap || snap.status !== 'running') {
+      if (snap?.status !== 'running') {
         globalThis.localStorage?.removeItem(PROVISION_JOB_KEY);
         return;
       }
@@ -128,25 +128,33 @@ function ProvisioningView() {
     ws.onError(() => fin(false, 'WebSocket error — check backend logs'));
   };
 
+  // validateForm returns either { error } describing the first
+  // failed check or { portNum } with the parsed SSH port. Pulled
+  // out of start() so each function stays under Sonar's S3776
+  // cognitive-complexity ceiling.
+  const validateForm = () => {
+    if (!provider.trim()) return { error: 'Provider is required.' };
+    if (!ip.trim()) return { error: 'IP address is required.' };
+    const portNum = Number.parseInt(port, 10);
+    const portOk = Number.isInteger(portNum) && portNum > 0 && portNum <= 65535;
+    if (!portOk) return { error: 'SSH port must be a valid TCP port.' };
+    if (!username.trim()) return { error: 'Username is required.' };
+    if (!password) return { error: 'Password is required.' };
+    if (useSudo && !sudoPassword) return { error: 'Sudo password is required when using sudo.' };
+    if (!hostname.trim() || !hostname.includes('.')) return { error: 'Hostname must be fully-qualified (include the domain).' };
+    if (!vaultPassword) return { error: 'Vault password is required (used to decrypt porkbun credentials).' };
+    if (reinstallEnabled && !REINSTALL_MATRIX[reinstallOS]) return { error: 'Pick a reinstall OS.' };
+    const versions = REINSTALL_MATRIX[reinstallOS] || [];
+    if (reinstallEnabled && !versions.includes(reinstallVersion)) return { error: 'Pick a reinstall version.' };
+    return { portNum };
+  };
+
   const start = async () => {
     if (running || !globalThis.AnsbuiAPI) return;
     setError('');
-    if (!provider.trim()) { setError('Provider is required.'); return; }
-    if (!ip.trim()) { setError('IP address is required.'); return; }
-    const portNum = Number.parseInt(port, 10);
-    if (!Number.isInteger(portNum) || portNum <= 0 || portNum > 65535) {
-      setError('SSH port must be a valid TCP port.');
-      return;
-    }
-    if (!username.trim()) { setError('Username is required.'); return; }
-    if (!password) { setError('Password is required.'); return; }
-    if (useSudo && !sudoPassword) { setError('Sudo password is required when using sudo.'); return; }
-    if (!hostname.trim() || !hostname.includes('.')) { setError('Hostname must be fully-qualified (include the domain).'); return; }
-    if (!vaultPassword) { setError('Vault password is required (used to decrypt porkbun credentials).'); return; }
-    if (reinstallEnabled) {
-      if (!REINSTALL_MATRIX[reinstallOS]) { setError('Pick a reinstall OS.'); return; }
-      if (!REINSTALL_MATRIX[reinstallOS].includes(reinstallVersion)) { setError('Pick a reinstall version.'); return; }
-    }
+    const v = validateForm();
+    if (v.error) { setError(v.error); return; }
+    const { portNum } = v;
 
     setOutput([]); setRunning(true);
 

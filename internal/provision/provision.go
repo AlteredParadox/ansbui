@@ -166,7 +166,12 @@ func Run(ctx context.Context, pool *sshpool.Pool, srv config.Server, req Request
 	emit("ok", "connected.")
 
 	if req.Reinstall.Enabled {
-		newTarget, err := doReinstall(ctx, target, req, pool, srv, pubKey, ctrlPrivKeyPath, emit)
+		newTarget, err := doReinstall(ctx, target, req, reinstallInputs{
+			pubKey:          pubKey,
+			ctrlPrivKeyPath: ctrlPrivKeyPath,
+			pool:            pool,
+			srv:             srv,
+		}, emit)
 		if err != nil {
 			emit("fail", err.Error())
 			return err
@@ -286,23 +291,35 @@ func bootstrapTarget(ctx context.Context, target *targetSession, pubKey string, 
 	return nil
 }
 
+// reinstallInputs bundles the control-node-side resources that
+// doReinstall needs. Packing them into a struct keeps the
+// function signature under the 7-parameter limit (S107) without
+// dropping the privkey-load step from the orchestrator's progress
+// emits.
+type reinstallInputs struct {
+	pubKey          string
+	ctrlPrivKeyPath string
+	pool            *sshpool.Pool
+	srv             config.Server
+}
+
 // doReinstall reads the configured private key from the control
 // node, then drives reinstall.sh + reboot + wait-for-ssh against
 // the target. On success the caller should swap to the returned
 // session and close the original. The privkey is held only for
 // the duration of this call; runReinstall doesn't retain it.
-func doReinstall(ctx context.Context, target *targetSession, req Request, pool *sshpool.Pool, srv config.Server, pubKey, ctrlPrivKeyPath string, emit func(typ, text string)) (*targetSession, error) {
-	privKeyPath := ctrlPrivKeyPath
+func doReinstall(ctx context.Context, target *targetSession, req Request, in reinstallInputs, emit func(typ, text string)) (*targetSession, error) {
+	privKeyPath := in.ctrlPrivKeyPath
 	if privKeyPath == "" {
 		privKeyPath = defaultControlPrivKeyPath
 	}
 	emit("meta", fmt.Sprintf("Reading control-node private key from %s...", privKeyPath))
-	privKey, err := readControlNodePrivkey(ctx, pool, srv, privKeyPath)
+	privKey, err := readControlNodePrivkey(ctx, in.pool, in.srv, privKeyPath)
 	if err != nil {
 		return nil, err
 	}
 	emit("ok", "private key loaded")
-	return runReinstall(ctx, target, req.Reinstall, pubKey, privKey, req.IP, emit)
+	return runReinstall(ctx, target, req.Reinstall, in.pubKey, privKey, req.IP, emit)
 }
 
 // readControlNodePrivkey reads the SSH private key file from the
