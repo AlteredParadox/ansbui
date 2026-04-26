@@ -328,11 +328,56 @@ function InventoryGraph({ groups, hosts, onSelectGroup }) {
 }
 
 // ---------- Map ----------
-const MAP_REGIONS = [
-  { id: 'us_east', name: 'us-east-1', x: 280, y: 235, label: 'N. Virginia' },
-  { id: 'us_west', name: 'us-west-2', x: 160, y: 225, label: 'Oregon' },
-  { id: 'eu_west', name: 'eu-west-1', x: 500, y: 210, label: 'Ireland' }
-];
+//
+// Each host's `region` field is rendered as "<Subdivision>, <CC>"
+// (set by RegionFromHostname on the backend, or by ipinfo.io
+// enrichment). The map groups hosts by country code, projects each
+// country's centroid onto an equirectangular world view, and
+// renders a dot per country with status counts. Adding a country
+// is just one entry in COUNTRY_CENTROIDS.
+const COUNTRY_CENTROIDS = {
+  US: { lat: 39.8,  lon: -98.5, name: 'United States' },
+  CA: { lat: 56.1,  lon: -106.3, name: 'Canada' },
+  DE: { lat: 51.2,  lon: 10.5,  name: 'Germany' },
+  NL: { lat: 52.1,  lon: 5.3,   name: 'Netherlands' },
+  FI: { lat: 64.0,  lon: 26.0,  name: 'Finland' },
+  IN: { lat: 22.0,  lon: 79.0,  name: 'India' },
+  GB: { lat: 54.0,  lon: -2.0,  name: 'United Kingdom' },
+  RO: { lat: 46.0,  lon: 25.0,  name: 'Romania' },
+  FR: { lat: 46.5,  lon: 2.5,   name: 'France' },
+  IT: { lat: 42.8,  lon: 12.6,  name: 'Italy' },
+  ES: { lat: 40.0,  lon: -3.7,  name: 'Spain' },
+  IE: { lat: 53.1,  lon: -8.2,  name: 'Ireland' },
+  PL: { lat: 52.0,  lon: 19.4,  name: 'Poland' },
+  CH: { lat: 46.8,  lon: 8.2,   name: 'Switzerland' },
+  AT: { lat: 47.5,  lon: 14.5,  name: 'Austria' },
+  SE: { lat: 60.1,  lon: 18.6,  name: 'Sweden' },
+  NO: { lat: 60.5,  lon: 8.5,   name: 'Norway' },
+  JP: { lat: 36.0,  lon: 138.0, name: 'Japan' },
+  SG: { lat: 1.3,   lon: 103.8, name: 'Singapore' },
+  AU: { lat: -25.0, lon: 134.0, name: 'Australia' },
+  BR: { lat: -14.0, lon: -52.0, name: 'Brazil' },
+  ZA: { lat: -30.6, lon: 22.9,  name: 'South Africa' },
+};
+
+// projectCentroid maps (lat, lon) onto the SVG's 900×480 viewBox via
+// equirectangular projection. Distorts at the poles, but for a
+// stylised infrastructure overview it's plenty.
+function projectCentroid(lat, lon) {
+  const x = ((lon + 180) / 360) * 900;
+  const y = ((90 - lat) / 180) * 480;
+  return { x, y };
+}
+
+// countryFromRegion pulls the trailing 2-letter country code out of
+// labels like "Bihor, RO" or "San Francisco, US". Returns null if
+// the region doesn't end with a recognisable CC (e.g. an empty
+// region or a free-form value some operator typed).
+function countryFromRegion(region) {
+  if (!region) return null;
+  const m = /,\s*([A-Z]{2})$/.exec(region);
+  return m ? m[1] : null;
+}
 
 function isLandMass(col, row) {
   const seed = Math.sin(col * 0.28) * 20 + Math.cos(row * 0.5) * 20;
@@ -347,7 +392,25 @@ function countByStatus(hosts, status) {
 }
 
 function InventoryMap({ hosts }) {
-  const byRegion = (rid) => hosts.filter(h => h.region === rid);
+  // Group every host with a recognisable country code; everything
+  // else (no region set, region we don't have a centroid for) stays
+  // in `unmapped` and surfaces as a hint below the map.
+  const byCountry = {};
+  const unmapped = [];
+  for (const h of hosts) {
+    const cc = countryFromRegion(h.region);
+    if (cc && COUNTRY_CENTROIDS[cc]) {
+      (byCountry[cc] = byCountry[cc] || []).push(h);
+    } else {
+      unmapped.push(h);
+    }
+  }
+  const entries = Object.entries(byCountry).map(([cc, hs]) => {
+    const c = COUNTRY_CENTROIDS[cc];
+    const { x, y } = projectCentroid(c.lat, c.lon);
+    return { cc, hs, x, y, name: c.name };
+  });
+
   return (
     <div className="map-wrap">
       <svg width="100%" height="560" viewBox="0 0 900 480" preserveAspectRatio="xMidYMid meet" className="map-svg">
@@ -360,29 +423,32 @@ function InventoryMap({ hosts }) {
           )}
         </g>
 
-        {MAP_REGIONS.map((a, i) => MAP_REGIONS.slice(i + 1).map((b) => (
-          <path key={`${a.id}-${b.id}`}
+        {entries.map((a, i) => entries.slice(i + 1).map((b) => (
+          <path key={`${a.cc}-${b.cc}`}
             d={`M${a.x},${a.y} Q${(a.x + b.x) / 2},${Math.min(a.y, b.y) - 60} ${b.x},${b.y}`}
             fill="none" stroke="var(--accent)" strokeOpacity="0.3" strokeDasharray="3 4" strokeWidth="1"/>
         )))}
 
-        {MAP_REGIONS.map(rg => {
-          const hs = byRegion(rg.id);
+        {entries.map(({ cc, hs, x, y, name }) => {
           const ok = countByStatus(hs, 'ok');
           const warn = countByStatus(hs, 'warn');
           const err = countByStatus(hs, 'err');
+          // Flip the tooltip card to the left when the dot is too
+          // close to the right edge of the viewBox so it doesn't
+          // clip out of the SVG.
+          const tipLeft = x > 720 ? -174 : 14;
           return (
-            <g key={rg.id} className="map-region">
-              <circle cx={rg.x} cy={rg.y} r="28" fill="var(--accent-weak)" stroke="none"/>
-              <circle cx={rg.x} cy={rg.y} r="42" fill="none" stroke="var(--accent)" strokeOpacity="0.3" strokeDasharray="2 3">
+            <g key={cc} className="map-region">
+              <circle cx={x} cy={y} r="28" fill="var(--accent-weak)" stroke="none"/>
+              <circle cx={x} cy={y} r="42" fill="none" stroke="var(--accent)" strokeOpacity="0.3" strokeDasharray="2 3">
                 <animate attributeName="r" values="30;50;30" dur="3s" repeatCount="indefinite"/>
                 <animate attributeName="stroke-opacity" values="0.4;0;0.4" dur="3s" repeatCount="indefinite"/>
               </circle>
-              <circle cx={rg.x} cy={rg.y} r="6" fill="var(--accent)"/>
-              <g transform={`translate(${rg.x + 14}, ${rg.y - 24})`}>
-                <rect x="0" y="0" width="150" height="52" rx="6" fill="var(--bg-2)" stroke="var(--line)"/>
-                <text x="10" y="16" fontSize="11" fontFamily="var(--font-mono)" fontWeight="600" fill="var(--text)">{rg.name}</text>
-                <text x="10" y="29" fontSize="9.5" fill="var(--text-3)">{rg.label} · {hs.length} hosts</text>
+              <circle cx={x} cy={y} r="6" fill="var(--accent)"/>
+              <g transform={`translate(${x + tipLeft}, ${y - 24})`}>
+                <rect x="0" y="0" width="160" height="52" rx="6" fill="var(--bg-2)" stroke="var(--line)"/>
+                <text x="10" y="16" fontSize="11" fontFamily="var(--font-mono)" fontWeight="600" fill="var(--text)">{cc}</text>
+                <text x="10" y="29" fontSize="9.5" fill="var(--text-3)">{name} · {hs.length} hosts</text>
                 <g transform="translate(10, 40)">
                   <circle cx="0" cy="0" r="3" fill="var(--ok)"/>
                   <text x="7" y="3" fontSize="9.5" fontFamily="var(--font-mono)" fill="var(--text-2)">{ok}</text>
@@ -395,7 +461,18 @@ function InventoryMap({ hosts }) {
             </g>
           );
         })}
+
+        {entries.length === 0 && (
+          <text x="450" y="240" textAnchor="middle" fontSize="13" fill="var(--text-3)" fontFamily="var(--font-mono)">
+            No hosts have a recognised region yet — set a cc-ss prefix or enable geoip.
+          </text>
+        )}
       </svg>
+      {unmapped.length > 0 && entries.length > 0 && (
+        <div className="mute" style={{ fontSize: 12, marginTop: 6, paddingLeft: 8 }}>
+          {unmapped.length} host{unmapped.length === 1 ? '' : 's'} not on the map (no recognised region).
+        </div>
+      )}
     </div>
   );
 }
