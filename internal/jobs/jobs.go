@@ -36,9 +36,19 @@ var ErrTooManyRunning = errors.New("too many concurrent jobs — try again when 
 // Default caps for the in-memory registry. Provisioning is rare
 // enough that these are very loose; revisit if the framework
 // grows to host playbook runs too.
+//
+// MaxRunning is set conservatively because every concurrent run
+// shares one cached *ssh.Client to the active control node, and
+// OpenSSH's default MaxSessions per connection is 10. With 4
+// orchestrator goroutines opening sessions sequentially, plus UI
+// polling (vault list, inventory, runs) needing 1-2 sessions
+// concurrently, we comfortably stay under that ceiling. Bumping
+// this without first adding pool-level session retry would risk
+// "administratively prohibited" failures from cli.NewSession when
+// the active control node is busy.
 const (
 	defaultMaxRetained = 100
-	defaultMaxRunning  = 8
+	defaultMaxRunning  = 4
 )
 
 // Status is a job's current lifecycle state.

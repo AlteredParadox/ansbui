@@ -214,7 +214,15 @@ func WriteVault(ctx context.Context, pool *sshpool.Pool, srv config.Server, rel,
 // for vault scripts this is typically the password (consumed by
 // `PASS=$(cat)`) or the password followed by ciphertext / plaintext
 // (split via `read -r`).
+//
+// Wraps ctx with vaultRunTimeout so a wedged ansible-vault
+// invocation can't hang a UI request indefinitely. runRemoteScript
+// no longer applies this bound itself — we own it at the vault
+// boundary so atomic-write callers (provisioning) get the more
+// generous remoteWriteTimeout instead.
 func runVaultScript(ctx context.Context, cli *ssh.Client, script, stdin string) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, vaultRunTimeout)
+	defer cancel()
 	stdout, stderr, err := runRemoteScript(ctx, cli, script, stdin)
 	if err == nil {
 		return stdout, nil

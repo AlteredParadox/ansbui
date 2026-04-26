@@ -10,6 +10,14 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
+// remoteWriteTimeout bounds a single atomic file write to the
+// control node. Generous enough that brief network blips or pool
+// session-saturation don't fail an otherwise-completed
+// provisioning run on the inventory step (the original
+// vaultRunTimeout 30s caused that), but bounded so a wedged
+// session can't hang the orchestrator forever.
+const remoteWriteTimeout = 5 * time.Minute
+
 // WriteRemoteFile is the exported entry point to the same atomic
 // write helper inline-vault edits use — the provisioning package
 // calls it to persist a modified inventory file. Returns trimmed
@@ -56,6 +64,12 @@ func WriteRemoteFile(ctx context.Context, cli *ssh.Client, full, content string)
 // underlying error from the SSH execution. Callers should wrap the
 // error with their own context (e.g. "write playbook %s: %s").
 func writeFileAtomicViaStdin(ctx context.Context, cli *ssh.Client, full, content string) (stderr string, err error) {
+	// Atomic file writes get their own bound (5 min) so a slow
+	// inventory-update step at the end of a long provisioning
+	// run doesn't fail under the 30s vaultRunTimeout that used
+	// to apply implicitly via runRemoteScript.
+	ctx, cancel := context.WithTimeout(ctx, remoteWriteTimeout)
+	defer cancel()
 	q := shellQuote(full)
 	script := fmt.Sprintf(
 		`set -eo pipefail; trap '[ -n "${TMP:-}" ] && rm -f "$TMP"' EXIT; `+
@@ -81,12 +95,13 @@ func writeFileAtomicViaStdin(ctx context.Context, cli *ssh.Client, full, content
 // that bound entirely — useful for vault encrypt/decrypt and for
 // writing files larger than ~95 KB after base64 + JSON envelope.
 //
-// The session is force-closed after vaultRunTimeout to keep a stuck
-// remote shell from hanging the request. ctx cancellation also kills
-// the session promptly.
+// Callers are expected to bound ctx with their own timeout
+// appropriate to the workload (vault: 30s; atomic writes: 5 min).
+// runRemoteScript itself doesn't impose a default — using one
+// helper across both vault and provisioning callers led to a
+// 30s cap silently applying to a small inventory write at the
+// tail of a 30-minute provisioning run.
 func runRemoteScript(ctx context.Context, cli *ssh.Client, script, stdin string) (stdout, stderr string, err error) {
-	ctx, cancel := context.WithTimeout(ctx, vaultRunTimeout)
-	defer cancel()
 	sess, err := cli.NewSession()
 	if err != nil {
 		return "", "", fmt.Errorf("new session: %w", err)

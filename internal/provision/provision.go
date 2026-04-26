@@ -119,6 +119,12 @@ func Run(ctx context.Context, pool *sshpool.Pool, srv config.Server, req Request
 	// record all benefit from a single form. Mixed-case input from
 	// the operator (`Vps01.Example.com`) is silently normalised.
 	req.Hostname = strings.ToLower(strings.TrimSpace(req.Hostname))
+	// Trim req.IP too. Validate's net.ParseIP runs on a trimmed
+	// copy and accepts " 1.2.3.4 ", but the un-trimmed value
+	// flows into lockTarget's key, dialPasswordTarget's address,
+	// and the porkbun A-record content — all of which fail or
+	// behave wrong with surrounding whitespace.
+	req.IP = strings.TrimSpace(req.IP)
 	// A forged / stale client could submit `username=root` together
 	// with `useSudo=true`. Root never needs sudo; coerce to false so
 	// the orchestrator skips the wrapper entirely instead of running

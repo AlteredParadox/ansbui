@@ -2,7 +2,6 @@ package api
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"net/http"
 	"time"
@@ -29,8 +28,11 @@ func (s *Server) httpProvisionStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req provision.Request
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, err)
+	if !decodeJSONBody(w, r, &req) {
+		// decodeJSONBody applies DisallowUnknownFields + the
+		// trailing-data check the vault handlers use, so a
+		// misspelled field gets a 400 instead of silently
+		// becoming a zero-value that fails Validate later.
 		return
 	}
 	// Validate before creating the job so a malformed/oversized

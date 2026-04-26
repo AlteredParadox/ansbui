@@ -11,6 +11,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -80,7 +81,37 @@ func (s *Server) Handler() http.Handler {
 
 	mux.Handle("/", s.staticHandler())
 
-	return withLogging(mux)
+	return withLogging(withOriginGuard(mux))
+}
+
+// withOriginGuard rejects state-mutating HTTP requests whose Origin
+// header is set and doesn't match the request's Host. ansbui has
+// no auth — anyone reaching the port can already drive
+// ansible-playbook and now SSH-bootstrap fresh boxes — so the
+// deployment posture is "behind a VPN / on localhost". But CORS
+// quirks let a malicious origin fire-and-forget POSTs from the
+// operator's browser if they have ansbui open in another tab; this
+// guard mirrors the same-origin check the WebSocket upgrader
+// already enforces. Browser GET requests don't carry Origin
+// universally, and curl/CLI clients don't set it at all, so we
+// only reject when the header is present and wrong — that's
+// enough to defeat the cross-origin browser exploit path without
+// breaking non-browser callers.
+func withOriginGuard(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodPatch:
+			origin := r.Header.Get("Origin")
+			if origin != "" {
+				u, err := url.Parse(origin)
+				if err != nil || u.Host == "" || u.Host != r.Host {
+					writeError(w, http.StatusForbidden, errors.New("cross-origin request rejected"))
+					return
+				}
+			}
+		}
+		h.ServeHTTP(w, r)
+	})
 }
 
 // Body size caps for POST / PUT handlers. Control-plane payloads
