@@ -251,6 +251,9 @@ func validateRequest(req Request) error {
 	if !strings.Contains(req.Hostname, ".") {
 		return errors.New("hostname must be fully-qualified (include the domain)")
 	}
+	if strings.ContainsAny(req.Hostname, " \t") {
+		return errors.New("hostname must not contain whitespace")
+	}
 	return nil
 }
 

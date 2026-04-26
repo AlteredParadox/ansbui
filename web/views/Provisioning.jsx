@@ -71,6 +71,15 @@ function ProvisioningView() {
       finished = true;
       append({ t: ok ? 'done' : 'fail', text });
       setRunning(false);
+      // Drop the secrets out of React state once the run is over.
+      // The form is the only path that holds three operator-supplied
+      // passwords simultaneously; clearing them on every terminal
+      // event (success or failure) keeps the next provisioning
+      // session — or a forgotten browser tab — from showing the
+      // last operator's input pre-filled.
+      setPassword('');
+      setSudoPassword('');
+      setVaultPassword('');
       ws.close();
       streamRef.current = null;
     };
