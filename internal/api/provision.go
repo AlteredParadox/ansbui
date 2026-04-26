@@ -128,6 +128,12 @@ func (s *Server) wsProvisionStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer conn.Close()
+	// Bound inbound WS message size so a peer can't OOM the
+	// server by sending a giant frame — gorilla's default is
+	// unlimited. We don't read messages from the peer here
+	// (only NextReader for the disconnect signal), but the
+	// limit applies to that path too.
+	conn.SetReadLimit(wsMaxMessageBytes)
 
 	backlog, events, unsub := job.Subscribe()
 	defer unsub()

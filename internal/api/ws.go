@@ -21,6 +21,17 @@ var wsUpgrader = websocket.Upgrader{
 	CheckOrigin:     sameOriginCheck,
 }
 
+// wsMaxMessageBytes bounds a single inbound WebSocket message —
+// gorilla/websocket's default ReadLimit is unlimited, which would
+// let a malicious peer (or a non-browser client whose missing
+// Origin header bypasses the same-origin check) buffer arbitrarily
+// large frames into the server's memory. The provisioning request
+// envelope is a few hundred bytes; even an adhoc/playbook
+// JSON-decoded request maxes out at low-KB. 64 KiB matches the
+// HTTP smallBody ceiling and stays comfortably above any
+// legitimate request.
+const wsMaxMessageBytes = 64 * 1024
+
 // sameOriginCheck compares the parsed Origin header host:port to the
 // request's Host. url.Parse makes the match resistant to the
 // HasSuffix-bypass trick ("http://evil.com//legit.host:8787"). A
@@ -67,6 +78,7 @@ func runWebSocket[T any](
 		return
 	}
 	defer conn.Close()
+	conn.SetReadLimit(wsMaxMessageBytes)
 
 	var req T
 	if err := conn.ReadJSON(&req); err != nil {

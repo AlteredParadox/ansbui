@@ -48,9 +48,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/health", s.health)
 	mux.HandleFunc("GET /api/servers", s.listServers)
 	mux.HandleFunc("POST /api/servers", limitBody(smallBody, s.upsertServer))
-	mux.HandleFunc("DELETE /api/servers/{id}", s.deleteServer)
-	mux.HandleFunc("POST /api/servers/{id}/activate", s.activateServer)
-	mux.HandleFunc("POST /api/servers/{id}/test", s.testServer)
+	mux.HandleFunc("DELETE /api/servers/{id}", limitBody(emptyBody, s.deleteServer))
+	mux.HandleFunc("POST /api/servers/{id}/activate", limitBody(emptyBody, s.activateServer))
+	mux.HandleFunc("POST /api/servers/{id}/test", limitBody(emptyBody, s.testServer))
 	mux.HandleFunc("GET /api/settings", s.getSettings)
 	mux.HandleFunc("POST /api/settings", limitBody(smallBody, s.setSettings))
 
@@ -76,7 +76,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/provision/start", limitBody(smallBody, s.httpProvisionStart))
 	mux.HandleFunc("GET /api/provision/jobs", s.httpProvisionList)
 	mux.HandleFunc("GET /api/provision/jobs/{id}", s.httpProvisionGet)
-	mux.HandleFunc("POST /api/provision/jobs/{id}/cancel", s.httpProvisionCancel)
+	mux.HandleFunc("POST /api/provision/jobs/{id}/cancel", limitBody(emptyBody, s.httpProvisionCancel))
 	mux.HandleFunc("GET /api/provision/jobs/{id}/stream", s.wsProvisionStream)
 
 	mux.Handle("/", s.staticHandler())
@@ -84,23 +84,42 @@ func (s *Server) Handler() http.Handler {
 	return withLogging(withOriginGuard(mux))
 }
 
-// withOriginGuard rejects state-mutating HTTP requests whose Origin
-// header is set and doesn't match the request's Host. ansbui has
-// no auth — anyone reaching the port can already drive
-// ansible-playbook and now SSH-bootstrap fresh boxes — so the
-// deployment posture is "behind a VPN / on localhost". But CORS
-// quirks let a malicious origin fire-and-forget POSTs from the
-// operator's browser if they have ansbui open in another tab; this
-// guard mirrors the same-origin check the WebSocket upgrader
-// already enforces. Browser GET requests don't carry Origin
-// universally, and curl/CLI clients don't set it at all, so we
-// only reject when the header is present and wrong — that's
-// enough to defeat the cross-origin browser exploit path without
-// breaking non-browser callers.
+// withOriginGuard rejects HTTP requests whose Origin header is set
+// and doesn't match the request's Host. ansbui has no auth —
+// anyone reaching the port can already drive ansible-playbook and
+// now SSH-bootstrap fresh boxes — so the deployment posture is
+// "behind a VPN / on localhost". But CORS quirks let a malicious
+// origin fire-and-forget POSTs (and, for the provisioning read
+// endpoints that surface recent target IPs/hostnames, GETs) from
+// the operator's browser if they have ansbui open in another tab.
+// This guard mirrors the same-origin check the WebSocket upgrader
+// enforces.
+//
+// Coverage:
+//   - All state-mutating verbs (POST/PUT/DELETE/PATCH) on every
+//     route, since they all change durable state.
+//   - GETs on /api/provision/* because the job summaries leak
+//     recent provisioning targets (IPs, hostnames, providers) to
+//     anyone able to elicit a same-cookie-scope read from the
+//     operator's browser. Other GETs are intentionally not
+//     guarded — inventory/runs/etc. are designed to be readable.
+//
+// Browsers don't carry Origin on every GET, and curl/CLI clients
+// don't set it at all — we only reject when the header is present
+// and wrong, so non-browser callers (the deployment-time admin
+// path) keep working.
 func withOriginGuard(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		guarded := false
 		switch r.Method {
 		case http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodPatch:
+			guarded = true
+		case http.MethodGet, http.MethodHead:
+			if strings.HasPrefix(r.URL.Path, "/api/provision/") {
+				guarded = true
+			}
+		}
+		if guarded {
 			origin := r.Header.Get("Origin")
 			if origin != "" {
 				u, err := url.Parse(origin)
@@ -117,7 +136,12 @@ func withOriginGuard(h http.Handler) http.Handler {
 // Body size caps for POST / PUT handlers. Control-plane payloads
 // (server defs, settings, vault passwords) are tiny; playbook +
 // vault-write bodies can reasonably be a few hundred kilobytes.
+// emptyBody applies to verbs whose handler ignores the body (e.g.
+// POST /activate, DELETE) — capping near-zero stops a malicious
+// client from streaming arbitrary bytes onto the goroutine that
+// http.Server still has to drain.
 const (
+	emptyBody = 1024
 	smallBody = 64 * 1024
 	largeBody = 1 * 1024 * 1024
 )
