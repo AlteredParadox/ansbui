@@ -23,12 +23,13 @@ const REINSTALL_MATRIX = {
 };
 const REINSTALL_OS_LIST = Object.keys(REINSTALL_MATRIX);
 
-// IPV4_RE matches dotted-quad with each octet 0-255. The backend's
-// Validate runs the canonical net.ParseIP check; this is the same
-// rule mirrored client-side so the operator gets immediate
-// feedback for a hostname / typo / IPv6 paste instead of the
-// 400-after-submit. Bounded — no nested repetition (S5852-safe).
-const IPV4_RE = /^(?:(?:25[0-5]|2[0-4]\d|[01]?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d?\d)$/;
+// IPV4_RE is the cheap shape check — four dot-separated runs of
+// digits. We deliberately don't enforce 0-255 per octet here
+// (S5843 flags that as too complex); the backend's net.ParseIP
+// is the canonical check and rejects 999.0.0.0 etc. The point of
+// this regex is to catch the common UX mistakes — pasted hostname,
+// IPv6 literal — fast, before submit.
+const IPV4_RE = /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/;
 
 function ProvisioningView() {
   const [provider, setProvider] = useStateProv('');

@@ -222,22 +222,8 @@ func Validate(req Request) error {
 	if strings.TrimSpace(req.Provider) == "" {
 		return errors.New("provider is required")
 	}
-	trimmedIP := strings.TrimSpace(req.IP)
-	if trimmedIP == "" {
-		return errors.New("IP address is required")
-	}
-	// porkbun A records are IPv4-only and the SSH bootstrap
-	// connects directly to this address — accept only dotted-quad
-	// literals. Rejecting hostnames stops a DNS change from moving
-	// the box mid-run; rejecting IPv6 (including IPv4-mapped
-	// `::ffff:1.2.3.4` forms that net.ParseIP would otherwise
-	// accept) avoids a confusing failure later when porkbun
-	// rejects the A record content.
-	if strings.Contains(trimmedIP, ":") {
-		return errors.New("IP must be in dotted-quad form (e.g. 203.0.113.42) — IPv6 addresses, including IPv4-mapped forms like ::ffff:1.2.3.4, are not supported")
-	}
-	if ip := net.ParseIP(trimmedIP); ip == nil || ip.To4() == nil {
-		return errors.New("IP must be a valid IPv4 literal address — hostnames are rejected so DNS changes can't move the box mid-run")
+	if err := validateIP(req.IP); err != nil {
+		return err
 	}
 	if req.Port <= 0 || req.Port > 65535 {
 		return errors.New("invalid SSH port")
@@ -251,17 +237,11 @@ func Validate(req Request) error {
 	if req.UseSudo && req.SudoPassword == "" && req.Username != "root" {
 		return errors.New("sudo password is required when 'use sudo' is checked")
 	}
-	if strings.TrimSpace(req.Hostname) == "" {
-		return errors.New("hostname is required")
+	if err := validateHostname(req.Hostname); err != nil {
+		return err
 	}
 	if strings.TrimSpace(req.VaultPassword) == "" {
 		return errors.New("vault password is required (used to decrypt porkbun credentials)")
-	}
-	if !strings.Contains(req.Hostname, ".") {
-		return errors.New("hostname must be fully-qualified (include the domain)")
-	}
-	if strings.ContainsAny(req.Hostname, " \t") {
-		return errors.New("hostname must not contain whitespace")
 	}
 	// Per-field length caps — every value here is summarised /
 	// retained in the in-memory job registry, and the redact pass
@@ -271,9 +251,6 @@ func Validate(req Request) error {
 	if err := boundLength("provider", req.Provider, 64); err != nil {
 		return err
 	}
-	if err := boundLength("hostname", req.Hostname, 253); err != nil {
-		return err
-	}
 	if err := boundLength("username", req.Username, 64); err != nil {
 		return err
 	}
@@ -281,6 +258,43 @@ func Validate(req Request) error {
 		return err
 	}
 	return nil
+}
+
+// validateIP enforces the IPv4-literal contract: porkbun A records
+// are IPv4-only and the SSH bootstrap connects directly to this
+// address. We reject hostnames (DNS could move the box mid-run)
+// and IPv6 (including IPv4-mapped `::ffff:1.2.3.4` forms that
+// net.ParseIP would otherwise accept) to avoid a confusing failure
+// later when porkbun rejects the A-record content.
+func validateIP(raw string) error {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return errors.New("IP address is required")
+	}
+	if strings.Contains(s, ":") {
+		return errors.New("IP must be in dotted-quad form (e.g. 203.0.113.42) — IPv6 addresses, including IPv4-mapped forms like ::ffff:1.2.3.4, are not supported")
+	}
+	if ip := net.ParseIP(s); ip == nil || ip.To4() == nil {
+		return errors.New("IP must be a valid IPv4 literal address — hostnames are rejected so DNS changes can't move the box mid-run")
+	}
+	return nil
+}
+
+// validateHostname applies all hostname-shape rules in one place
+// (required, FQDN, no whitespace, length cap). Run wraps the
+// result so the API layer can return a 400 before allocating a
+// job slot.
+func validateHostname(h string) error {
+	if strings.TrimSpace(h) == "" {
+		return errors.New("hostname is required")
+	}
+	if !strings.Contains(h, ".") {
+		return errors.New("hostname must be fully-qualified (include the domain)")
+	}
+	if strings.ContainsAny(h, " \t") {
+		return errors.New("hostname must not contain whitespace")
+	}
+	return boundLength("hostname", h, 253)
 }
 
 func boundLength(name, value string, max int) error {
