@@ -92,11 +92,25 @@ func main() {
 	log.Printf("shutting down…")
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	// Cancel any in-flight provisioning runs so they emit their own
-	// "cancelled" terminal events before the binary exits, then
-	// wind down the HTTP server.
+	// Run the two shutdowns in parallel. Sequential ordering is
+	// wrong either way:
+	//  - jobMgr.Shutdown first leaves the HTTP listener accepting
+	//    new POST /api/provision/start requests during the wait
+	//    loop, so a job sneaks in past the snapshot.
+	//  - httpSrv.Shutdown first blocks until in-flight WS handlers
+	//    exit, but those handlers only exit when their job's
+	//    events chan closes, which only happens after jobMgr
+	//    cancels them.
+	// Run in parallel so the listener stops accepting immediately
+	// (closing the registry to new starts) while job cancellation
+	// frees the WS handlers httpSrv.Shutdown is waiting on.
+	httpDone := make(chan struct{})
+	go func() {
+		_ = httpSrv.Shutdown(shutdownCtx)
+		close(httpDone)
+	}()
 	jobMgr.Shutdown(shutdownCtx)
-	_ = httpSrv.Shutdown(shutdownCtx)
+	<-httpDone
 }
 
 // warnIfExposed prints a startup warning when the listen address is
