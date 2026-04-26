@@ -17,6 +17,7 @@ import (
 
 	"github.com/AlteredParadox/ansbui/internal/ansible"
 	"github.com/AlteredParadox/ansbui/internal/config"
+	"github.com/AlteredParadox/ansbui/internal/jobs"
 	"github.com/AlteredParadox/ansbui/internal/sshpool"
 )
 
@@ -25,6 +26,7 @@ type Server struct {
 	Config  *config.Manager
 	Pool    *sshpool.Pool
 	Runs    *ansible.Recorder
+	Jobs    *jobs.Manager
 	WebRoot fs.FS
 
 	// geo is constructed lazily on first use so apps that never turn
@@ -70,7 +72,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/vault/inline/upsert", limitBody(largeBody, s.upsertInlineVault))
 	mux.HandleFunc("GET /api/adhoc/stream", s.wsAdhoc)
 	mux.HandleFunc("GET /api/playbook/stream", s.wsPlaybook)
-	mux.HandleFunc("GET /api/provision/stream", s.wsProvision)
+	mux.HandleFunc("POST /api/provision/start", limitBody(smallBody, s.httpProvisionStart))
+	mux.HandleFunc("GET /api/provision/jobs", s.httpProvisionList)
+	mux.HandleFunc("GET /api/provision/jobs/{id}", s.httpProvisionGet)
+	mux.HandleFunc("POST /api/provision/jobs/{id}/cancel", s.httpProvisionCancel)
+	mux.HandleFunc("GET /api/provision/jobs/{id}/stream", s.wsProvisionStream)
 
 	mux.Handle("/", s.staticHandler())
 

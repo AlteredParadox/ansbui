@@ -60,25 +60,62 @@
 
   api.gatherFacts = (host) => json(`/api/facts?host=${encodeURIComponent(host)}`);
 
-  // Open a WebSocket to stream ad-hoc / playbook / provisioning output.
+  // Open a WebSocket to stream ad-hoc / playbook output. Provisioning
+  // uses the job-backed flow below — its lifecycle is decoupled from
+  // any single WS attachment.
   const STREAM_PATHS = {
     adhoc: '/api/adhoc/stream',
-    playbook: '/api/playbook/stream',
-    provision: '/api/provision/stream'
+    playbook: '/api/playbook/stream'
   };
   api.openStream = (kind, request) => {
     const wsProto = globalThis.location.protocol === 'https:' ? 'wss' : 'ws';
     const path = STREAM_PATHS[kind];
     if (!path) {
       // Refusing the open is the right move — the form payload
-      // for provisioning carries multiple secrets and a typo in
-      // `kind` would otherwise have shipped them to whichever
-      // handler the fallback selected.
+      // could carry secrets and a typo in `kind` would otherwise
+      // have shipped them to whichever handler the fallback
+      // selected.
       throw new Error(`api.openStream: unknown stream kind "${kind}"`);
     }
     const ws = new WebSocket(`${wsProto}://${globalThis.location.host}${path}`);
     const listeners = new Set();
     ws.addEventListener('open', () => ws.send(JSON.stringify(request)));
+    ws.addEventListener('message', (e) => {
+      let msg;
+      try { msg = JSON.parse(e.data); } catch { return; }
+      listeners.forEach(fn => fn(msg));
+    });
+    return {
+      onEvent: (fn) => { listeners.add(fn); return () => listeners.delete(fn); },
+      close: () => ws.close(),
+      onClose: (fn) => ws.addEventListener('close', fn),
+      onError: (fn) => ws.addEventListener('error', fn),
+      readyState: () => ws.readyState
+    };
+  };
+
+  // Provisioning is backed by a server-side job manager so the run
+  // outlives the operator's tab — important for the upcoming
+  // reinstall flow which reboots the target and waits up to ~30
+  // minutes for SSH to come back. Lifecycle:
+  //   1. startProvisionJob(payload)    POST creates the job
+  //   2. attachProvisionJob(jobId)     WS subscribes (replay + tail)
+  //   3. cancelProvisionJob(jobId)     POST signals ctx-cancel
+  // Closing the WS does NOT cancel; only the explicit cancel call
+  // does. listProvisionJobs / getProvisionJob support the "you
+  // have an active run" UI surface on view re-mount.
+  api.startProvisionJob = (payload) => json('/api/provision/start', {
+    method: 'POST', body: JSON.stringify(payload)
+  });
+  api.listProvisionJobs = () => json('/api/provision/jobs');
+  api.getProvisionJob = (id) => json(`/api/provision/jobs/${encodeURIComponent(id)}`);
+  api.cancelProvisionJob = (id) => json(`/api/provision/jobs/${encodeURIComponent(id)}/cancel`, {
+    method: 'POST'
+  });
+  api.attachProvisionJob = (id) => {
+    const wsProto = globalThis.location.protocol === 'https:' ? 'wss' : 'ws';
+    const ws = new WebSocket(`${wsProto}://${globalThis.location.host}/api/provision/jobs/${encodeURIComponent(id)}/stream`);
+    const listeners = new Set();
     ws.addEventListener('message', (e) => {
       let msg;
       try { msg = JSON.parse(e.data); } catch { return; }

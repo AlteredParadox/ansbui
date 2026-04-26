@@ -86,23 +86,19 @@ func lockTarget(key string) *sync.Mutex {
 	return m
 }
 
-// Run executes the full provisioning workflow, streaming progress
-// events on `out`. The channel is closed when Run returns. ctx
-// cancels the workflow.
-func Run(ctx context.Context, pool *sshpool.Pool, srv config.Server, req Request, out chan<- ansible.Event) error {
-	defer close(out)
+// Run executes the full provisioning workflow, invoking emit for
+// every progress event. ctx cancels the workflow; emit must be
+// safe to call concurrently with itself only if the caller says so
+// (the jobs.Manager hosts emit under its mutex).
+//
+// emit's text is redacted for password:/passphrase: shapes before
+// it reaches the caller. stderr from sudo/sshd/apt sometimes
+// includes the operator's password — the redact pass guards
+// against future debug-log regressions and against the live event
+// landing in browser memory in a recoverable form.
+func Run(ctx context.Context, pool *sshpool.Pool, srv config.Server, req Request, rawEmit func(typ, text string)) error {
 	emit := func(t, text string) {
-		// stderr from sudo / sshd / apt sometimes contains the
-		// password the operator typed — RedactText strips
-		// password:/passphrase: shapes before the event lands in
-		// the WebSocket. The orchestrator never persists events,
-		// but the redact pass guards against future "let's add a
-		// debug log here" regressions and against the live event
-		// landing in browser memory in a recoverable form.
-		select {
-		case out <- ansible.Event{Type: t, Text: ansible.RedactText(text)}:
-		case <-ctx.Done():
-		}
+		rawEmit(t, ansible.RedactText(text))
 	}
 
 	if err := validateRequest(req); err != nil {

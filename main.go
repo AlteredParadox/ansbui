@@ -28,6 +28,7 @@ import (
 	"github.com/AlteredParadox/ansbui/internal/ansible"
 	"github.com/AlteredParadox/ansbui/internal/api"
 	"github.com/AlteredParadox/ansbui/internal/config"
+	"github.com/AlteredParadox/ansbui/internal/jobs"
 	"github.com/AlteredParadox/ansbui/internal/sshpool"
 )
 
@@ -62,10 +63,12 @@ func main() {
 		log.Fatalf("embed web: %v", err)
 	}
 
+	jobMgr := jobs.New()
 	srv := &api.Server{
 		Config:  cfg,
 		Pool:    pool,
 		Runs:    runs,
+		Jobs:    jobMgr,
 		WebRoot: webSub,
 	}
 
@@ -89,6 +92,10 @@ func main() {
 	log.Printf("shutting down…")
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+	// Cancel any in-flight provisioning runs so they emit their own
+	// "cancelled" terminal events before the binary exits, then
+	// wind down the HTTP server.
+	jobMgr.Shutdown(shutdownCtx)
 	_ = httpSrv.Shutdown(shutdownCtx)
 }
 

@@ -1,9 +1,14 @@
 // Provisioning view — operator enters the credentials for a fresh
 // VPS, and the backend orchestrates DNS + SSH bootstrap + ansible
-// user setup + sshd hardening + inventory registration. Step output
-// streams back over the same event channel adhoc/playbook runs use.
+// user setup + sshd hardening + inventory registration. The run
+// itself is owned by a backend job (internal/jobs); this view kicks
+// it off, then attaches a WebSocket for live output. Closing the
+// tab leaves the job running — we re-attach via localStorage on
+// mount so a 30-minute reinstall isn't lost to a refresh.
 
 const { useState: useStateProv, useEffect: useEffectProv, useRef: useRefProv } = React;
+
+const PROVISION_JOB_KEY = 'ansbui.provisionJobId';
 
 function ProvisioningView() {
   const [provider, setProvider] = useStateProv('');
@@ -18,6 +23,7 @@ function ProvisioningView() {
   const [running, setRunning] = useStateProv(false);
   const [output, setOutput] = useStateProv([]);
   const [error, setError] = useStateProv('');
+  const [activeSummary, setActiveSummary] = useStateProv(null);
   const streamRef = useRefProv(null);
   const outRef = useRefProv(null);
 
@@ -31,7 +37,73 @@ function ProvisioningView() {
     outRef.current?.scrollTo({ top: outRef.current.scrollHeight });
   }, [output]);
 
-  const start = () => {
+  // On mount: if we left a run going in a previous tab/session,
+  // re-attach instead of starting fresh. The backend job survives
+  // closed tabs by design — see internal/jobs.
+  useEffectProv(() => {
+    const id = globalThis.localStorage?.getItem(PROVISION_JOB_KEY);
+    if (!id || !globalThis.AnsbuiAPI) return;
+    let cancelled = false;
+    globalThis.AnsbuiAPI.getProvisionJob(id).then(snap => {
+      if (cancelled) return;
+      if (!snap || snap.status !== 'running') {
+        globalThis.localStorage?.removeItem(PROVISION_JOB_KEY);
+        return;
+      }
+      setActiveSummary(snap.summary || {});
+      setRunning(true);
+      attachStream(id);
+    }).catch(() => {
+      globalThis.localStorage?.removeItem(PROVISION_JOB_KEY);
+    });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const append = (entry) => setOutput(prev => [...prev, entry]);
+
+  const finish = (ok, text) => {
+    append({ t: ok ? 'done' : 'fail', text });
+    setRunning(false);
+    setActiveSummary(null);
+    globalThis.localStorage?.removeItem(PROVISION_JOB_KEY);
+    // Drop the secrets out of React state once the run is over.
+    // The form is the only path that holds three operator-supplied
+    // passwords simultaneously; clearing on every terminal event
+    // keeps the next provisioning session — or a forgotten browser
+    // tab — from showing the last operator's input pre-filled.
+    setPassword('');
+    setSudoPassword('');
+    setVaultPassword('');
+    if (streamRef.current) streamRef.current.close();
+    streamRef.current = null;
+  };
+
+  // attachStream wires a fresh WebSocket to a job and routes its
+  // events into the terminal. The same handler powers both the
+  // initial start (via start()) and the re-attach-on-mount path.
+  // Local `finished` latch lets us treat an unexpected close as a
+  // failure without double-firing finish().
+  const attachStream = (jobId) => {
+    const ws = globalThis.AnsbuiAPI.attachProvisionJob(jobId);
+    streamRef.current = ws;
+    let finished = false;
+    const fin = (ok, text) => {
+      if (finished) return;
+      finished = true;
+      finish(ok, text);
+    };
+    ws.onEvent((evt) => {
+      if (evt.type === 'meta') append({ t: 'meta', text: evt.text || '' });
+      else if (evt.type === 'ok') append({ t: 'ok', text: evt.text || '' });
+      else if (evt.type === 'fail' || evt.type === 'error') fin(false, evt.text || 'failed');
+      else if (evt.type === 'done') fin(true, evt.text || 'done');
+    });
+    ws.onClose(() => { if (!finished) fin(false, 'connection closed before completion'); });
+    ws.onError(() => fin(false, 'WebSocket error — check backend logs'));
+  };
+
+  const start = async () => {
     if (running || !globalThis.AnsbuiAPI) return;
     setError('');
     if (!provider.trim()) { setError('Provider is required.'); return; }
@@ -48,8 +120,6 @@ function ProvisioningView() {
     if (!vaultPassword) { setError('Vault password is required (used to decrypt porkbun credentials).'); return; }
 
     setOutput([]); setRunning(true);
-    const log = [];
-    const append = (entry) => { log.push(entry); setOutput([...log]); };
 
     const payload = {
       provider: provider.trim(),
@@ -63,40 +133,34 @@ function ProvisioningView() {
       vaultPassword
     };
 
-    const ws = globalThis.AnsbuiAPI.openStream('provision', payload);
-    streamRef.current = ws;
-    let finished = false;
-    const finish = (ok, text) => {
-      if (finished) return;
-      finished = true;
-      append({ t: ok ? 'done' : 'fail', text });
+    try {
+      const res = await globalThis.AnsbuiAPI.startProvisionJob(payload);
+      const jobId = res?.jobId;
+      if (!jobId) {
+        setRunning(false);
+        setError('Backend did not return a job ID.');
+        return;
+      }
+      globalThis.localStorage?.setItem(PROVISION_JOB_KEY, jobId);
+      attachStream(jobId);
+    } catch (e) {
       setRunning(false);
-      // Drop the secrets out of React state once the run is over.
-      // The form is the only path that holds three operator-supplied
-      // passwords simultaneously; clearing them on every terminal
-      // event (success or failure) keeps the next provisioning
-      // session — or a forgotten browser tab — from showing the
-      // last operator's input pre-filled.
-      setPassword('');
-      setSudoPassword('');
-      setVaultPassword('');
-      ws.close();
-      streamRef.current = null;
-    };
-    ws.onEvent((evt) => {
-      if (evt.type === 'meta') append({ t: 'meta', text: evt.text || '' });
-      else if (evt.type === 'ok') append({ t: 'ok', text: evt.text || '' });
-      else if (evt.type === 'fail' || evt.type === 'error') finish(false, evt.text || 'failed');
-      else if (evt.type === 'done') finish(true, evt.text || 'done');
-    });
-    ws.onClose(() => { if (!finished) finish(false, 'connection closed before completion'); });
-    ws.onError(() => finish(false, 'WebSocket error — check backend logs'));
+      setError(e.message || String(e));
+    }
   };
 
-  const cancel = () => {
-    if (streamRef.current) streamRef.current.close();
-    streamRef.current = null;
-    setRunning(false);
+  // Cancel signals the backend job. We don't close the WS here —
+  // the orchestrator is expected to honour ctx-cancel and emit its
+  // own terminal event, which routes through the normal finish()
+  // path.
+  const cancel = async () => {
+    const id = globalThis.localStorage?.getItem(PROVISION_JOB_KEY);
+    if (!id) return;
+    try {
+      await globalThis.AnsbuiAPI.cancelProvisionJob(id);
+    } catch (e) {
+      setError(`cancel failed: ${e.message || e}`);
+    }
   };
 
   return (
@@ -109,6 +173,14 @@ function ProvisioningView() {
           </div>
         </div>
       </div>
+
+      {activeSummary && (
+        <div className="card mono" style={{ padding: 10, marginTop: 10, fontSize: 12 }}>
+          <span className="mute">re-attached to active run:</span>{' '}
+          {activeSummary.hostname || activeSummary.ip || 'provisioning'}
+          {activeSummary.provider ? <span className="mute"> · {activeSummary.provider}</span> : null}
+        </div>
+      )}
 
       <div className="card" style={{ padding: 16, marginTop: 12, maxWidth: 720 }}>
         {error && <div className="cm-error mono" style={{ marginBottom: 10 }}>{error}</div>}
@@ -195,6 +267,7 @@ function ProvisioningView() {
           <div className="terminal-empty mute-2 mono">
             <div># fill in the form and press Provision</div>
             <div># DNS check, SSH bootstrap, ansible-user setup, sshd flip, inventory edit — streamed live</div>
+            <div># the run lives on the backend — you can close this tab and re-attach later</div>
           </div>
         )}
         {output.map((line, i) => (
