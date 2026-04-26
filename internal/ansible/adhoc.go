@@ -69,13 +69,46 @@ func RunAdhoc(ctx context.Context, pool *sshpool.Pool, srv config.Server, req Ad
 // req.VaultPassword is set, the password is piped via stdin to a
 // bash-wrapped script that exposes it on /dev/fd/3 for
 // ansible-playbook's --vault-password-file. Argv stays clean.
+//
+// Before invoking ansible-playbook, the orchestrator re-reads the
+// playbook from disk and auto-extends `--limit` with any hosts
+// declared via the `# ansbui-include:` annotation. The merge is
+// run-time on the backend so the source of truth is always the
+// file on disk — a stale frontend snapshot can't drift the
+// effective target set. A meta event surfaces the merge so the
+// operator sees what's been added.
 func RunPlaybook(ctx context.Context, pool *sshpool.Pool, srv config.Server, req PlaybookRequest, out chan<- Event) error {
 	defer close(out)
+	if include, err := loadIncludeHosts(ctx, pool, srv, req.Path); err != nil {
+		// Surface but don't fail: the playbook may still run fine
+		// without auto-include if the parse glitched (the actual
+		// ansible-playbook read happens server-side as the user
+		// running the SSH session, separate failure mode).
+		out <- Event{Type: "meta", Text: "auto-include lookup skipped: " + err.Error()}
+	} else if len(include) > 0 {
+		merged := MergeLimitHosts(req.Limit, include)
+		if merged != req.Limit {
+			out <- Event{Type: "meta", Text: "auto-including hosts from playbook annotation: " + strings.Join(include, ", ")}
+		}
+		req.Limit = merged
+	}
 	cmd, err := buildPlaybookCmd(srv, req)
 	if err != nil {
 		return err
 	}
 	return runStreaming(ctx, pool, srv, cmd, req.VaultPassword, out)
+}
+
+// loadIncludeHosts reads the playbook fresh from disk and returns
+// its parsed Include set. Decoupled from LoadPlaybook so the
+// run-time path doesn't pay the JSON-envelope cost; uses the same
+// parser via annotateFromYAML.
+func loadIncludeHosts(ctx context.Context, pool *sshpool.Pool, srv config.Server, rel string) ([]string, error) {
+	pb, err := LoadPlaybook(ctx, pool, srv, rel)
+	if err != nil {
+		return nil, err
+	}
+	return pb.Include, nil
 }
 
 func runStreaming(ctx context.Context, pool *sshpool.Pool, srv config.Server, cmd, stdin string, out chan<- Event) error {

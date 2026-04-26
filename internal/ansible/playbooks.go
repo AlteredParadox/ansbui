@@ -16,6 +16,14 @@ import (
 
 // Playbook is a summary of a single YAML playbook file on the remote
 // ansible server.
+//
+// Include is the parsed `# ansbui-include: host1, host2` annotation
+// (see parseIncludeHosts). Always-include hosts get auto-merged
+// into --limit at run time so the operator typing a single VPS
+// name in the form still hits the orchestration set the playbook
+// requires (control node, monitoring, etc.). The annotation is a
+// comment because Ansible's play schema is closed and rejects
+// unknown top-level keys.
 type Playbook struct {
 	ID          string   `json:"id"`
 	Name        string   `json:"name"`
@@ -24,6 +32,7 @@ type Playbook struct {
 	Description string   `json:"description"`
 	Tags        []string `json:"tags"`
 	Targets     string   `json:"targets"`
+	Include     []string `json:"include,omitempty"`
 	Size        int      `json:"size"`
 	Modified    string   `json:"modified,omitempty"`
 	YAML        string   `json:"yaml,omitempty"`
@@ -178,8 +187,65 @@ func validateRelPath(rel string) error {
 
 var hostsRE = regexp.MustCompile(`(?m)^\s*hosts:\s*(.+?)\s*$`)
 
+// includeRE matches the per-line `# ansbui-include: a, b, c`
+// annotation. Bounded — anchored to start of line, no nested
+// repetition (S5852-safe). Comments at any indent or with
+// optional space after `#` are accepted.
+var includeRE = regexp.MustCompile(`(?m)^\s*#\s*ansbui-include:\s*(.+?)\s*$`)
+
 func annotateFromYAML(p *Playbook) {
 	if m := hostsRE.FindStringSubmatch(p.YAML); len(m) == 2 {
 		p.Targets = strings.Trim(m[1], `"'`)
 	}
+	if m := includeRE.FindStringSubmatch(p.YAML); len(m) == 2 {
+		p.Include = parseIncludeHosts(m[1])
+	}
+}
+
+// parseIncludeHosts splits the annotation's payload into a
+// deduplicated host list. Accepts comma- or whitespace-separated
+// values so operators can write either `a, b, c` or `a b c`.
+// Order is preserved (operator's intent often matters for
+// readability even though ansible's --limit is a set).
+func parseIncludeHosts(s string) []string {
+	raw := strings.FieldsFunc(s, func(r rune) bool {
+		return r == ',' || r == ' ' || r == '\t'
+	})
+	seen := make(map[string]bool, len(raw))
+	out := make([]string, 0, len(raw))
+	for _, h := range raw {
+		h = strings.TrimSpace(h)
+		if h == "" || seen[h] {
+			continue
+		}
+		seen[h] = true
+		out = append(out, h)
+	}
+	return out
+}
+
+// MergeLimitHosts combines the operator-supplied --limit value
+// with the playbook's auto-include set, deduplicating in
+// operator-first order. Empty operator limit yields just the
+// include set; empty include set yields the operator's limit
+// unchanged.
+func MergeLimitHosts(userLimit string, include []string) string {
+	seen := make(map[string]bool)
+	var out []string
+	for _, h := range strings.Split(userLimit, ",") {
+		h = strings.TrimSpace(h)
+		if h == "" || seen[h] {
+			continue
+		}
+		seen[h] = true
+		out = append(out, h)
+	}
+	for _, h := range include {
+		if h == "" || seen[h] {
+			continue
+		}
+		seen[h] = true
+		out = append(out, h)
+	}
+	return strings.Join(out, ",")
 }

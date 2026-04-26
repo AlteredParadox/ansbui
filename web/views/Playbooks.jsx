@@ -479,6 +479,12 @@ function PlaybookRunner({ open, pb, seed, onClose }) {
   const [become, setBecome] = useStateP(false);
   const [running, setRunning] = useStateP(false);
   const [output, setOutput] = useStateP([]);
+  // includeHosts is the parsed `# ansbui-include:` set from the
+  // playbook YAML — auto-extended into --limit at run time on the
+  // backend. Lazy-loaded on dialog open so the library list stays
+  // a single SSH `find` (no per-file cat). Display only; the
+  // operator sees what's about to happen.
+  const [includeHosts, setIncludeHosts] = useStateP([]);
   // vars are stored as an ordered list of {rid, key, type, value} rows.
   // rid is a stable per-row id so React's reconciler doesn't shuffle
   // DOM nodes (and their focus state) when rows are added or removed
@@ -518,8 +524,22 @@ function PlaybookRunner({ open, pb, seed, onClose }) {
       setOutput([]);
       setRunning(false);
       setVaultPassword('');
+      setIncludeHosts([]);
+      return;
     }
-  }, [open]);
+    // Lazy-fetch the playbook content so we can show the
+    // `# ansbui-include:` hosts as chips. Errors don't matter
+    // for the UI surface — if the fetch fails, the chip row is
+    // empty and the run still works (backend re-reads at run
+    // time anyway).
+    if (!pb?.path || !globalThis.AnsbuiAPI) return;
+    let cancelled = false;
+    globalThis.AnsbuiAPI.getPlaybook(pb.path).then(res => {
+      if (cancelled) return;
+      setIncludeHosts(Array.isArray(res?.include) ? res.include : []);
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [open, pb?.path]);
 
   useEffectP(() => () => { if (streamRef.current) streamRef.current.close(); }, []);
 
@@ -594,6 +614,21 @@ function PlaybookRunner({ open, pb, seed, onClose }) {
         </div>
 
         <div className="pb-runner-form">
+          {includeHosts.length > 0 && (
+            <div style={{ marginBottom: 8 }}>
+              <div className="cm-field-label" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                Always included
+                <span className="mute" style={{ fontWeight: 'normal', fontSize: 11 }}>
+                  (from <span className="mono">{'# ansbui-include:'}</span> in the playbook — merged into <span className="mono">--limit</span> at run time)
+                </span>
+              </div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginTop: 4 }}>
+                {includeHosts.map(h => (
+                  <span key={h} className="mini-tag mono" style={{ background: 'var(--ansbui-accent-soft, rgba(80,160,255,0.12))' }}>{h}</span>
+                ))}
+              </div>
+            </div>
+          )}
           <label htmlFor="pb-limit" className="cm-field-label">Limit (optional — overrides hosts:)</label>
           <div className="pb-limit-row">
             <input id="pb-limit" className="input mono" placeholder={pb.targets || 'e.g. webservers, host1.example.com'} value={limit} onChange={e => setLimit(e.target.value)}/>
