@@ -240,7 +240,7 @@ function lastPlayLabel(h) {
 function lastPlayTitle(h) {
   if (!h.lastPlaybook) return '';
   const at = h.lastPlaybookAt ? new Date(h.lastPlaybookAt) : null;
-  if (!at || isNaN(at.getTime())) return h.lastPlaybook;
+  if (!at || Number.isNaN(at.getTime())) return h.lastPlaybook;
   const ago = relativeTime(at);
   return `${h.lastPlaybook} · ${ago}`;
 }
@@ -372,27 +372,27 @@ function InventoryGraph({ groups, hosts, onSelectGroup }) {
 // renders a dot per country with status counts. Adding a country
 // is just one entry in COUNTRY_CENTROIDS.
 const COUNTRY_CENTROIDS = {
-  US: { lat: 39.8,  lon: -98.5, name: 'United States' },
-  CA: { lat: 56.1,  lon: -106.3, name: 'Canada' },
-  DE: { lat: 51.2,  lon: 10.5,  name: 'Germany' },
-  NL: { lat: 52.1,  lon: 5.3,   name: 'Netherlands' },
-  FI: { lat: 64.0,  lon: 26.0,  name: 'Finland' },
-  IN: { lat: 22.0,  lon: 79.0,  name: 'India' },
-  GB: { lat: 54.0,  lon: -2.0,  name: 'United Kingdom' },
-  RO: { lat: 46.0,  lon: 25.0,  name: 'Romania' },
-  FR: { lat: 46.5,  lon: 2.5,   name: 'France' },
-  IT: { lat: 42.8,  lon: 12.6,  name: 'Italy' },
-  ES: { lat: 40.0,  lon: -3.7,  name: 'Spain' },
-  IE: { lat: 53.1,  lon: -8.2,  name: 'Ireland' },
-  PL: { lat: 52.0,  lon: 19.4,  name: 'Poland' },
-  CH: { lat: 46.8,  lon: 8.2,   name: 'Switzerland' },
-  AT: { lat: 47.5,  lon: 14.5,  name: 'Austria' },
-  SE: { lat: 60.1,  lon: 18.6,  name: 'Sweden' },
-  NO: { lat: 60.5,  lon: 8.5,   name: 'Norway' },
-  JP: { lat: 36.0,  lon: 138.0, name: 'Japan' },
-  SG: { lat: 1.3,   lon: 103.8, name: 'Singapore' },
-  AU: { lat: -25.0, lon: 134.0, name: 'Australia' },
-  BR: { lat: -14.0, lon: -52.0, name: 'Brazil' },
+  US: { lat: 39.8, lon: -98.5,  name: 'United States' },
+  CA: { lat: 56.1, lon: -106.3, name: 'Canada' },
+  DE: { lat: 51.2, lon: 10.5,   name: 'Germany' },
+  NL: { lat: 52.1, lon: 5.3,    name: 'Netherlands' },
+  FI: { lat: 64,   lon: 26,     name: 'Finland' },
+  IN: { lat: 22,   lon: 79,     name: 'India' },
+  GB: { lat: 54,   lon: -2,     name: 'United Kingdom' },
+  RO: { lat: 46,   lon: 25,     name: 'Romania' },
+  FR: { lat: 46.5, lon: 2.5,    name: 'France' },
+  IT: { lat: 42.8, lon: 12.6,   name: 'Italy' },
+  ES: { lat: 40,   lon: -3.7,   name: 'Spain' },
+  IE: { lat: 53.1, lon: -8.2,   name: 'Ireland' },
+  PL: { lat: 52,   lon: 19.4,   name: 'Poland' },
+  CH: { lat: 46.8, lon: 8.2,    name: 'Switzerland' },
+  AT: { lat: 47.5, lon: 14.5,   name: 'Austria' },
+  SE: { lat: 60.1, lon: 18.6,   name: 'Sweden' },
+  NO: { lat: 60.5, lon: 8.5,    name: 'Norway' },
+  JP: { lat: 36,   lon: 138,    name: 'Japan' },
+  SG: { lat: 1.3,  lon: 103.8,  name: 'Singapore' },
+  AU: { lat: -25,  lon: 134,    name: 'Australia' },
+  BR: { lat: -14,  lon: -52,    name: 'Brazil' },
   ZA: { lat: -30.6, lon: 22.9,  name: 'South Africa' },
 };
 
@@ -436,7 +436,8 @@ function InventoryMap({ hosts }) {
   for (const h of hosts) {
     const cc = countryFromRegion(h.region);
     if (cc && COUNTRY_CENTROIDS[cc]) {
-      (byCountry[cc] = byCountry[cc] || []).push(h);
+      if (!byCountry[cc]) byCountry[cc] = [];
+      byCountry[cc].push(h);
     } else {
       unmapped.push(h);
     }
