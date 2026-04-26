@@ -177,8 +177,9 @@ func Run(ctx context.Context, pool *sshpool.Pool, srv config.Server, req Request
 	}
 	emit("ok", strings.TrimSpace(portOut))
 
-	emit("meta", fmt.Sprintf("Adding %s to inventory under group %q...", req.Hostname, req.Provider))
-	if err := updateInventoryFile(ctx, pool, srv, req.Provider, req.Hostname); err != nil {
+	providerGroup := normalizeProviderName(req.Provider)
+	emit("meta", fmt.Sprintf("Adding %s to inventory under group %q...", req.Hostname, providerGroup))
+	if err := updateInventoryFile(ctx, pool, srv, providerGroup, req.Hostname); err != nil {
 		emit("fail", "inventory edit: "+err.Error())
 		return err
 	}
@@ -220,6 +221,31 @@ func validateRequest(req Request) error {
 		return errors.New("hostname must be fully-qualified (include the domain)")
 	}
 	return nil
+}
+
+// normalizeProviderName lowercases the operator's free-form provider
+// label and collapses whitespace runs into single underscores so
+// "Little Creek Hosting" becomes "little_creek_hosting" — matching
+// the existing fleet's group naming convention. Any other character
+// classes are left alone (hyphens, digits, etc.) so legitimate
+// provider names like "racknerd-east" survive.
+func normalizeProviderName(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	var b strings.Builder
+	b.Grow(len(s))
+	prevSpace := false
+	for _, r := range s {
+		if r == ' ' || r == '\t' {
+			if !prevSpace && b.Len() > 0 {
+				b.WriteByte('_')
+			}
+			prevSpace = true
+			continue
+		}
+		prevSpace = false
+		b.WriteRune(r)
+	}
+	return b.String()
 }
 
 // splitFQDN returns the registered domain (last two labels) and the

@@ -8,11 +8,19 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// inventoryUmbrellaGroups is the chain of intermediate groups every
+// new host gets nested under, in order from the outermost. The
+// existing fleet's convention is `all → vps_servers → debian_servers
+// → <provider>`; provisioning v1 only handles Debian/Ubuntu so
+// debian_servers is hardcoded here. If a future revision adds e.g.
+// a freebsd_servers branch, this is the place to dispatch on distro.
+var inventoryUmbrellaGroups = []string{"vps_servers", "debian_servers"}
+
 // addHostToInventoryYAML returns a new inventory file content with
-// fqdn registered as a host inside the `<provider>` group, which
-// itself is registered under `all.children`. If any node along
-// that path is missing it's created. Existing comments and
-// adjacent keys are preserved because we mutate yaml.Node trees,
+// fqdn registered as a host inside `all.children.vps_servers.
+// children.debian_servers.children.<provider>.hosts`. Any node
+// along that path that doesn't exist is created. Existing comments
+// and adjacent keys are preserved because we mutate yaml.Node trees,
 // not flat maps.
 //
 // Idempotent: if the host is already present, the original content
@@ -39,9 +47,13 @@ func addHostToInventoryYAML(content []byte, provider, fqdn string) ([]byte, erro
 		return nil, errors.New("inventory top-level must be a YAML mapping (e.g. `all:`)")
 	}
 
-	allNode := findOrCreateMapValue(top, "all")
-	childrenNode := findOrCreateMapValue(allNode, "children")
-	providerNode := findOrCreateMapValue(childrenNode, provider)
+	cur := findOrCreateMapValue(top, "all")
+	for _, group := range inventoryUmbrellaGroups {
+		cur = findOrCreateMapValue(cur, "children")
+		cur = findOrCreateMapValue(cur, group)
+	}
+	cur = findOrCreateMapValue(cur, "children")
+	providerNode := findOrCreateMapValue(cur, provider)
 	hostsNode := findOrCreateMapValue(providerNode, "hosts")
 	if findMapValue(hostsNode, fqdn) != nil {
 		return content, nil
