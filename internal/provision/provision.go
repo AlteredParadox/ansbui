@@ -17,11 +17,13 @@
 package provision
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"net"
 	"path"
 	"strings"
 	"sync"
@@ -105,7 +107,10 @@ func Run(ctx context.Context, pool *sshpool.Pool, srv config.Server, req Request
 		rawEmit(t, ansible.RedactText(text))
 	}
 
-	if err := validateRequest(req); err != nil {
+	// Belt-and-suspenders: the API handler also validates before
+	// creating the job, but Run is exported so a future caller
+	// might bypass that path.
+	if err := Validate(req); err != nil {
 		emit("fail", err.Error())
 		return err
 	}
@@ -196,15 +201,27 @@ func Run(ctx context.Context, pool *sshpool.Pool, srv config.Server, req Request
 	return nil
 }
 
-// validateRequest catches the obvious form errors before we kick
-// off any side effects. The rest (DNS resolution, SSH reachability,
+// Validate catches the obvious form errors before we kick off any
+// side effects. The rest (DNS resolution, SSH reachability,
 // password correctness) surfaces from the actual subsystems.
-func validateRequest(req Request) error {
+//
+// Exposed (capitalised) so the API handler can reject malformed
+// requests with a 400 before allocating a job slot — important
+// because the job's Summary captures fields verbatim and the
+// registry retains them across the run's lifetime.
+func Validate(req Request) error {
 	if strings.TrimSpace(req.Provider) == "" {
 		return errors.New("provider is required")
 	}
 	if strings.TrimSpace(req.IP) == "" {
 		return errors.New("IP address is required")
+	}
+	// porkbun A records are IPv4-only and the SSH bootstrap
+	// connects directly to this address — accept only IPv4
+	// literals, rejecting hostnames (which could resolve away
+	// post-reinstall) and IPv6 (no AAAA path yet).
+	if ip := net.ParseIP(strings.TrimSpace(req.IP)); ip == nil || ip.To4() == nil {
+		return errors.New("IP must be a valid IPv4 literal address — A records do not support IPv6 and hostnames are rejected so DNS changes can't move the box mid-run")
 	}
 	if req.Port <= 0 || req.Port > 65535 {
 		return errors.New("invalid SSH port")
@@ -230,8 +247,29 @@ func validateRequest(req Request) error {
 	if strings.ContainsAny(req.Hostname, " \t") {
 		return errors.New("hostname must not contain whitespace")
 	}
+	// Per-field length caps — every value here is summarised /
+	// retained in the in-memory job registry, and the redact pass
+	// on event text doesn't bound size. 256 bytes is comfortably
+	// over any realistic provider/hostname/username and below
+	// what a misuse-shape input would aim for.
+	if err := boundLength("provider", req.Provider, 64); err != nil {
+		return err
+	}
+	if err := boundLength("hostname", req.Hostname, 253); err != nil {
+		return err
+	}
+	if err := boundLength("username", req.Username, 64); err != nil {
+		return err
+	}
 	if err := validateReinstall(req.Reinstall); err != nil {
 		return err
+	}
+	return nil
+}
+
+func boundLength(name, value string, max int) error {
+	if len(value) > max {
+		return fmt.Errorf("%s is too long (max %d bytes)", name, max)
 	}
 	return nil
 }
@@ -338,15 +376,15 @@ func readControlNodePrivkey(ctx context.Context, pool *sshpool.Pool, srv config.
 	if err != nil {
 		return nil, err
 	}
-	stdout, stderr, err := sshpool.Run(cli, "cat "+shellQuotePath(path))
-	if err != nil {
-		msg := strings.TrimSpace(stderr)
+	var so, se bytes.Buffer
+	if err := sshpool.Stream(ctx, cli, "cat "+shellQuotePath(path), nil, &so, &se); err != nil {
+		msg := strings.TrimSpace(se.String())
 		if msg == "" {
 			msg = err.Error()
 		}
 		return nil, fmt.Errorf("read %s on control node: %s", path, msg)
 	}
-	body := []byte(stdout)
+	body := so.Bytes()
 	if len(body) == 0 {
 		return nil, fmt.Errorf("control node private key %s is empty", path)
 	}
@@ -354,11 +392,18 @@ func readControlNodePrivkey(ctx context.Context, pool *sshpool.Pool, srv config.
 		// Encrypted keys surface as a specific error from
 		// crypto/ssh; rather than prompting (which would force a
 		// whole new field on the form) we ask the operator to
-		// generate or unlock an unencrypted key.
+		// generate or unlock an unencrypted key. Other parse
+		// errors are NOT wrapped — the underlying error message
+		// from ssh.ParsePrivateKey can include fragments of the
+		// key bytes for some malformed inputs, and the wrapped
+		// error flows through emit() into the in-memory event
+		// log of the manager. A generic "did not parse" message
+		// is good enough for the operator to recheck their
+		// settings.
 		if strings.Contains(err.Error(), "encrypted") {
 			return nil, fmt.Errorf("control node private key %s is passphrase-protected — provisioning needs an unencrypted key for the post-reinstall reconnect", path)
 		}
-		return nil, fmt.Errorf("parse private key at %s: %w", path, err)
+		return nil, fmt.Errorf("control node private key at %s did not parse as an OpenSSH private key", path)
 	}
 	return body, nil
 }
@@ -513,15 +558,15 @@ func readControlNodePubkey(ctx context.Context, pool *sshpool.Pool, srv config.S
 	if err != nil {
 		return "", err
 	}
-	stdout, stderr, err := sshpool.Run(cli, "cat "+defaultControlPubKeyPath)
-	if err != nil {
-		msg := strings.TrimSpace(stderr)
+	var so, se bytes.Buffer
+	if err := sshpool.Stream(ctx, cli, "cat "+shellQuotePath(defaultControlPubKeyPath), nil, &so, &se); err != nil {
+		msg := strings.TrimSpace(se.String())
 		if msg == "" {
 			msg = err.Error()
 		}
 		return "", fmt.Errorf("read %s on control node: %s", defaultControlPubKeyPath, msg)
 	}
-	pub := strings.TrimSpace(stdout)
+	pub := strings.TrimSpace(so.String())
 	if pub == "" {
 		return "", fmt.Errorf("control node public key %s is empty", defaultControlPubKeyPath)
 	}
@@ -561,19 +606,19 @@ func updateInventoryFile(ctx context.Context, pool *sshpool.Pool, srv config.Ser
 		return err
 	}
 	full := path.Join(srv.WorkDir, srv.Inventory)
-	stdout, stderr, err := sshpool.Run(cli, "cat "+shellQuote(full))
-	if err != nil {
-		msg := strings.TrimSpace(stderr)
+	var so, se bytes.Buffer
+	if err := sshpool.Stream(ctx, cli, "cat "+shellQuote(full), nil, &so, &se); err != nil {
+		msg := strings.TrimSpace(se.String())
 		if msg == "" {
 			msg = err.Error()
 		}
 		return fmt.Errorf("read %s: %s", srv.Inventory, msg)
 	}
-	updated, err := addHostToInventoryYAML([]byte(stdout), provider, fqdn)
+	updated, err := addHostToInventoryYAML(so.Bytes(), provider, fqdn)
 	if err != nil {
 		return err
 	}
-	if string(updated) == stdout {
+	if bytes.Equal(updated, so.Bytes()) {
 		return nil // already present, nothing to write
 	}
 	return ansible.WriteRemoteFile(ctx, cli, full, string(updated))

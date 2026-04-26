@@ -33,6 +33,14 @@ func (s *Server) httpProvisionStart(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	// Validate before creating the job so a malformed/oversized
+	// request gets a 400 without filling a registry slot — the
+	// job's Summary would otherwise retain the request's verbatim
+	// strings until the LRU evictor catches up.
+	if err := provision.Validate(req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
 	// Summary must NOT contain any of the three secrets the form
 	// carries (target password, sudo password, vault password).
 	// What we keep is what the operator wants to see in an
@@ -50,9 +58,15 @@ func (s *Server) httpProvisionStart(w http.ResponseWriter, r *http.Request) {
 	// reference, and a config edit mid-run can't change which
 	// privkey the post-reinstall reconnect uses.
 	ctrlPrivKey := s.Config.Snapshot().ControlPrivKeyPath
-	job := s.Jobs.Start("provision", summary, func(ctx context.Context, emit func(typ, text string)) error {
+	job, err := s.Jobs.Start("provision", summary, func(ctx context.Context, emit func(typ, text string)) error {
 		return provision.Run(ctx, pool, srv, req, ctrlPrivKey, emit)
 	})
+	if err != nil {
+		// Running-cap hit: 503 so the operator's retry hits a
+		// fresh slot once an in-flight run finishes.
+		writeError(w, http.StatusServiceUnavailable, err)
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]string{"jobId": job.ID})
 }
 

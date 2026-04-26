@@ -17,9 +17,25 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"sort"
 	"sync"
 	"time"
+)
+
+// ErrTooManyRunning is returned by Start when MaxRunning concurrent
+// jobs are already in flight. Operators retry once one finishes —
+// the cap prevents an unauthenticated attacker (no auth in the
+// API yet) from spawning enough orchestrator goroutines to exhaust
+// the SSH pool / control-node connections.
+var ErrTooManyRunning = errors.New("too many concurrent jobs — try again when one finishes")
+
+// Default caps for the in-memory registry. Provisioning is rare
+// enough that these are very loose; revisit if the framework
+// grows to host playbook runs too.
+const (
+	defaultMaxRetained = 100
+	defaultMaxRunning  = 8
 )
 
 // Status is a job's current lifecycle state.
@@ -223,13 +239,23 @@ func (j *Job) finish(err error, ctxErr error) {
 // Manager owns the in-memory job registry. The zero value is not
 // usable — call New.
 type Manager struct {
-	mu   sync.Mutex
-	jobs map[string]*Job
+	mu           sync.Mutex
+	jobs         map[string]*Job
+	finishedIDs  []string // oldest-first FIFO of terminal job IDs, used by the LRU evictor
+	runningCount int
+	maxRetained  int
+	maxRunning   int
 }
 
-// New returns an empty Manager.
+// New returns an empty Manager with default caps. Adjust
+// MaxRetained / MaxRunning before handing out the manager if a
+// caller wants tighter or looser limits.
 func New() *Manager {
-	return &Manager{jobs: make(map[string]*Job)}
+	return &Manager{
+		jobs:        make(map[string]*Job),
+		maxRetained: defaultMaxRetained,
+		maxRunning:  defaultMaxRunning,
+	}
 }
 
 // Start kicks off a goroutine running fn and returns the new Job.
@@ -240,7 +266,16 @@ func New() *Manager {
 // ("done"/"fail") before returning under normal flow. On cancel
 // or panic-equivalent return, callers can rely on Snapshot.Status
 // to disambiguate.
-func (m *Manager) Start(kind string, summary map[string]string, fn Func) *Job {
+//
+// Returns ErrTooManyRunning when the running cap is hit — a
+// rate-limit valve, not a permanent failure. Caller surfaces a
+// 503 to the operator who retries.
+func (m *Manager) Start(kind string, summary map[string]string, fn Func) (*Job, error) {
+	m.mu.Lock()
+	if m.runningCount >= m.maxRunning {
+		m.mu.Unlock()
+		return nil, ErrTooManyRunning
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	job := &Job{
 		ID:        newID(),
@@ -251,15 +286,32 @@ func (m *Manager) Start(kind string, summary map[string]string, fn Func) *Job {
 		cancel:    cancel,
 		done:      make(chan struct{}),
 	}
-	m.mu.Lock()
 	m.jobs[job.ID] = job
+	m.runningCount++
 	m.mu.Unlock()
 	go func() {
 		defer cancel()
 		err := fn(ctx, job.emit)
 		job.finish(err, ctx.Err())
+		m.afterFinish(job.ID)
 	}()
-	return job
+	return job, nil
+}
+
+// afterFinish accounts a finished job and evicts the oldest
+// terminal jobs once the retained-count cap is exceeded. The
+// FIFO of finishedIDs preserves "most recent N" semantics for
+// re-attaching frontends without unbounded memory growth.
+func (m *Manager) afterFinish(id string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.runningCount--
+	m.finishedIDs = append(m.finishedIDs, id)
+	for len(m.finishedIDs) > 0 && len(m.jobs) > m.maxRetained {
+		evict := m.finishedIDs[0]
+		m.finishedIDs = m.finishedIDs[1:]
+		delete(m.jobs, evict)
+	}
 }
 
 // Get returns the job for id, or false if not found.

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -104,6 +105,7 @@ func runReinstall(ctx context.Context, target *targetSession, opts ReinstallOpts
 	emit("meta", fmt.Sprintf("Running reinstall.sh %s %s on target (this prepares the new install — actual reinstall happens after reboot)...", opts.OS, opts.Version))
 
 	heartbeat := startHeartbeat(ctx, "reinstall.sh still running", emit)
+	defer heartbeat() // belt-and-suspenders against future early returns
 	stdout, stderr, err := target.runRoot(ctx, reinstallPrepScript(opts, pubKey), "")
 	heartbeat()
 	if err != nil {
@@ -115,14 +117,20 @@ func runReinstall(ctx context.Context, target *targetSession, opts ReinstallOpts
 	emit("ok", "reinstall.sh prepared the new install")
 
 	emit("meta", "Triggering reboot (detached) — SSH session will drop in ~1s...")
-	// Fire-and-forget: schedule reboot and let our session close
-	// cleanly. Doing `reboot` inline races with our SSH ack and
-	// usually surfaces as an "EOF" error from runRoot which we'd
-	// then have to special-case as not-an-error.
+	// Fire-and-forget: the inner `&` should background the reboot
+	// inside the remote shell so the wrapper exits cleanly. But a
+	// fast reboot or half-closed SSH channel can still surface
+	// EOF / *ExitMissingError from runRoot — the side-effect has
+	// already been scheduled, so treat any error as a warning and
+	// proceed to the reconnect wait. Mis-classifying a real
+	// failure as "rebooting" is OK because waitForReinstallTarget
+	// will time out on its 30-minute budget if the box never
+	// actually reboots.
 	if _, _, err := target.runRoot(ctx, "(sleep 1; reboot) >/dev/null 2>&1 &", ""); err != nil {
-		return nil, fmt.Errorf("schedule reboot: %w", err)
+		emit("meta", fmt.Sprintf("reboot scheduling returned %v — proceeding (the reboot itself is detached)", err))
+	} else {
+		emit("ok", "reboot scheduled")
 	}
-	emit("ok", "reboot scheduled")
 
 	emit("meta", fmt.Sprintf("Waiting for OS install + reboot, then SSH on :%d (key auth as root). Timeout: 30 minutes.", reinstallSSHPort))
 	emit("meta", fmt.Sprintf("(reinstall.sh exposes SSH on :%d from its installer env so you can screen -r the install — we'll keep checking /etc/os-release until it reports the target distro.)", reinstallSSHPort))
@@ -230,17 +238,53 @@ func tryReinstallReady(ctx context.Context, host string, port int, privKey []byt
 		_ = target.Close()
 		return nil, "cat /etc/os-release: " + err.Error()
 	}
-	distro := detectDistro(osRelease)
-	if distro == expectedOS {
+	if osMatches(osRelease, expectedOS) {
 		return target, ""
 	}
 	_ = target.Close()
-	return nil, fmt.Sprintf("still in installer env (detected: %s)", distro)
+	return nil, fmt.Sprintf("still in installer env (detected: %s)", detectDistro(osRelease))
+}
+
+// osMatches checks whether /etc/os-release identifies expectedOS.
+// We accept either a direct ID match or expectedOS appearing in
+// ID_LIKE — reinstall.sh's image of "debian" might land on a
+// derivative whose ID is "raspbian" / "devuan" / similar with
+// ID_LIKE=debian. Without ID_LIKE acceptance the wait loop would
+// burn the full 30-minute budget on a successful install.
+func osMatches(osRelease, expected string) bool {
+	expected = strings.ToLower(strings.TrimSpace(expected))
+	if expected == "" {
+		return false
+	}
+	var id, idLike string
+	for _, line := range strings.Split(osRelease, "\n") {
+		line = strings.TrimSpace(line)
+		switch {
+		case strings.HasPrefix(line, "ID="):
+			id = strings.ToLower(strings.Trim(strings.TrimPrefix(line, "ID="), `"`))
+		case strings.HasPrefix(line, "ID_LIKE="):
+			idLike = strings.ToLower(strings.Trim(strings.TrimPrefix(line, "ID_LIKE="), `"`))
+		}
+	}
+	if id == expected {
+		return true
+	}
+	for _, like := range strings.Fields(idLike) {
+		if like == expected {
+			return true
+		}
+	}
+	return false
 }
 
 // startHeartbeat fires a "still running" emit every 30s until the
 // returned cancel func is called. Used during reinstall.sh's prep
 // phase, which can take 1-3 minutes of silence.
+//
+// The returned function is safe to call concurrently and more
+// than once — sync.Once ensures `close(stop)` fires exactly once
+// even when callers pair the explicit call with a `defer` for
+// safety.
 func startHeartbeat(ctx context.Context, msg string, emit func(typ, text string)) func() {
 	stop := make(chan struct{})
 	go func() {
@@ -258,13 +302,9 @@ func startHeartbeat(ctx context.Context, msg string, emit func(typ, text string)
 			}
 		}
 	}()
-	var stopped bool
+	var once sync.Once
 	return func() {
-		if stopped {
-			return
-		}
-		stopped = true
-		close(stop)
+		once.Do(func() { close(stop) })
 	}
 }
 
