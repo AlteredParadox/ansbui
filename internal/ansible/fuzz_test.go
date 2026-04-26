@@ -144,27 +144,33 @@ func FuzzMergeLimitHosts(f *testing.F) {
 		f.Add(seed.userLimit, seed.includes)
 	}
 	f.Fuzz(func(t *testing.T, userLimit, includesCSV string) {
-		// Build include[] from the second corpus parameter.
-		var include []string
-		for _, h := range strings.Split(includesCSV, "|") {
-			include = append(include, h)
-		}
+		include := strings.Split(includesCSV, "|")
 		got := MergeLimitHosts(userLimit, include)
-		if got == "" {
-			return
-		}
-		seen := make(map[string]bool)
-		for _, h := range strings.Split(got, ",") {
-			if h == "" {
-				t.Fatalf("MergeLimitHosts(%q, %v) = %q: empty entry", userLimit, include, got)
-			}
-			if strings.TrimSpace(h) != h {
-				t.Fatalf("MergeLimitHosts(%q, %v) = %q: untrimmed entry %q", userLimit, include, got, h)
-			}
-			if seen[h] {
-				t.Fatalf("MergeLimitHosts(%q, %v) = %q: duplicate %q", userLimit, include, got, h)
-			}
-			seen[h] = true
+		if err := checkMergeLimitOutput(got); err != "" {
+			t.Fatalf("MergeLimitHosts(%q, %v) = %q: %s", userLimit, include, got, err)
 		}
 	})
+}
+
+// checkMergeLimitOutput returns "" when the joined limit is well
+// formed, otherwise a short reason string. Pulled out of the fuzz
+// closure so the closure stays under S3776's 15-point ceiling.
+func checkMergeLimitOutput(got string) string {
+	if got == "" {
+		return ""
+	}
+	seen := make(map[string]bool)
+	for _, h := range strings.Split(got, ",") {
+		if h == "" {
+			return "empty entry"
+		}
+		if strings.TrimSpace(h) != h {
+			return "untrimmed entry " + h
+		}
+		if seen[h] {
+			return "duplicate " + h
+		}
+		seen[h] = true
+	}
+	return ""
 }

@@ -3,10 +3,19 @@ package jobs
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+)
+
+// Shared error-message templates so a single test-helper rename
+// doesn't fan out to ~10 sites (S1192).
+const (
+	startErr        = "Start: %v"
+	statusMismatch  = "Status = %q, want %q"
+	startErrIndexed = "Start #%d: %v"
 )
 
 // TestManagerLifecycle exercises the basic happy path: a job
@@ -20,12 +29,12 @@ func TestManagerLifecycle(t *testing.T) {
 		return nil
 	})
 	if err != nil {
-		t.Fatalf("Start: %v", err)
+		t.Fatalf(startErr, err)
 	}
 	<-job.Done()
 	snap := job.Snapshot()
 	if snap.Status != StatusSucceeded {
-		t.Fatalf("Status = %q, want %q", snap.Status, StatusSucceeded)
+		t.Fatalf(statusMismatch, snap.Status, StatusSucceeded)
 	}
 	if snap.EventCount != 2 {
 		t.Fatalf("EventCount = %d, want 2", snap.EventCount)
@@ -52,7 +61,7 @@ func TestManagerCancel(t *testing.T) {
 		return ctx.Err()
 	})
 	if err != nil {
-		t.Fatalf("Start: %v", err)
+		t.Fatalf(startErr, err)
 	}
 	<-started
 	job.Cancel()
@@ -62,7 +71,7 @@ func TestManagerCancel(t *testing.T) {
 		t.Fatalf("job didn't honour ctx.Cancel within 2s")
 	}
 	if snap := job.Snapshot(); snap.Status != StatusCancelled {
-		t.Fatalf("Status = %q, want %q", snap.Status, StatusCancelled)
+		t.Fatalf(statusMismatch, snap.Status, StatusCancelled)
 	}
 }
 
@@ -75,12 +84,12 @@ func TestManagerPanicRecovery(t *testing.T) {
 		panic("oops")
 	})
 	if err != nil {
-		t.Fatalf("Start: %v", err)
+		t.Fatalf(startErr, err)
 	}
 	<-job.Done()
 	snap := job.Snapshot()
 	if snap.Status != StatusFailed {
-		t.Fatalf("Status = %q, want %q", snap.Status, StatusFailed)
+		t.Fatalf(statusMismatch, snap.Status, StatusFailed)
 	}
 	// Cap accounting must still be honest after the recovery.
 	for i := 0; i < defaultMaxRunning; i++ {
@@ -103,26 +112,15 @@ func TestManagerCapAccounting(t *testing.T) {
 			return nil
 		})
 		if err != nil {
-			t.Fatalf("Start #%d: %v", i, err)
+			t.Fatalf(startErrIndexed, i, err)
 		}
 	}
 	if _, err := m.Start("test", nil, func(_ context.Context, _ func(string, string)) error { return nil }); !errors.Is(err, ErrTooManyRunning) {
 		t.Fatalf("Start #3 err = %v, want ErrTooManyRunning", err)
 	}
 	close(hold)
-	// Wait for the two held jobs to drain.
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		m.mu.Lock()
-		count := m.runningCount
-		m.mu.Unlock()
-		if count == 0 {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("runningCount stuck at %d", count)
-		}
-		time.Sleep(5 * time.Millisecond)
+	if err := waitRunningCount(m, 0, 2*time.Second); err != "" {
+		t.Fatal(err)
 	}
 	if _, err := m.Start("test", nil, func(_ context.Context, _ func(string, string)) error { return nil }); err != nil {
 		t.Fatalf("Start after drain: %v", err)
@@ -143,65 +141,88 @@ func TestManagerConcurrentStartCancel(t *testing.T) {
 	starts := make(chan *Job, N)
 	for i := 0; i < N; i++ {
 		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for {
-				job, err := m.Start("stress", nil, func(ctx context.Context, emit func(string, string)) error {
-					emit("meta", "tick")
-					select {
-					case <-ctx.Done():
-						return ctx.Err()
-					case <-time.After(10 * time.Millisecond):
-						return nil
-					}
-				})
-				if err == nil {
-					started.Add(1)
-					starts <- job
-					return
-				}
-				if !errors.Is(err, ErrTooManyRunning) {
-					t.Errorf("unexpected Start err: %v", err)
-					return
-				}
-				time.Sleep(time.Millisecond)
-			}
-		}()
+		go burstStarter(t, m, &started, starts, &wg)
 	}
-	// Subscribe + cancel a slice of jobs concurrently with the
-	// starters.
-	go func() {
-		count := 0
-		for j := range starts {
-			count++
-			if count%3 == 0 {
-				j.Cancel()
-			}
-			if count%5 == 0 {
-				_, _, unsub := j.Subscribe()
-				unsub()
-			}
-		}
-	}()
+	go drainStarts(starts)
 	wg.Wait()
 	close(starts)
-	// Wait for everyone to finish so the race detector sees the
-	// lifecycle in full.
-	deadline := time.Now().Add(5 * time.Second)
+	if err := waitRunningCount(m, 0, 5*time.Second); err != "" {
+		t.Fatalf("after stress: %s", err)
+	}
+	if started.Load() == 0 {
+		t.Fatalf("no jobs started — cap or wait logic is wrong")
+	}
+}
+
+// burstStarter loops on Start until it gets a slot (the manager is
+// at maxRunning during the burst). Reports an error and bails on
+// any error other than ErrTooManyRunning.
+func burstStarter(t *testing.T, m *Manager, started *atomic.Int64, out chan<- *Job, wg *sync.WaitGroup) {
+	defer wg.Done()
+	for {
+		job, err := m.Start("stress", nil, stressFn)
+		if err == nil {
+			started.Add(1)
+			out <- job
+			return
+		}
+		if !errors.Is(err, ErrTooManyRunning) {
+			t.Errorf("unexpected Start err: %v", err)
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// stressFn is the per-job orchestrator body for the concurrent
+// stress test: emit one event then either honour ctx.Done or
+// finish naturally after 10ms.
+func stressFn(ctx context.Context, emit func(string, string)) error {
+	emit("meta", "tick")
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(10 * time.Millisecond):
+		return nil
+	}
+}
+
+// drainStarts pulls each newly-started job off the channel and
+// sometimes cancels / subscribes to it, exercising the
+// concurrent-mutation paths Subscribe / Cancel race against the
+// natural lifecycle.
+func drainStarts(starts <-chan *Job) {
+	count := 0
+	for j := range starts {
+		count++
+		if count%3 == 0 {
+			j.Cancel()
+		}
+		if count%5 == 0 {
+			_, _, unsub := j.Subscribe()
+			unsub()
+		}
+	}
+}
+
+// waitRunningCount polls m.runningCount until it hits target or
+// the deadline expires. Returns "" on success, or a short reason
+// string. Inlined polling kept the original test over Sonar's
+// complexity ceiling; pulling it out here reuses across cap and
+// stress tests.
+func waitRunningCount(m *Manager, target int, within time.Duration) string {
+	deadline := time.Now().Add(within)
 	for {
 		m.mu.Lock()
 		count := m.runningCount
 		m.mu.Unlock()
-		if count == 0 {
-			break
+		if count == target {
+			return ""
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("runningCount stuck at %d after stress", count)
+			return fmt.Sprintf("runningCount stuck at %d (want %d)", count, target)
 		}
 		time.Sleep(10 * time.Millisecond)
-	}
-	if started.Load() == 0 {
-		t.Fatalf("no jobs started — cap or wait logic is wrong")
 	}
 }
 
@@ -222,7 +243,7 @@ func TestManagerSubscribeRace(t *testing.T) {
 		return nil
 	})
 	if err != nil {
-		t.Fatalf("Start: %v", err)
+		t.Fatalf(startErr, err)
 	}
 	var wg sync.WaitGroup
 	for i := 0; i < 8; i++ {

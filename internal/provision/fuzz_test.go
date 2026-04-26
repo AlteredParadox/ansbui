@@ -32,30 +32,43 @@ func FuzzShellQuotePath(f *testing.F) {
 		f.Add(seed)
 	}
 	f.Fuzz(func(t *testing.T, s string) {
-		got := shellQuotePath(s)
-		// Three legal shapes:
-		//   `"$HOME"`              for s == "~"
-		//   `"$HOME"/<quoted-rest>` for s starting with "~/"
-		//   `<quoted-s>`           otherwise
-		switch {
-		case s == "~":
-			if got != `"$HOME"` {
-				t.Fatalf("shellQuotePath(%q) = %q: want %q", s, got, `"$HOME"`)
-			}
-		case strings.HasPrefix(s, "~/"):
-			if !strings.HasPrefix(got, `"$HOME"/`) {
-				t.Fatalf("shellQuotePath(%q) = %q: missing $HOME prefix", s, got)
-			}
-			tail := strings.TrimPrefix(got, `"$HOME"/`)
-			if !strings.HasPrefix(tail, "'") || !strings.HasSuffix(tail, "'") {
-				t.Fatalf("shellQuotePath(%q) = %q: tail not single-quoted", s, got)
-			}
-		default:
-			if !strings.HasPrefix(got, "'") || !strings.HasSuffix(got, "'") {
-				t.Fatalf("shellQuotePath(%q) = %q: not single-quoted", s, got)
-			}
+		if err := checkShellQuotePath(s, shellQuotePath(s)); err != "" {
+			t.Fatalf("shellQuotePath(%q): %s", s, err)
 		}
 	})
+}
+
+// checkShellQuotePath validates one of three legal output shapes:
+//
+//	"$HOME"               when s == "~"
+//	"$HOME"/<quoted>      when s starts with "~/"
+//	<quoted>              otherwise
+//
+// Returns "" on success, otherwise a short reason string.
+func checkShellQuotePath(s, got string) string {
+	switch {
+	case s == "~":
+		if got != `"$HOME"` {
+			return "want \"$HOME\", got " + got
+		}
+	case strings.HasPrefix(s, "~/"):
+		const prefix = `"$HOME"/`
+		if !strings.HasPrefix(got, prefix) {
+			return "missing $HOME prefix, got " + got
+		}
+		if !singleQuoted(strings.TrimPrefix(got, prefix)) {
+			return "tail not single-quoted, got " + got
+		}
+	default:
+		if !singleQuoted(got) {
+			return "not single-quoted, got " + got
+		}
+	}
+	return ""
+}
+
+func singleQuoted(s string) bool {
+	return strings.HasPrefix(s, "'") && strings.HasSuffix(s, "'")
 }
 
 // FuzzSplitFQDN verifies splitFQDN never panics and that, when it
