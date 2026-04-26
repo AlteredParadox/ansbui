@@ -53,7 +53,7 @@ const (
 	defaultPorkbunVaultPath  = "inventory/group_vars/all/vault.yml"
 	defaultPorkbunAPIKeyVar  = "porkbun_api_key"
 	defaultPorkbunSecretVar  = "porkbun_secret_key"
-	defaultControlPubKeyPath = "~/.ssh/id_ed25519.pub"
+	defaultControlPubKeyPath = "~/.ssh/ansible_ed25519.pub"
 	targetSSHPort            = 4242
 	dnsTTLSeconds            = 300
 )
