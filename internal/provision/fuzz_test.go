@@ -170,7 +170,7 @@ func FuzzOSMatches(f *testing.F) {
 	} {
 		f.Add(seed.rel, seed.exp)
 	}
-	f.Fuzz(func(t *testing.T, rel, exp string) {
+	f.Fuzz(func(_ *testing.T, rel, exp string) {
 		_ = osMatches(rel, exp) // no panic is the property
 	})
 }

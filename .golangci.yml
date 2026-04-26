@@ -1,16 +1,32 @@
 version: "2"
 
 run:
-  timeout: 2m
+  timeout: 5m
+  tests: true
 
 linters:
-  default: standard
+  default: none
   enable:
+    # Default standard set
     - errcheck
     - govet
     - ineffassign
     - staticcheck
     - unused
+    # Security + correctness
+    - gosec
+    - errorlint
+    - bodyclose
+    - nilerr
+    - copyloopvar
+    - gocheckcompilerdirectives
+    # Style + hygiene
+    - misspell
+    - unconvert
+    - prealloc
+    - nakedret
+    - revive
+    - gocritic
 
   settings:
     errcheck:
@@ -31,6 +47,70 @@ linters:
         # — that's the intended fallback, not a bug.
         - fmt.Sscanf
 
+    gosec:
+      severity: medium
+      confidence: medium
+      excludes:
+        # G104: errcheck does this better with our exclude-list.
+        - G104
+        # G304: file inclusion via variable. The file paths in the
+        # codebase come from operator-controlled config (vault path,
+        # known_hosts, runs.json, control-node privkey). The
+        # operator already has full shell on the control node and
+        # the workdir is theirs; this is by design, not a taint
+        # vector.
+        - G304
+        # G704: SSRF via taint analysis. The lone `net.Dial("unix",
+        # sock)` site at sshpool/pool.go:233 dials SSH_AUTH_SOCK to
+        # talk to the local ssh-agent — unix-domain socket, not
+        # network. SSRF doesn't apply.
+        - G704
+
+    revive:
+      # Cherry-picked from revive's catalogue — we intentionally
+      # skip "exported" (would demand doc comments on every
+      # exported symbol; a fleet-wide push not in scope here).
+      rules:
+        - name: error-return
+        - name: error-naming
+        - name: var-naming
+        - name: unused-parameter
+          arguments:
+            - allowRegex: "^_"
+
+    gocritic:
+      enabled-tags:
+        - performance
+        - diagnostic
+      # ifElseChain is a stylistic preference that conflicts with
+      # the orchestrator's emit-and-fall-through patterns. The
+      # other style checks aren't worth the noise either; we get
+      # most of the value from the diagnostic + performance tags.
+      disabled-checks:
+        - ifElseChain
+        # hugeParam suggests passing 136-byte config.Server by
+        # pointer. The struct is intentionally value-passed so
+        # callers can't mutate the shared snapshot — making it
+        # pointer-passed everywhere would change a process-wide
+        # invariant for a per-call performance microscopic gain.
+        - hugeParam
+        # rangeValCopy is the loop-iteration twin of hugeParam.
+        # Same trade-off (immutability via copy) and same scale —
+        # the codebase is not perf-critical and converting every
+        # `for _, s := range slice` site to indexed access for a
+        # 100-200 byte copy is more pain than gain.
+        - rangeValCopy
+        # exitAfterDefer fires on `log.Fatalf` in main where a
+        # `defer pool.Close()` is registered. The Fatalf path is a
+        # boot-time fatal; the deferred Close is best-effort
+        # cleanup that the OS handles when the process exits.
+        - exitAfterDefer
+        # sprintfQuotedString suggests `%q` for `%s="%s"`. The
+        # adhoc args path uses ansible-style quoting (only `"`
+        # escaped, leaving `\` literal) — `%q` would Go-quote and
+        # double-escape backslashes, changing the on-the-wire form.
+        - sprintfQuotedString
+
   exclusions:
     rules:
       # The deferred sess.Close patterns in sshpool / provision
@@ -39,10 +119,18 @@ linters:
       # the receiver type isn't statically known to errcheck.
       - linters: [errcheck]
         source: '^\s*defer .*\.Close\(\)\s*$'
+      # Test files are allowed to be loose — they construct
+      # synthetic inputs, panic-and-recover, and use simplified
+      # error handling. gosec specifically over-fires on tests
+      # (G404 weak rand for test seeds, G306 file perms for
+      # tmpfiles).
+      - path: _test\.go
+        linters: [gosec, errcheck, prealloc]
 
 formatters:
   enable:
     - gofmt
+    - goimports
 
 issues:
   max-issues-per-linter: 50

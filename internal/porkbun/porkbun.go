@@ -83,10 +83,10 @@ func (c *Client) FindARecords(ctx context.Context, domain, subdomain, fqdn strin
 	if resp.Status != "SUCCESS" {
 		return nil, fmt.Errorf("porkbun: %s", resp.Message)
 	}
-	wantedName := strings.ToLower(strings.TrimSuffix(fqdn, "."))
+	wantedName := strings.TrimSuffix(fqdn, ".")
 	var out []Record
 	for _, r := range resp.Records {
-		if strings.ToLower(r.Name) == wantedName {
+		if strings.EqualFold(r.Name, wantedName) {
 			out = append(out, r)
 		}
 	}

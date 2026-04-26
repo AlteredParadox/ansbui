@@ -3,6 +3,7 @@ package sshpool
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"net"
 	"os"
 	"sync"
@@ -51,7 +52,11 @@ func knownHostsCallback(path string) (ssh.HostKeyCallback, error) {
 func ensureKnownHostsMode(path string) error {
 	st, err := os.Stat(path)
 	if err != nil {
-		return nil // missing file is fine — appendKnownHost creates it 0o600
+		if errors.Is(err, fs.ErrNotExist) {
+			// Missing file is fine — appendKnownHost creates it 0o600.
+			return nil
+		}
+		return fmt.Errorf("stat known_hosts: %w", err)
 	}
 	if st.Mode().Perm()&0o077 == 0 {
 		return nil

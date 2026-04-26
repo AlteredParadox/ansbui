@@ -1,0 +1,39 @@
+name: Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  go:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache: true
+
+      - name: Test with race detector
+        run: go test -race ./internal/...
+
+      - name: Build check
+        run: go build ./...
+
+      # Short fuzz pass — finds every Fuzz* function in *_test.go
+      # and runs each for 20s. No-ops cleanly when there are none.
+      # 11 targets × 20s ≈ 4 minutes; bump fuzztime if running on
+      # a beefier runner with budget to spare.
+      - name: Fuzz (short)
+        run: |
+          set -e
+          while IFS= read -r file; do
+            dir=$(dirname "$file")
+            grep -oE 'func (Fuzz[A-Za-z0-9_]+)' "$file" | awk '{print $2}' | while read -r fn; do
+              echo "Fuzzing $fn in $dir"
+              go test -run='^$' -fuzz="^${fn}$" -fuzztime=20s "./$dir"
+            done
+          done < <(grep -rl 'func Fuzz' --include='*_test.go' internal/)
