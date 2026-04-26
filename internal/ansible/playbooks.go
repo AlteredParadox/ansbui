@@ -191,28 +191,63 @@ var hostsRE = regexp.MustCompile(`(?m)^\s*hosts:\s*(.+?)\s*$`)
 // annotation. Bounded — anchored to start of line, no nested
 // repetition (S5852-safe). Comments at any indent or with
 // optional space after `#` are accepted.
+//
+// This is a regex over the raw YAML, not a parser-aware match —
+// a `# ansbui-include:` line buried inside a YAML block scalar
+// (`shell: |` etc.) would also match. The blast radius is
+// bounded because the resulting hosts have to already exist in
+// the inventory for ansible's `--limit` to act on them, but
+// operators reviewing imported playbooks should know that any
+// such line is honoured by ansbui's prep step.
 var includeRE = regexp.MustCompile(`(?m)^\s*#\s*ansbui-include:\s*(.+?)\s*$`)
 
 func annotateFromYAML(p *Playbook) {
 	if m := hostsRE.FindStringSubmatch(p.YAML); len(m) == 2 {
 		p.Targets = strings.Trim(m[1], `"'`)
 	}
-	if m := includeRE.FindStringSubmatch(p.YAML); len(m) == 2 {
-		p.Include = parseIncludeHosts(m[1])
+	p.Include = parseIncludesFromYAML(p.YAML)
+}
+
+// parseIncludesFromYAML returns the union of all
+// `# ansbui-include:` annotations in the playbook, deduplicated
+// in source order. ansible's `--limit` is global to the run
+// (one effective set across every play), so unioning matches the
+// runtime semantic — a playbook with two plays each declaring
+// their own include line should target both sets, not just the
+// first one we encountered.
+func parseIncludesFromYAML(yaml string) []string {
+	matches := includeRE.FindAllStringSubmatch(yaml, -1)
+	if len(matches) == 0 {
+		return nil
 	}
+	seen := make(map[string]bool)
+	var out []string
+	for _, m := range matches {
+		for _, h := range parseIncludeHosts(m[1]) {
+			if seen[h] {
+				continue
+			}
+			seen[h] = true
+			out = append(out, h)
+		}
+	}
+	return out
 }
 
 // parseIncludeHosts splits the annotation's payload into a
 // deduplicated host list. Accepts comma- or whitespace-separated
 // values so operators can write either `a, b, c` or `a b c`.
 // Order is preserved (operator's intent often matters for
-// readability even though ansible's --limit is a set).
+// readability even though ansible's --limit is a set). Returns
+// nil — not an empty slice — when there are no usable tokens, so
+// callers can use `len(out) > 0` and `reflect.DeepEqual(out, nil)`
+// interchangeably.
 func parseIncludeHosts(s string) []string {
 	raw := strings.FieldsFunc(s, func(r rune) bool {
 		return r == ',' || r == ' ' || r == '\t'
 	})
 	seen := make(map[string]bool, len(raw))
-	out := make([]string, 0, len(raw))
+	var out []string
 	for _, h := range raw {
 		h = strings.TrimSpace(h)
 		if h == "" || seen[h] {
@@ -229,23 +264,28 @@ func parseIncludeHosts(s string) []string {
 // operator-first order. Empty operator limit yields just the
 // include set; empty include set yields the operator's limit
 // unchanged.
+//
+// Both userLimit and entries in include[] are split on commas
+// and trimmed: the parser already produces single-host entries,
+// but a future caller (or a hand-built list) passing "h1,h2" as
+// one entry would otherwise corrupt the joined string. Symmetric
+// splitting makes this defensive against shape drift.
 func MergeLimitHosts(userLimit string, include []string) string {
 	seen := make(map[string]bool)
 	var out []string
-	for _, h := range strings.Split(userLimit, ",") {
-		h = strings.TrimSpace(h)
-		if h == "" || seen[h] {
-			continue
+	addAll := func(s string) {
+		for _, h := range strings.Split(s, ",") {
+			h = strings.TrimSpace(h)
+			if h == "" || seen[h] {
+				continue
+			}
+			seen[h] = true
+			out = append(out, h)
 		}
-		seen[h] = true
-		out = append(out, h)
 	}
-	for _, h := range include {
-		if h == "" || seen[h] {
-			continue
-		}
-		seen[h] = true
-		out = append(out, h)
+	addAll(userLimit)
+	for _, raw := range include {
+		addAll(raw)
 	}
 	return strings.Join(out, ",")
 }

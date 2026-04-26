@@ -5,6 +5,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/AlteredParadox/ansbui/internal/ansible"
@@ -74,14 +75,25 @@ type runnerFunc[T any] func(ctx context.Context, pool *sshpool.Pool, srv config.
 // only has to know how to describe itself.
 type buildRecordFunc[T any] func(srv config.Server, req *T, id string) ansible.RunRecord
 
+// prepFunc is an optional pre-run hook. It runs after the request
+// has been decoded but BEFORE buildRecord captures req.* into the
+// persisted RunRecord, so any mutation it makes to *req (e.g.
+// auto-extending Limit with playbook-annotation hosts) is visible
+// to the record. The returned event, if non-empty, is queued onto
+// the events channel ahead of the runner's own first emit so the
+// operator sees the prep result in the live log.
+type prepFunc[T any] func(ctx context.Context, pool *sshpool.Pool, srv config.Server, req *T) ansible.Event
+
 // runWebSocket is the shared WS handler behind /api/adhoc/stream and
 // /api/playbook/stream. It owns the handshake, request decoding,
 // cancellation wiring, logging, and persistence; the only per-kind
-// work is the RunRecord shape and which ansible.RunX function to call.
+// work is the optional prep step, the RunRecord shape, and which
+// ansible.RunX function to call.
 func runWebSocket[T any](
 	s *Server,
 	w http.ResponseWriter, r *http.Request,
 	kind string,
+	prep prepFunc[T],
 	buildRecord buildRecordFunc[T],
 	run runnerFunc[T],
 ) {
@@ -107,10 +119,20 @@ func runWebSocket[T any](
 	defer cancel()
 	watchPeer(ctx, conn, cancel)
 
+	var prepEvent ansible.Event
+	if prep != nil {
+		prepEvent = prep(ctx, s.Pool, srv, &req)
+	}
+
 	record := buildRecord(srv, &req, ansible.NewID())
 	_ = wsWriteJSON(conn, map[string]string{"type": "run-id", "text": record.ID})
 
 	events := make(chan ansible.Event, 64)
+	if prepEvent.Type != "" {
+		// Buffered chan + sync send: queues ahead of the runner's
+		// first emit so consumeAndPersist sees it in source order.
+		events <- prepEvent
+	}
 	go func() {
 		if err := run(ctx, s.Pool, srv, req, events); err != nil {
 			log.Printf("%s run: %v", kind, err)
@@ -121,11 +143,34 @@ func runWebSocket[T any](
 }
 
 func (s *Server) wsAdhoc(w http.ResponseWriter, r *http.Request) {
-	runWebSocket(s, w, r, "adhoc", buildAdhocRecord, ansible.RunAdhoc)
+	runWebSocket[ansible.AdhocRequest](s, w, r, "adhoc", nil, buildAdhocRecord, ansible.RunAdhoc)
 }
 
 func (s *Server) wsPlaybook(w http.ResponseWriter, r *http.Request) {
-	runWebSocket(s, w, r, "playbook", buildPlaybookRecord, ansible.RunPlaybook)
+	runWebSocket(s, w, r, "playbook", prepPlaybook, buildPlaybookRecord, ansible.RunPlaybook)
+}
+
+// prepPlaybook applies the playbook's `# ansbui-include:` set to
+// req.Limit before the run. Run-time re-read from disk keeps the
+// playbook file as the source of truth (the frontend's chip view
+// is informational; this is what actually feeds --limit). Doing
+// it here — not inside ansible.RunPlaybook — means the merged
+// limit lands in buildPlaybookRecord and the persisted History
+// entry shows the effective target set.
+func prepPlaybook(ctx context.Context, pool *sshpool.Pool, srv config.Server, req *ansible.PlaybookRequest) ansible.Event {
+	pb, err := ansible.LoadPlaybook(ctx, pool, srv, req.Path)
+	if err != nil {
+		return ansible.Event{Type: "meta", Text: "auto-include lookup skipped: " + err.Error()}
+	}
+	if len(pb.Include) == 0 {
+		return ansible.Event{}
+	}
+	merged := ansible.MergeLimitHosts(req.Limit, pb.Include)
+	if merged == req.Limit {
+		return ansible.Event{}
+	}
+	req.Limit = merged
+	return ansible.Event{Type: "meta", Text: "auto-including hosts from playbook annotation: " + strings.Join(pb.Include, ", ")}
 }
 
 func buildAdhocRecord(srv config.Server, req *ansible.AdhocRequest, id string) ansible.RunRecord {

@@ -19,9 +19,6 @@ func TestParseIncludeHosts(t *testing.T) {
 	}
 	for _, tc := range cases {
 		got := parseIncludeHosts(tc.in)
-		if len(got) == 0 && len(tc.want) == 0 {
-			continue
-		}
 		if !reflect.DeepEqual(got, tc.want) {
 			t.Errorf("parseIncludeHosts(%q): got %v want %v", tc.in, got, tc.want)
 		}
@@ -41,6 +38,10 @@ func TestMergeLimitHosts(t *testing.T) {
 		{"vps01,localhost", []string{"localhost", "prometheus"}, wantMerged}, // dedup
 		{"  vps01  ,  localhost ", []string{"prometheus"}, wantMerged},       // trim
 		{"localhost", []string{"localhost"}, "localhost"},                    // single dedup
+		// Defensive: an include entry containing a literal comma
+		// (shape drift from a future caller) is split, not pasted
+		// verbatim into the joined limit.
+		{"vps01", []string{"localhost,prometheus"}, wantMerged},
 	}
 	for _, tc := range cases {
 		got := MergeLimitHosts(tc.userLimit, tc.include)
@@ -52,22 +53,46 @@ func TestMergeLimitHosts(t *testing.T) {
 
 func TestAnnotateFromYAML_Include(t *testing.T) {
 	cases := []struct {
+		name string
 		yaml string
 		want []string
 	}{
-		{"# ansbui-include: localhost, prometheus.example.com\n- hosts: all\n", []string{"localhost", "prometheus.example.com"}},
-		{"---\n#  ansbui-include:  a,b,c\n- hosts: all\n", []string{"a", "b", "c"}},
-		{"  # ansbui-include: indented\n", []string{"indented"}},  // indented comment
-		{"- hosts: all\n  tasks: []\n", nil},                       // no annotation
+		{
+			name: "single annotation",
+			yaml: "# ansbui-include: localhost, prometheus.example.com\n- hosts: all\n",
+			want: []string{"localhost", "prometheus.example.com"},
+		},
+		{
+			name: "with doc separator and extra spaces",
+			yaml: "---\n#  ansbui-include:  a,b,c\n- hosts: all\n",
+			want: []string{"a", "b", "c"},
+		},
+		{
+			name: "indented comment",
+			yaml: "  # ansbui-include: indented\n",
+			want: []string{"indented"},
+		},
+		{
+			name: "no annotation",
+			yaml: "- hosts: all\n  tasks: []\n",
+			want: nil,
+		},
+		{
+			// Multi-play file with one annotation per play —
+			// ansible's --limit is global, so the union (not just
+			// the first match) is what should land in --limit.
+			name: "two plays each with own annotation",
+			yaml: "# ansbui-include: a, b\n- hosts: web\n  tasks: []\n# ansbui-include: c, b\n- hosts: db\n  tasks: []\n",
+			want: []string{"a", "b", "c"},
+		},
 	}
 	for _, tc := range cases {
-		p := &Playbook{YAML: tc.yaml}
-		annotateFromYAML(p)
-		if len(p.Include) == 0 && len(tc.want) == 0 {
-			continue
-		}
-		if !reflect.DeepEqual(p.Include, tc.want) {
-			t.Errorf("annotateFromYAML(%q): got %v want %v", tc.yaml, p.Include, tc.want)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			p := &Playbook{YAML: tc.yaml}
+			annotateFromYAML(p)
+			if !reflect.DeepEqual(p.Include, tc.want) {
+				t.Errorf("got %v want %v", p.Include, tc.want)
+			}
+		})
 	}
 }
