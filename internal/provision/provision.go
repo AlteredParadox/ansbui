@@ -114,6 +114,14 @@ func Run(ctx context.Context, pool *sshpool.Pool, srv config.Server, req Request
 	// record all benefit from a single form. Mixed-case input from
 	// the operator (`Vps01.Example.com`) is silently normalised.
 	req.Hostname = strings.ToLower(strings.TrimSpace(req.Hostname))
+	// A forged / stale client could submit `username=root` together
+	// with `useSudo=true`. Root never needs sudo; coerce to false so
+	// the orchestrator skips the wrapper entirely instead of running
+	// `sudo` as root just to wrap a noop.
+	if req.Username == "root" {
+		req.UseSudo = false
+		req.SudoPassword = ""
+	}
 
 	mu := lockTarget(fmt.Sprintf("%s:%d", req.IP, req.Port))
 	mu.Lock()
