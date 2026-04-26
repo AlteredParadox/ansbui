@@ -1,12 +1,12 @@
 // ansbui — web UI for an Ansible control plane.
 //
 // One Go binary that:
-//   1. Serves the embedded React/CSS bundle at /.
-//   2. Lets the user configure one or more SSH-accessible "ansible servers".
-//   3. Runs ansible-inventory / ansible / ansible-playbook over SSH on the
-//      selected server, streaming output to the UI via WebSocket.
-//   4. Optionally enriches inventory with live Prometheus metrics for
-//      CPU / mem / load / uptime / OS, matched by hostname.
+//  1. Serves the embedded React/CSS bundle at /.
+//  2. Lets the user configure one or more SSH-accessible "ansible servers".
+//  3. Runs ansible-inventory / ansible / ansible-playbook over SSH on the
+//     selected server, streaming output to the UI via WebSocket.
+//  4. Optionally enriches inventory with live Prometheus metrics for
+//     CPU / mem / load / uptime / OS, matched by hostname.
 package main
 
 import (

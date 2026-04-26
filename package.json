@@ -1,0 +1,26 @@
+{
+  "name": "ansbui",
+  "version": "1.0.0",
+  "description": "A single-binary web UI for an Ansible control node.",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "lint": "eslint web/"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/AlteredParadox/ansbui.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "@babel/eslint-parser": "^7.28.6",
+    "@babel/preset-env": "^7.29.2",
+    "@babel/preset-react": "^7.28.5",
+    "eslint": "^9.39.4",
+    "eslint-plugin-react": "^7.37.5",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "globals": "^17.5.0"
+  }
+}

@@ -92,11 +92,11 @@ func (c *Client) set(ip string, e cacheEntry) {
 }
 
 type ipinfoResponse struct {
-	IP       string `json:"ip"`
-	City     string `json:"city"`
-	Region   string `json:"region"`
-	Country  string `json:"country"`
-	Bogon    bool   `json:"bogon,omitempty"`
+	IP      string `json:"ip"`
+	City    string `json:"city"`
+	Region  string `json:"region"`
+	Country string `json:"country"`
+	Bogon   bool   `json:"bogon,omitempty"`
 }
 
 func (c *Client) fetch(ctx context.Context, ip string) (Result, error) {

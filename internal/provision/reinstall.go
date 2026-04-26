@@ -13,12 +13,12 @@ import (
 // orchestrator drives bin456789/reinstall against the target
 // before running the ansible-user-setup steps:
 //
-//   1. download reinstall.sh
-//   2. run reinstall.sh <os> <version> --ssh-port 4242 --ssh-key <pub>
-//   3. trigger reboot in a detached process so our SSH session can
-//      close cleanly
-//   4. poll-dial :4242 with key auth until the freshly-installed
-//      system answers
+//  1. download reinstall.sh
+//  2. run reinstall.sh <os> <version> --ssh-port 4242 --ssh-key <pub>
+//  3. trigger reboot in a detached process so our SSH session can
+//     close cleanly
+//  4. poll-dial :4242 with key auth until the freshly-installed
+//     system answers
 //
 // On success, provision.Run swaps the original password-auth target
 // for the new key-auth target and continues the rest of the

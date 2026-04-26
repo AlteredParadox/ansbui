@@ -1,0 +1,49 @@
+version: "2"
+
+run:
+  timeout: 2m
+
+linters:
+  default: standard
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+
+  settings:
+    errcheck:
+      # Standard Go idiom: `defer x.Close()` for sessions / files /
+      # connections. Pinning errcheck on these would force //nolint
+      # directives on every site without catching real bugs — a
+      # failed Close on a session being torn down anyway is not
+      # actionable. Enumerate the specific Close shapes we use so
+      # an ACTUAL meaningful Close (e.g. mid-flow on a writer where
+      # we'd want to surface flush errors) still gets flagged.
+      exclude-functions:
+        - (*os.File).Close
+        - (io.Closer).Close
+        - (*golang.org/x/crypto/ssh.Session).Close
+        # fmt.Sscanf is used as a best-effort parser for inventory
+        # / playbook list output where each field is independently
+        # optional and a parse miss leaves the destination at zero
+        # — that's the intended fallback, not a bug.
+        - fmt.Sscanf
+
+  exclusions:
+    rules:
+      # The deferred sess.Close patterns in sshpool / provision
+      # are ssh.Session.Close. The exclude-functions list above
+      # covers the common case; this catches the few sites where
+      # the receiver type isn't statically known to errcheck.
+      - linters: [errcheck]
+        source: '^\s*defer .*\.Close\(\)\s*$'
+
+formatters:
+  enable:
+    - gofmt
+
+issues:
+  max-issues-per-linter: 50
+  max-same-issues: 10

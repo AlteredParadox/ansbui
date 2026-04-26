@@ -34,9 +34,9 @@ type HostMetric struct {
 
 // Client queries a single Prometheus instance.
 type Client struct {
-	base      string
-	label     string
-	http      *http.Client
+	base  string
+	label string
+	http  *http.Client
 }
 
 // NewClient constructs a Client. baseURL is the Prometheus root (e.g.

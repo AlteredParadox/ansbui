@@ -38,16 +38,16 @@ import (
 // Request is the operator-supplied form payload for one
 // provisioning run.
 type Request struct {
-	Provider      string         `json:"provider"`
-	IP            string         `json:"ip"`
-	Port          int            `json:"port"`
-	Username      string         `json:"username"`
-	Password      string         `json:"password"`
-	UseSudo       bool           `json:"useSudo"`
-	SudoPassword  string         `json:"sudoPassword"`
-	Hostname      string         `json:"hostname"`
-	VaultPassword string         `json:"vaultPassword"`
-	Reinstall     ReinstallOpts  `json:"reinstall"`
+	Provider      string        `json:"provider"`
+	IP            string        `json:"ip"`
+	Port          int           `json:"port"`
+	Username      string        `json:"username"`
+	Password      string        `json:"password"`
+	UseSudo       bool          `json:"useSudo"`
+	SudoPassword  string        `json:"sudoPassword"`
+	Hostname      string        `json:"hostname"`
+	VaultPassword string        `json:"vaultPassword"`
+	Reinstall     ReinstallOpts `json:"reinstall"`
 }
 
 // Defaults: where porkbun creds live, what they're named, where
