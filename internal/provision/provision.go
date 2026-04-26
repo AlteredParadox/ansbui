@@ -109,6 +109,11 @@ func Run(ctx context.Context, pool *sshpool.Pool, srv config.Server, req Request
 		emit("fail", err.Error())
 		return err
 	}
+	// Canonicalise the hostname once: porkbun's `Name` field comes
+	// back lowercase and the inventory key, WS log lines, and DNS
+	// record all benefit from a single form. Mixed-case input from
+	// the operator (`Vps01.Example.com`) is silently normalised.
+	req.Hostname = strings.ToLower(strings.TrimSpace(req.Hostname))
 
 	mu := lockTarget(fmt.Sprintf("%s:%d", req.IP, req.Port))
 	mu.Lock()
@@ -144,6 +149,11 @@ func Run(ctx context.Context, pool *sshpool.Pool, srv config.Server, req Request
 	}
 	defer target.Close()
 	emit("ok", "connected.")
+
+	if err := target.requireSudo(ctx); err != nil {
+		emit("fail", err.Error())
+		return err
+	}
 
 	emit("meta", "Detecting distro...")
 	distroOut, _, err := target.runRoot(ctx, "cat /etc/os-release", "")
@@ -393,10 +403,13 @@ func readControlNodePubkey(ctx context.Context, pool *sshpool.Pool, srv config.S
 // looksLikePublicKey is a coarse check on whatever
 // readControlNodePubkey just cat'd. We only want to catch
 // "operator pointed at the wrong file" mistakes — full key
-// parsing is sshd's job.
+// parsing is sshd's job. Authorized-keys-style option prefixes
+// (e.g. `command="..." ssh-ed25519 AAAA...`) are accepted by
+// looking for the type token anywhere in the line preceded by
+// whitespace.
 func looksLikePublicKey(s string) bool {
-	for _, prefix := range []string{"ssh-ed25519 ", "ssh-rsa ", "ssh-dss ", "ecdsa-sha2-nistp256 ", "ecdsa-sha2-nistp384 ", "ecdsa-sha2-nistp521 ", "sk-ssh-ed25519@openssh.com ", "sk-ecdsa-sha2-nistp256@openssh.com "} {
-		if strings.HasPrefix(s, prefix) {
+	for _, kt := range []string{"ssh-ed25519", "ssh-rsa", "ssh-dss", "ecdsa-sha2-nistp256", "ecdsa-sha2-nistp384", "ecdsa-sha2-nistp521", "sk-ssh-ed25519@openssh.com", "sk-ecdsa-sha2-nistp256@openssh.com"} {
+		if strings.HasPrefix(s, kt+" ") || strings.Contains(s, " "+kt+" ") {
 			return true
 		}
 	}

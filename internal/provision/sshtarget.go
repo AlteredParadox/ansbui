@@ -65,10 +65,10 @@ func (s *targetSession) Close() error {
 //
 //   - the operator's sudo password is the first line of stdin,
 //     read by the wrapper into a shell variable
-//   - that variable is fed into `sudo -S -p '' -v` via printf and
-//     a fresh pipe — sudo only reads from this pipe when it
-//     actually prompts, so a cache-warm `sudo -nv` no-ops without
-//     touching the outer SSH stdin
+//   - if the cache is warm or the user is NOPASSWD, `sudo -n -v`
+//     succeeds without touching stdin and we skip the password
+//     feed entirely. Otherwise the password is piped into a
+//     fresh `sudo -S -v` invocation
 //   - the wrapper then `exec sudo bash -c '<cmd>'`, replacing
 //     itself with sudo. The remaining stdin (everything after
 //     line 1) flows through unmolested into the inner command,
@@ -79,13 +79,33 @@ func (s *targetSession) Close() error {
 // command's `read -r` would then consume the operator's sudo
 // password, e.g. as the new ansible user's password. That landed
 // the operator's sudo password in /etc/shadow on every target
-// box; this rewrite eliminates that path.
+// box; this rewrite eliminates that path. The `-n -v` short-
+// circuit additionally keeps printf from racing a closed pipe
+// when we ever turn on `pipefail` for hardening.
 func (s *targetSession) runRoot(ctx context.Context, cmd, stdin string) (stdout, stderr string, err error) {
 	if s.sudoPassword == "" {
 		return s.run(ctx, cmd, stdin)
 	}
-	wrapper := `set -e; IFS= read -r SUDO_PW; printf '%s\n' "$SUDO_PW" | sudo -S -p '' -v; unset SUDO_PW; exec sudo bash -c ` + shellQuote(cmd)
+	wrapper := `set -e; IFS= read -r SUDO_PW; if sudo -n -v 2>/dev/null; then :; else printf '%s\n' "$SUDO_PW" | sudo -S -p '' -v; fi; unset SUDO_PW; exec sudo bash -c ` + shellQuote(cmd)
 	return s.run(ctx, wrapper, s.sudoPassword+"\n"+stdin)
+}
+
+// requireSudo probes the target to confirm `sudo` is on PATH for
+// non-root operator accounts. We bypass runRoot's sudo wrapper for
+// the probe — wrapping it in sudo would mask the real failure mode
+// ("sudo not installed") with a generic SSH-exit error. Returns a
+// clear, operator-actionable message when missing so the form
+// doesn't silently fail at the first orchestrator step.
+//
+// Root sessions skip the check entirely — they don't need sudo.
+func (s *targetSession) requireSudo(ctx context.Context) error {
+	if s.sudoPassword == "" {
+		return nil
+	}
+	if _, _, err := s.run(ctx, "command -v sudo >/dev/null 2>&1", ""); err != nil {
+		return fmt.Errorf("the target user has no `sudo` available (one of: not installed, not on PATH, or not in sudoers) — connect as root for first-time provisioning so the orchestrator can apt-install sudo before continuing")
+	}
+	return nil
 }
 
 // run executes cmd with the given stdin. Returns stdout + trimmed
