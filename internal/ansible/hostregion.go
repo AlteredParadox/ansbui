@@ -22,7 +22,7 @@ func RegionFromHostname(name string) string {
 		name = name[:dot]
 	}
 	parts := strings.SplitN(strings.ToLower(name), "-", 3)
-	if len(parts) < 2 {
+	if len(parts) < 2 || parts[0] == "" || parts[1] == "" {
 		return ""
 	}
 	return hostRegionLabels[parts[0]+"-"+parts[1]]

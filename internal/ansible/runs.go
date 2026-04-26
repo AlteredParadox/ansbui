@@ -156,26 +156,35 @@ func NewID() string {
 }
 
 // LastPlay records what the most recent playbook against a single
-// host looked like — populated by walking r.runs newest-first and
-// stopping at the first recap mention for each host.
+// host looked like — populated by walking the recorded runs newest-
+// first and stopping at the first recap mention for each host. `At`
+// is the run's StartedAt, not the moment the recap line landed, so
+// for very long plays the timestamp is "when this attempt began".
 type LastPlay struct {
-	Playbook string
-	At       time.Time
-	Status   string
+	Playbook string    `json:"playbook"`
+	At       time.Time `json:"at"`
+	Status   string    `json:"status"`
 }
 
 // LastPlayPerHost returns, for every host that appears in some
 // playbook run's PLAY RECAP, the most recent playbook that targeted
-// it (path + start time + final run status). Adhoc runs are ignored
-// — "last play" means the last actual playbook. The implementation
-// trusts the recap entries because those are emitted for every
-// targeted host regardless of whether tasks succeeded, failed, or
-// were skipped, so a host that was unreachable still shows up.
+// it. Cancelled / failed runs still count — the recap line tells us
+// the runner *attempted* the host, which is what the UI's "Last
+// play" column wants to show.
+//
+// The mutex is held only long enough to snapshot the runs slice (a
+// header-level copy; underlying RunRecord values are immutable
+// after Append). The nested event scan happens outside the lock so
+// concurrent Append calls from streaming runs aren't blocked even
+// when an inventory request triggers this on a large run history.
 func (r *Recorder) LastPlayPerHost() map[string]LastPlay {
 	r.mu.Lock()
-	defer r.mu.Unlock()
+	runs := make([]RunRecord, len(r.runs))
+	copy(runs, r.runs)
+	r.mu.Unlock()
+
 	out := make(map[string]LastPlay)
-	for _, run := range r.runs {
+	for _, run := range runs {
 		if run.Kind != "playbook" {
 			continue
 		}
