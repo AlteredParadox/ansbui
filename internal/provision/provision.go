@@ -89,26 +89,8 @@ func Run(ctx context.Context, pool *sshpool.Pool, srv config.Server, req Request
 		return errors.New("invalid hostname")
 	}
 	emit("meta", fmt.Sprintf("Checking porkbun A record for %s under %s...", subdomainOrApex(subdomain), domain))
-	pb := porkbun.New(apiKey, secretKey)
-	rec, err := pb.FindARecord(ctx, domain, subdomain)
-	if err != nil {
-		emit("fail", err.Error())
+	if err := ensureARecord(ctx, porkbun.New(apiKey, secretKey), domain, subdomain, req.IP, req.Hostname, emit); err != nil {
 		return err
-	}
-	switch {
-	case rec == nil:
-		emit("meta", "No record exists; creating...")
-		if err := pb.CreateARecord(ctx, domain, subdomain, req.IP, dnsTTLSeconds); err != nil {
-			emit("fail", err.Error())
-			return err
-		}
-		emit("ok", fmt.Sprintf("created A record %s -> %s", req.Hostname, req.IP))
-	case rec.Content != req.IP:
-		msg := fmt.Sprintf("A record exists pointing to %s, not %s — update via porkbun manually before retrying", rec.Content, req.IP)
-		emit("fail", msg)
-		return errors.New(msg)
-	default:
-		emit("ok", "A record already correct")
 	}
 
 	emit("meta", fmt.Sprintf("Connecting to %s@%s:%d...", req.Username, req.IP, req.Port))
@@ -220,6 +202,40 @@ func validateRequest(req Request) error {
 	if !strings.Contains(req.Hostname, ".") {
 		return errors.New("hostname must be fully-qualified (include the domain)")
 	}
+	return nil
+}
+
+// ensureARecord makes the porkbun A record for fqdn (= subdomain
+// under domain) match ip. Three outcomes:
+//   - no record yet → create one and emit ok
+//   - record points at the same ip → emit ok
+//   - record points elsewhere → emit fail and return; the operator
+//     fixes the typo or stale entry before retrying instead of
+//     letting us silently overwrite something they care about
+//
+// Extracted from Run() so the Sonar S3776 cognitive-complexity
+// budget on the orchestrator stays under the threshold.
+func ensureARecord(ctx context.Context, pb *porkbun.Client, domain, subdomain, ip, fqdn string, emit func(string, string)) error {
+	rec, err := pb.FindARecord(ctx, domain, subdomain)
+	if err != nil {
+		emit("fail", err.Error())
+		return err
+	}
+	if rec == nil {
+		emit("meta", "No record exists; creating...")
+		if err := pb.CreateARecord(ctx, domain, subdomain, ip, dnsTTLSeconds); err != nil {
+			emit("fail", err.Error())
+			return err
+		}
+		emit("ok", fmt.Sprintf("created A record %s -> %s", fqdn, ip))
+		return nil
+	}
+	if rec.Content != ip {
+		msg := fmt.Sprintf("A record exists pointing to %s, not %s — update via porkbun manually before retrying", rec.Content, ip)
+		emit("fail", msg)
+		return errors.New(msg)
+	}
+	emit("ok", "A record already correct")
 	return nil
 }
 

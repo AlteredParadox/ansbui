@@ -36,7 +36,7 @@ function ProvisioningView() {
     setError('');
     if (!provider.trim()) { setError('Provider is required.'); return; }
     if (!ip.trim()) { setError('IP address is required.'); return; }
-    const portNum = parseInt(port, 10);
+    const portNum = Number.parseInt(port, 10);
     if (!Number.isInteger(portNum) || portNum <= 0 || portNum > 65535) {
       setError('SSH port must be a valid TCP port.');
       return;
@@ -198,4 +198,4 @@ function ProvisioningView() {
   );
 }
 
-window.ProvisioningView = ProvisioningView;
+globalThis.ProvisioningView = ProvisioningView;
