@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/AlteredParadox/ansbui/internal/config"
 	"github.com/AlteredParadox/ansbui/internal/sshpool"
@@ -24,19 +25,21 @@ type Group struct {
 
 // Host mirrors the host records in `ansible-inventory --list`.
 type Host struct {
-	ID     string   `json:"id"`
-	Name   string   `json:"name"`
-	IP     string   `json:"ip"`
-	Groups []string `json:"groups"`
-	Region string   `json:"region,omitempty"`
-	OS     string   `json:"os,omitempty"`
-	Status string   `json:"status"`
-	CPU    int      `json:"cpu"`
-	Mem    int      `json:"mem"`
-	Load   float64  `json:"load"`
-	Uptime int      `json:"uptime,omitempty"`
-	Tags   []string `json:"tags"`
-	Vars   map[string]any `json:"vars,omitempty"`
+	ID             string         `json:"id"`
+	Name           string         `json:"name"`
+	IP             string         `json:"ip"`
+	Groups         []string       `json:"groups"`
+	Region         string         `json:"region,omitempty"`
+	OS             string         `json:"os,omitempty"`
+	Status         string         `json:"status"`
+	CPU            int            `json:"cpu"`
+	Mem            int            `json:"mem"`
+	Load           float64        `json:"load"`
+	Uptime         int            `json:"uptime,omitempty"`
+	Tags           []string       `json:"tags"`
+	Vars           map[string]any `json:"vars,omitempty"`
+	LastPlaybook   string         `json:"lastPlaybook,omitempty"`
+	LastPlaybookAt time.Time      `json:"lastPlaybookAt,omitempty"`
 }
 
 // Inventory is the full snapshot the UI consumes.

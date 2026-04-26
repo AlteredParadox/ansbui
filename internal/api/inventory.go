@@ -44,7 +44,21 @@ func (s *Server) inventory(w http.ResponseWriter, r *http.Request) {
 	if s.Config.Snapshot().GeoIPEnabled {
 		s.geoResolver().enrichInventory(r.Context(), &inv)
 	}
+	applyLastPlay(&inv, s.Runs.LastPlayPerHost())
 	writeJSON(w, http.StatusOK, inv)
+}
+
+// applyLastPlay decorates each host with its most recent playbook
+// and that run's start time, sourced from the recap events recorded
+// in runs.json. Hosts that have never been part of a playbook recap
+// pass through untouched.
+func applyLastPlay(inv *ansible.Inventory, last map[string]ansible.LastPlay) {
+	for i := range inv.Hosts {
+		if lp, ok := last[inv.Hosts[i].Name]; ok {
+			inv.Hosts[i].LastPlaybook = lp.Playbook
+			inv.Hosts[i].LastPlaybookAt = lp.At
+		}
+	}
 }
 
 // metrics returns the raw per-host metric snapshot plus per-probe

@@ -205,7 +205,7 @@ function HostTable({ rows, selectedIds, toggleSelect, toggleAll, onRowClick, sor
               <td><MiniBar value={h.cpu} /></td>
               <td><MiniBar value={h.mem} warn={70} danger={90}/></td>
               <td className="mono">{(h.load ?? 0).toFixed(2)}</td>
-              <td className="mono mute">{h.lastPlaybook}</td>
+              <td className="mono mute" title={lastPlayTitle(h)}>{lastPlayLabel(h)}</td>
             </tr>
           ))}
         </tbody>
@@ -222,6 +222,42 @@ function MiniBar({ value, warn = 70, danger = 90 }) {
       <span className="mini-bar-val mono">{value}</span>
     </div>
   );
+}
+
+// lastPlayLabel renders just the playbook filename (last `/`-segment
+// of the relative path) so the column stays narrow. The full path
+// + a relative-time hint live in the cell's title attribute below.
+function lastPlayLabel(h) {
+  const p = h.lastPlaybook;
+  if (!p) return '';
+  const slash = p.lastIndexOf('/');
+  return slash === -1 ? p : p.slice(slash + 1);
+}
+
+// lastPlayTitle is the hover tooltip — full relative path plus a
+// rough "X ago" timestamp so the operator can tell at a glance
+// whether the run was recent.
+function lastPlayTitle(h) {
+  if (!h.lastPlaybook) return '';
+  const at = h.lastPlaybookAt ? new Date(h.lastPlaybookAt) : null;
+  if (!at || isNaN(at.getTime())) return h.lastPlaybook;
+  const ago = relativeTime(at);
+  return `${h.lastPlaybook} · ${ago}`;
+}
+
+function relativeTime(d) {
+  const ms = Date.now() - d.getTime();
+  const sec = Math.round(ms / 1000);
+  if (sec < 60) return `${sec}s ago`;
+  const min = Math.round(sec / 60);
+  if (min < 60) return `${min}m ago`;
+  const hr = Math.round(min / 60);
+  if (hr < 48) return `${hr}h ago`;
+  const day = Math.round(hr / 24);
+  if (day < 30) return `${day}d ago`;
+  const mo = Math.round(day / 30);
+  if (mo < 24) return `${mo}mo ago`;
+  return `${Math.round(mo / 12)}y ago`;
 }
 
 // ---------- Graph ----------

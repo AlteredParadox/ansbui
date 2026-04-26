@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -152,4 +153,45 @@ func (r *Recorder) Get(id string) (RunRecord, bool) {
 // local history file.
 func NewID() string {
 	return fmt.Sprintf("run-%d", time.Now().UnixMilli())
+}
+
+// LastPlay records what the most recent playbook against a single
+// host looked like — populated by walking r.runs newest-first and
+// stopping at the first recap mention for each host.
+type LastPlay struct {
+	Playbook string
+	At       time.Time
+	Status   string
+}
+
+// LastPlayPerHost returns, for every host that appears in some
+// playbook run's PLAY RECAP, the most recent playbook that targeted
+// it (path + start time + final run status). Adhoc runs are ignored
+// — "last play" means the last actual playbook. The implementation
+// trusts the recap entries because those are emitted for every
+// targeted host regardless of whether tasks succeeded, failed, or
+// were skipped, so a host that was unreachable still shows up.
+func (r *Recorder) LastPlayPerHost() map[string]LastPlay {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make(map[string]LastPlay)
+	for _, run := range r.runs {
+		if run.Kind != "playbook" {
+			continue
+		}
+		for _, evt := range run.Log {
+			if evt.Host == "" || !strings.HasPrefix(evt.Type, "recap") {
+				continue
+			}
+			if _, seen := out[evt.Host]; seen {
+				continue
+			}
+			out[evt.Host] = LastPlay{
+				Playbook: run.Playbook,
+				At:       run.StartedAt,
+				Status:   run.Status,
+			}
+		}
+	}
+	return out
 }
