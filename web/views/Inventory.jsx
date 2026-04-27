@@ -155,21 +155,21 @@ function HostTable({ rows, selectedIds, toggleSelect, toggleAll, onRowClick, sor
   };
   const col = (key, label, cls) => {
     const toggle = () => setSort({ key, dir: sort.key === key && sort.dir === 'asc' ? 'desc' : 'asc' });
-    // role/tabIndex/onKeyDown make the sortable header reachable
-    // by keyboard — Sonar S6847 flags an onClick on a non-
-    // interactive element without a key handler, and accessibility
-    // genuinely benefits here (Tab into the header row, Enter or
-    // Space to toggle sort).
+    // aria-sort lives on the <th> (which has implicit
+    // role="columnheader" — the only role that supports it; Sonar
+    // S6811). The interactive control is a real <button> nested
+    // inside, which is what S6819 wants over `role="button"` on
+    // the th itself, and gets us native keyboard handling for
+    // free (Enter and Space both fire onClick on a button).
+    let ariaSort = 'none';
+    if (sort.key === key) {
+      ariaSort = sort.dir === 'asc' ? 'ascending' : 'descending';
+    }
     return (
-      <th
-        className={cls}
-        role="button"
-        tabIndex={0}
-        aria-sort={sort.key === key ? (sort.dir === 'asc' ? 'ascending' : 'descending') : 'none'}
-        onClick={toggle}
-        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); } }}
-      >
-        {label} <span className="mute mono">{sortArrow(key)}</span>
+      <th className={cls} aria-sort={ariaSort}>
+        <button type="button" className="text-btn" onClick={toggle}>
+          {label} <span className="mute mono">{sortArrow(key)}</span>
+        </button>
       </th>
     );
   };
@@ -198,17 +198,27 @@ function HostTable({ rows, selectedIds, toggleSelect, toggleAll, onRowClick, sor
             <tr
               key={h.id}
               className={`t-row-click ${selectedIds.has(h.id) ? 'selected' : ''}`}
-              role="button"
-              tabIndex={0}
-              aria-label={`Open details for ${h.name}`}
               onClick={() => onRowClick(h)}
-              onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); onRowClick(h); } }}
             >
               <td onClick={(e) => e.stopPropagation()}>
                 <input type="checkbox" aria-label={`Select ${h.name}`} checked={selectedIds.has(h.id)} onChange={() => toggleSelect(h.id)}/>
               </td>
               <td><span className={`dot ${h.status}`}/></td>
-              <td className="mono" style={{ color: 'var(--text)' }}>{h.name}</td>
+              <td className="mono" style={{ color: 'var(--text)' }}>
+                {/* Host name doubles as the row's keyboard click
+                    target — a real <button> with an aria-label so
+                    screen readers announce the action, not just
+                    the host name. Mouse users keep the
+                    whole-row-click via the <tr>'s onClick. */}
+                <button
+                  type="button"
+                  className="text-btn"
+                  aria-label={`Open details for ${h.name}`}
+                  onClick={(e) => { e.stopPropagation(); onRowClick(h); }}
+                >
+                  {h.name}
+                </button>
+              </td>
               <td className="mono mute">{h.ip}</td>
               <td className="mute" style={{ fontSize: 12 }}>{h.os}</td>
               <td className="mute" style={{ fontSize: 12 }}>{h.region || ''}</td>

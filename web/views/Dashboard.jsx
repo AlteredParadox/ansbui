@@ -153,17 +153,26 @@ function DashboardView({ onNavigate, onOpenAdhoc }) {
               </thead>
               <tbody>
                 {recentRuns.map(r => (
-                  <tr
-                    key={r.id}
-                    className="t-row-click"
-                    role="button"
-                    tabIndex={0}
-                    aria-label={`Open run history`}
-                    onClick={() => onNavigate('history')}
-                    onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); onNavigate('history'); } }}
-                  >
+                  // Row is non-interactive — the run id cell
+                  // wraps a real <button> so keyboard users can
+                  // tab to it, and Sonar S6819 isn't tripped by
+                  // a `role="button"` on the <tr>. Removing the
+                  // row-wide onClick shrinks the click target
+                  // (run id only) but the row is in a small
+                  // dashboard preview and a button is the
+                  // semantically correct affordance.
+                  <tr key={r.id}>
                     <td><span className={`dot ${r.status}`}/></td>
-                    <td className="mono">{r.id}</td>
+                    <td className="mono">
+                      <button
+                        type="button"
+                        className="text-btn"
+                        aria-label={`Open run ${r.id} in history`}
+                        onClick={() => onNavigate('history')}
+                      >
+                        {r.id}
+                      </button>
+                    </td>
                     <td className="mono">{r.pb || '—'}</td>
                     <td className="mono" style={{ color: 'var(--ok)' }}>{r.ok}</td>
                     <td className="mono" style={{ color: 'var(--warn)' }}>{r.changed}</td>
