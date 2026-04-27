@@ -40,11 +40,18 @@ jobs:
       # 2. Output-shape check after each invocation. Even with (1),
       #    `go test` can return a context-deadline error when the
       #    coordinator can't shut workers down in time at the
-      #    20s edge. A REAL fuzz finding writes
-      #    "Failing input written to testdata/fuzz/..." to stdout
-      #    and stages the corpus entry for replay. A timing flake
-      #    doesn't. We ignore non-zero exits that lack the
-      #    failing-input signal and treat the rest as fatal.
+      #    20s edge. We classify non-zero exits in this order:
+      #      a. "Failing input written to testdata/fuzz/..."
+      #         → real finding, fatal.
+      #      b. "    --- FAIL: Fuzz.../" sub-test line
+      #         → real finding (alternate framework path), fatal.
+      #      c. "context deadline exceeded" anywhere in stdout
+      #         → known timing flake, log ::warning:: and continue.
+      #      d. anything else (build error, panic, unforeseen
+      #         failure mode) → fatal.
+      #    The narrow (c) clause is what makes this safe: it's the
+      #    only string we tolerate, so a future failure shape we
+      #    haven't seen still surfaces instead of getting masked.
       - name: Fuzz (short)
         run: |
           set -e
