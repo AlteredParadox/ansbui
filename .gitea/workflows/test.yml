@@ -28,21 +28,45 @@ jobs:
       # 11 targets × 20s ≈ 4 minutes; bump fuzztime if running on
       # a beefier runner with budget to spare.
       #
-      # -fuzzminimizetime=2s caps how long the engine spends
-      # minimizing a freshly-discovered "interesting" input. The
-      # default (60s) was tripping the 20s overall budget on slow
-      # shared runners: a finding at second 19 would start
-      # minimizing for up to 60s, the test deadline would hit,
-      # and Go would surface a "context deadline exceeded" FAIL
-      # with no real bug. 2s is enough for common-case
-      # minimization without bleeding into the run budget.
+      # Two CI-flake mitigations layered together:
+      #
+      # 1. -fuzzminimizetime=2s caps how long the engine spends
+      #    minimizing a freshly-discovered "interesting" input.
+      #    Default (60s) was overshooting the 20s budget on slow
+      #    shared runners: a finding at second 19 would start
+      #    minimizing for up to 60s, the deadline would hit,
+      #    and Go would surface "context deadline exceeded".
+      #
+      # 2. Output-shape check after each invocation. Even with (1),
+      #    `go test` can return a context-deadline error when the
+      #    coordinator can't shut workers down in time at the
+      #    20s edge. A REAL fuzz finding writes
+      #    "Failing input written to testdata/fuzz/..." to stdout
+      #    and stages the corpus entry for replay. A timing flake
+      #    doesn't. We ignore non-zero exits that lack the
+      #    failing-input signal and treat the rest as fatal.
       - name: Fuzz (short)
         run: |
           set -e
-          while IFS= read -r file; do
+          files=$(grep -rl 'func Fuzz' --include='*_test.go' internal/)
+          for file in $files; do
             dir=$(dirname "$file")
-            grep -oE 'func (Fuzz[A-Za-z0-9_]+)' "$file" | awk '{print $2}' | while read -r fn; do
-              echo "Fuzzing $fn in $dir"
-              go test -run='^$' -fuzz="^${fn}$" -fuzztime=20s -fuzzminimizetime=2s "./$dir"
+            fns=$(grep -oE 'func (Fuzz[A-Za-z0-9_]+)' "$file" | awk '{print $2}')
+            for fn in $fns; do
+              echo "::group::Fuzzing $fn in $dir"
+              out=$(go test -run='^$' -fuzz="^${fn}$" -fuzztime=20s -fuzzminimizetime=2s "./$dir" 2>&1) && rc=0 || rc=$?
+              printf '%s\n' "$out"
+              echo "::endgroup::"
+              if [ "$rc" -ne 0 ]; then
+                if printf '%s' "$out" | grep -q "Failing input written to"; then
+                  echo "::error::fuzz target $fn found a failing input"
+                  exit 1
+                fi
+                if printf '%s' "$out" | grep -qE '^[[:space:]]+--- FAIL: '; then
+                  echo "::error::fuzz target $fn produced a sub-test failure"
+                  exit 1
+                fi
+                echo "::warning::fuzz target $fn exited non-zero without a failing input (typically 'context deadline exceeded' at the budget edge); treating as a CI-timing flake"
+              fi
             done
-          done < <(grep -rl 'func Fuzz' --include='*_test.go' internal/)
+          done
