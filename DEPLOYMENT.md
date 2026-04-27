@@ -68,8 +68,14 @@ The hardened unit lives at `deploy/ansbui.service`. Key
 properties:
 
 - runs as a dedicated `ansbui:ansbui` user/group
-- `ProtectSystem=strict` + `ReadWritePaths=/opt/ansbui` — only
-  /opt/ansbui is writable
+- `ProtectSystem=strict` + `ReadWritePaths=/opt/ansbui/data
+  /opt/ansbui/.ssh` — only the runtime-state dirs are writable.
+  The install tree (`/opt/ansbui`, `/opt/ansbui/bin`, the
+  binary itself) is owned by root and read-only to the service,
+  so a compromise can't overwrite its own binary.
+- `PrivateIPC=true` + `RemoveIPC=true` — service runs in its
+  own SysV/POSIX IPC namespace and any objects it creates are
+  cleaned up on exit.
 - `CapabilityBoundingSet=` (empty) — no caps inherited
 - `RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX` — no
   netlink, packet, bluetooth sockets
@@ -88,6 +94,15 @@ To install:
 sudo cp deploy/ansbui.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now ansbui
+```
+
+First-time directory layout — install tree owned by root,
+runtime state owned by the service user:
+
+```
+sudo install -d -o root   -g root   -m 0755 /opt/ansbui /opt/ansbui/bin
+sudo install -d -o ansbui -g ansbui -m 0700 /opt/ansbui/data /opt/ansbui/.ssh
+sudo install    -o root   -g root   -m 0755 /tmp/ansbui    /opt/ansbui/bin/
 ```
 
 ## 6. File permissions
@@ -147,11 +162,17 @@ expensive.
 
 ```
 git pull && go build -trimpath -ldflags='-s -w' -o /tmp/ansbui .
-sudo install -o ansbui -g ansbui -m 0755 /tmp/ansbui /opt/ansbui/bin/
+sudo install -o root -g root -m 0755 /tmp/ansbui /opt/ansbui/bin/
 sudo systemctl restart ansbui
 sudo systemctl status ansbui
 curl -fsS -o /dev/null -w "HTTP %{http_code}\n" http://127.0.0.1:8787/
 ```
+
+The binary is owned by root (not the service user) so the
+running service can't overwrite it — a compromise can't
+self-update with malicious code. The deploying operator needs
+sudo, which is fine for an upgrade flow that's usually
+manual or driven by CI with elevated privileges.
 
 `-trimpath` strips local paths from binary; `-ldflags='-s -w'`
 strips the symbol table. Neither affects the security posture

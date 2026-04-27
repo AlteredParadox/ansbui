@@ -32,7 +32,14 @@ ProtectHostname=true
 ProtectKernelLogs=true
 ProtectProc=invisible
 ProcSubset=pid
-ReadWritePaths=/opt/ansbui
+
+# Read-only for the install tree (root-owned), writable only
+# for runtime state. A compromised process can't overwrite its
+# own binary or drop a malicious helper into bin/. The two
+# writable dirs:
+#   data/  — config.json, runs.json, runs/
+#   .ssh/  — known_hosts (TOFU appends), agent socket if any
+ReadWritePaths=/opt/ansbui/data /opt/ansbui/.ssh
 
 # Drop every capability — the service binds 8787 (unprivileged
 # port) and runs entirely in user space. Empty bounding set
@@ -52,6 +59,13 @@ RestrictSUIDSGID=true
 RestrictRealtime=true
 LockPersonality=true
 MemoryDenyWriteExecute=true
+
+# IPC isolation: ansbui only uses TCP and AF_UNIX sockets, no
+# SysV/POSIX IPC objects. PrivateIPC unshares the IPC namespace
+# (own message queues/shared memory/semaphores); RemoveIPC
+# cleans up anything it does create at process exit.
+PrivateIPC=true
+RemoveIPC=true
 
 # @system-service is the systemd-curated "normal long-running
 # daemon" syscall set. It already excludes @privileged. Adding
