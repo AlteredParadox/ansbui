@@ -195,26 +195,23 @@ function HostTable({ rows, selectedIds, toggleSelect, toggleAll, onRowClick, sor
         </thead>
         <tbody>
           {rows.map(h => (
-            <tr
-              key={h.id}
-              className={`t-row-click ${selectedIds.has(h.id) ? 'selected' : ''}`}
-              onClick={() => onRowClick(h)}
-            >
-              <td onClick={(e) => e.stopPropagation()}>
+            // The row keeps the .t-row-click hover styling as a
+            // visual affordance, but the only interactive control
+            // is the host-name <button> below — that satisfies
+            // both mouse and keyboard users and lets us drop the
+            // S6847/S6819 exclusion that the old whole-row
+            // onClick required.
+            <tr key={h.id} className={`t-row-click ${selectedIds.has(h.id) ? 'selected' : ''}`}>
+              <td>
                 <input type="checkbox" aria-label={`Select ${h.name}`} checked={selectedIds.has(h.id)} onChange={() => toggleSelect(h.id)}/>
               </td>
               <td><span className={`dot ${h.status}`}/></td>
               <td className="mono" style={{ color: 'var(--text)' }}>
-                {/* Host name doubles as the row's keyboard click
-                    target — a real <button> with an aria-label so
-                    screen readers announce the action, not just
-                    the host name. Mouse users keep the
-                    whole-row-click via the <tr>'s onClick. */}
                 <button
                   type="button"
                   className="text-btn"
                   aria-label={`Open details for ${h.name}`}
-                  onClick={(e) => { e.stopPropagation(); onRowClick(h); }}
+                  onClick={() => onRowClick(h)}
                 >
                   {h.name}
                 </button>

@@ -66,7 +66,18 @@ jobs:
                   echo "::error::fuzz target $fn produced a sub-test failure"
                   exit 1
                 fi
-                echo "::warning::fuzz target $fn exited non-zero without a failing input (typically 'context deadline exceeded' at the budget edge); treating as a CI-timing flake"
+                # Narrow tolerance to the ONE flake shape we've
+                # actually observed: "context deadline exceeded"
+                # at/just past the fuzztime edge with no real
+                # finding on stdout. Any other non-zero exit
+                # (build error, panic, an unforeseen failure
+                # mode) is still fatal.
+                if printf '%s' "$out" | grep -q "context deadline exceeded"; then
+                  echo "::warning::fuzz target $fn hit context-deadline-exceeded without a failing input — treating as a CI-timing flake"
+                else
+                  echo "::error::fuzz target $fn exited $rc with no recognised flake signature"
+                  exit 1
+                fi
               fi
             done
           done
