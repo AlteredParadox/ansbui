@@ -216,7 +216,7 @@ function ProvisioningView() {
     <div className="view view-provision">
       <div className="view-head">
         <div>
-          <h1 className="view-title">Provision</h1>
+          <h1 className="view-title">Bootstrap</h1>
           <div className="view-sub mute">
             Bootstrap a fresh VPS into the inventory: porkbun DNS, ansible user with key auth, sshd → 4242, then add to a provider group.
           </div>
@@ -226,7 +226,7 @@ function ProvisioningView() {
       {activeSummary && (
         <div className="card mono" style={{ padding: 10, marginTop: 10, fontSize: 12 }}>
           <span className="mute">re-attached to active run:</span>{' '}
-          {activeSummary.hostname || activeSummary.ip || 'provisioning'}
+          {activeSummary.hostname || activeSummary.ip || 'bootstrapping'}
           {activeSummary.provider ? <span className="mute"> · {activeSummary.provider}</span> : null}
         </div>
       )}
@@ -317,7 +317,7 @@ function ProvisioningView() {
                 </div>
               </div>
               <div className="mute" style={{ fontSize: 11, marginTop: 6 }}>
-                The target reboots into the chosen OS, sshd is set to <span className="mono">:4242</span> with the ansible public key in root&rsquo;s <span className="mono">authorized_keys</span>, then provisioning continues. Expect 10&ndash;30 minutes; the run lives on the backend so you can close this tab and re-attach later. <b>Assumes your provider preserves the IP through reinstall.</b>
+                The target reboots into the chosen OS, sshd is set to <span className="mono">:4242</span> with the ansible public key in root&rsquo;s <span className="mono">authorized_keys</span>, then bootstrap continues. Expect 10&ndash;30 minutes; the run lives on the backend so you can close this tab and re-attach later. <b>Assumes your provider preserves the IP through reinstall.</b>
               </div>
             </div>
           )}
@@ -330,7 +330,7 @@ function ProvisioningView() {
             </button>
           ) : (
             <button type="button" className="btn primary small" onClick={start}>
-              <Icon name="play" size={12}/> Provision
+              <Icon name="play" size={12}/> Bootstrap
             </button>
           )}
           <button type="button" className="btn small" onClick={() => setOutput([])} disabled={running}>
@@ -342,7 +342,7 @@ function ProvisioningView() {
       <div className="terminal" ref={outRef} style={{ marginTop: 14, minHeight: 280 }}>
         {output.length === 0 && (
           <div className="terminal-empty mute-2 mono">
-            <div># fill in the form and press Provision</div>
+            <div># fill in the form and press Bootstrap</div>
             <div># DNS check, SSH bootstrap, ansible-user setup, sshd flip, inventory edit — streamed live</div>
             <div># the run lives on the backend — you can close this tab and re-attach later</div>
           </div>
