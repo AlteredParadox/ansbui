@@ -20,10 +20,15 @@ var knownHostsMu sync.Mutex
 // recorded; when it isn't, it records it on first use. knownhosts.New
 // won't create the file — it opens for read and returns ENOENT if
 // missing — so we touch it (0o600) on a fresh system before loading
-// the strict callback. The append path takes the mutex so two
-// parallel dials to a brand-new host can't interleave writes;
-// subsequent dials re-load the file via a fresh hostKeyCallback
-// invocation, which is when the new entry is verified against.
+// the strict callback.
+//
+// TOFU race: the outer strict callback is loaded once and its
+// in-memory DB is a snapshot. If two parallel first-contact dials
+// to the same host see different keys, both observe an empty DB
+// in this snapshot and would both append. appendKnownHost re-loads
+// under the mutex and re-verifies before writing, so only the
+// first key gets recorded — the second dial fails on mismatch
+// like any other key change.
 func knownHostsCallback(path string) (ssh.HostKeyCallback, error) {
 	if err := ensureKnownHostsExists(path); err != nil {
 		return nil, err
@@ -50,7 +55,7 @@ func knownHostsCallback(path string) (ssh.HostKeyCallback, error) {
 		if len(keyErr.Want) > 0 {
 			return err
 		}
-		return appendKnownHost(path, hostname, key)
+		return appendKnownHost(path, hostname, remote, key)
 	}, nil
 }
 
@@ -88,9 +93,39 @@ func ensureKnownHostsMode(path string) error {
 	return nil
 }
 
-func appendKnownHost(path, hostname string, key ssh.PublicKey) error {
+// appendKnownHost serialises the TOFU write and re-verifies under
+// the mutex. Re-loading is what closes the race the snapshot-based
+// outer strict callback can't see: another goroutine may have
+// appended a *different* key for this host between the outer
+// strict() check and now. Three outcomes:
+//
+//   - fresh.New + fresh callback says "match" → another dial just
+//     recorded the same key (we raced ourselves to the empty-DB
+//     observation but both saw the right key); nothing to do.
+//   - fresh callback says "mismatch with Want" → another dial
+//     recorded a *different* key; refuse to append. The caller
+//     gets a real KeyError, same as a long-after-recording MITM.
+//   - fresh callback says "still empty" → we're the first; append.
+func appendKnownHost(path, hostname string, remote net.Addr, key ssh.PublicKey) error {
 	knownHostsMu.Lock()
 	defer knownHostsMu.Unlock()
+	fresh, err := knownhosts.New(path)
+	if err != nil {
+		return fmt.Errorf("reload known_hosts under lock: %w", err)
+	}
+	if err := fresh(hostname, remote, key); err != nil {
+		var keyErr *knownhosts.KeyError
+		if !errors.As(err, &keyErr) {
+			return err
+		}
+		if len(keyErr.Want) > 0 {
+			return err
+		}
+		// Empty Want → not yet recorded; fall through to append.
+	} else {
+		// Already recorded with this key — nothing to do.
+		return nil
+	}
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0o600)
 	if err != nil {
 		return fmt.Errorf("append known_hosts: %w", err)
