@@ -519,12 +519,25 @@ function PlaybookRunner({ open, pb, seed, onClose }) {
 
   useEffectP(() => {
     if (!open) {
-      // close any stream when dialog is dismissed
+      // Close any stream when dialog is dismissed and reset every
+      // piece of dialog-local state so the next open — for the same
+      // or a different playbook — starts clean. Without this,
+      // values from a previous run (limit, tags, vars, check/become)
+      // bleed into whichever playbook the operator opens next.
+      // The seed-apply effect re-fills these when a History re-run
+      // launches the dialog with a seed; manual opens get defaults.
       if (streamRef.current) { streamRef.current.close(); streamRef.current = null; }
       setOutput([]);
       setRunning(false);
       setVaultPassword('');
       setIncludeHosts([]);
+      setLimit('');
+      setLimitPickerOpen(false);
+      setTagsRaw('');
+      setCheck(false);
+      setBecome(false);
+      setVars([newVarRow()]);
+      setVarsError('');
       return;
     }
     // Lazy-fetch the playbook content so we can show the
