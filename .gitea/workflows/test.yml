@@ -27,6 +27,15 @@ jobs:
       # and runs each for 20s. No-ops cleanly when there are none.
       # 11 targets × 20s ≈ 4 minutes; bump fuzztime if running on
       # a beefier runner with budget to spare.
+      #
+      # -fuzzminimizetime=2s caps how long the engine spends
+      # minimizing a freshly-discovered "interesting" input. The
+      # default (60s) was tripping the 20s overall budget on slow
+      # shared runners: a finding at second 19 would start
+      # minimizing for up to 60s, the test deadline would hit,
+      # and Go would surface a "context deadline exceeded" FAIL
+      # with no real bug. 2s is enough for common-case
+      # minimization without bleeding into the run budget.
       - name: Fuzz (short)
         run: |
           set -e
@@ -34,6 +43,6 @@ jobs:
             dir=$(dirname "$file")
             grep -oE 'func (Fuzz[A-Za-z0-9_]+)' "$file" | awk '{print $2}' | while read -r fn; do
               echo "Fuzzing $fn in $dir"
-              go test -run='^$' -fuzz="^${fn}$" -fuzztime=20s "./$dir"
+              go test -run='^$' -fuzz="^${fn}$" -fuzztime=20s -fuzzminimizetime=2s "./$dir"
             done
           done < <(grep -rl 'func Fuzz' --include='*_test.go' internal/)

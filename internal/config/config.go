@@ -156,7 +156,10 @@ func (m *Manager) persistLocked() error {
 
 // atomicWrite writes data to a sibling tmp file, fsyncs, then renames
 // over the target. Without the fsync, a crash between the rename and
-// the writeback can leave a zero-byte file on disk.
+// the writeback can leave a zero-byte file on disk. The directory
+// entry itself also needs an fsync after the rename — a power loss
+// after the rename's metadata hits the journal but before the dir's
+// inode is flushed leaves the new file invisible at boot.
 func atomicWrite(path string, data []byte) error {
 	tmp := path + ".tmp"
 	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
@@ -177,7 +180,27 @@ func atomicWrite(path string, data []byte) error {
 		_ = os.Remove(tmp)
 		return fmt.Errorf("close temp: %w", err)
 	}
-	return os.Rename(tmp, path)
+	if err := os.Rename(tmp, path); err != nil {
+		return err
+	}
+	return fsyncDir(filepath.Dir(path))
+}
+
+// fsyncDir flushes a directory's inode so a rename or unlink that
+// landed in the journal becomes durable across crashes/power loss.
+// On Linux this is a no-arg fsync against the directory's fd; on
+// platforms that disallow it we'd need a different shim, but ansbui
+// only ships on Linux.
+func fsyncDir(dir string) error {
+	f, err := os.Open(dir)
+	if err != nil {
+		return fmt.Errorf("open dir for fsync: %w", err)
+	}
+	defer f.Close()
+	if err := f.Sync(); err != nil {
+		return fmt.Errorf("fsync dir: %w", err)
+	}
+	return nil
 }
 
 // Snapshot returns a deep copy of the current store.

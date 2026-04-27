@@ -94,6 +94,14 @@ func NewRecorder(path string) (*Recorder, error) {
 				log.Printf("runs: %s is corrupt (%v); failed to quarantine: %v", path, jerr, rerr)
 			} else {
 				log.Printf("runs: %s was corrupt (%v); moved to %s and starting with empty history", path, jerr, quarantined)
+				// Belt-and-suspenders: fsync the dir so the
+				// quarantine rename survives a power loss
+				// during boot. If the dir sync itself fails
+				// we just log — the rename already returned
+				// success so the in-memory state is correct.
+				if ferr := fsyncDir(filepath.Dir(path)); ferr != nil {
+					log.Printf("runs: fsync dir after quarantine failed: %v", ferr)
+				}
 			}
 		}
 	}
@@ -163,7 +171,32 @@ func (r *Recorder) saveLocked() error {
 		_ = os.Remove(tmp)
 		return fmt.Errorf("close runs temp: %w", err)
 	}
-	return os.Rename(tmp, r.path)
+	if err := os.Rename(tmp, r.path); err != nil {
+		return err
+	}
+	// fsync the parent dir so the rename's directory-entry update
+	// is durable across power loss — the file's content is already
+	// fsynced, but without the dir sync the rename could end up
+	// reverted on crash recovery and the new run is "lost".
+	return fsyncDir(filepath.Dir(r.path))
+}
+
+// fsyncDir flushes a directory's inode so a rename/unlink that
+// landed in the journal becomes durable across crashes/power loss.
+// Mirrors the helper in internal/config/config.go — kept local
+// rather than wired into a shared util package because each
+// package only has one writer and a 5-line helper isn't worth
+// a new import edge.
+func fsyncDir(dir string) error {
+	f, err := os.Open(dir)
+	if err != nil {
+		return fmt.Errorf("open dir for fsync: %w", err)
+	}
+	defer f.Close()
+	if err := f.Sync(); err != nil {
+		return fmt.Errorf("fsync dir: %w", err)
+	}
+	return nil
 }
 
 // List returns a copy of the current run records (already sorted newest
