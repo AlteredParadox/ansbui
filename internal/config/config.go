@@ -325,21 +325,26 @@ func validatePromLabel(s string) error {
 // file:// or javascript: URL through the settings endpoint.
 //
 // SSRF guardrails: the metrics fetcher hits whatever URL is stored
-// here, server-side, with no per-user auth in front. Two layers of
-// defence:
-//   - hard-coded denylist for cloud-metadata addresses (AWS / GCP /
-//     OpenStack / DO IMDS), which are the highest-value SSRF targets
-//     on a typical control node;
-//   - optional ANSBUI_PROM_ALLOWED_HOSTS env var (comma-separated
-//     host[:port] entries) that, when set, restricts the URL host to
-//     the allowlist. Operators putting ansbui behind a reverse proxy
-//     with multi-tenant auth should set this to lock the setting
-//     down to a known Prometheus.
+// here, server-side, with no per-user auth in front. Allowlist by
+// default — denylists miss private services on RFC1918 networks
+// and don't address DNS rebinding at fetch time:
 //
-// We don't do DNS resolution here — it'd race with the actual fetch
-// (DNS rebinding) and the host strings users type are typically
-// literal. The denylist matches both literal IPs and the textual
-// hostnames cloud providers commonly use.
+//   - When ANSBUI_PROM_ALLOWED_HOSTS is set (comma-separated
+//     host[:port] entries), only those hosts are accepted. This is
+//     the right setting for any deployment behind shared auth.
+//   - When unset, only loopback hosts (127.0.0.1, ::1, "localhost")
+//     are accepted. Matches the default loopback bind: the typical
+//     install scrapes a same-host Prometheus.
+//   - Cloud-IMDS hostnames are always rejected (defence in depth
+//     even on loopback — should never resolve there, but a
+//     misconfigured /etc/hosts could).
+//
+// We deliberately don't resolve the hostname here. DNS lookup at
+// validation time races with the actual fetch (rebinding); a
+// thorough fix would inspect the resolved IP inside the
+// http.Transport's DialContext. Tracked as a follow-up — the
+// allowlist already constrains the surface to a known set of
+// hostnames, which is the practically valuable bound.
 func normalisePromURL(raw string) (string, error) {
 	s := strings.TrimRight(strings.TrimSpace(raw), "/")
 	if s == "" {
@@ -390,7 +395,14 @@ func checkPromHost(host, hostport string) error {
 	}
 	allow := strings.TrimSpace(os.Getenv("ANSBUI_PROM_ALLOWED_HOSTS"))
 	if allow == "" {
-		return nil
+		// Default: loopback only. Operators wanting any other host
+		// must set ANSBUI_PROM_ALLOWED_HOSTS — keeps the SSRF
+		// surface to either same-host Prom or an explicitly named
+		// remote, no surprise pivots into private services.
+		if isLoopbackHost(host) {
+			return nil
+		}
+		return fmt.Errorf("prometheus host %q is not loopback; set ANSBUI_PROM_ALLOWED_HOSTS=%s to allow it (allowlist required because ansbui has no built-in auth — see config.go normalisePromURL)", host, hostport)
 	}
 	for _, entry := range strings.Split(allow, ",") {
 		entry = strings.TrimSpace(entry)
@@ -402,6 +414,20 @@ func checkPromHost(host, hostport string) error {
 		}
 	}
 	return fmt.Errorf("prometheus host %q is not in ANSBUI_PROM_ALLOWED_HOSTS", hostport)
+}
+
+// isLoopbackHost recognises the textual forms of localhost: the
+// literal "localhost" name and any IP that net.ParseIP marks as
+// loopback (127.0.0.0/8 and ::1). Anything else gets routed through
+// the allowlist requirement above.
+func isLoopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+		return true
+	}
+	return false
 }
 
 // Prometheus returns the configured Prometheus URL and host label.

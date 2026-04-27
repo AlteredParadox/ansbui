@@ -17,9 +17,17 @@ import (
 var knownHostsMu sync.Mutex
 
 // knownHostsCallback verifies against ~/.ssh/known_hosts when the host is
-// recorded; when it isn't, it records it on first use. TOFU is inherent
-// here (no operator prompt) so we lock + re-verify after append.
+// recorded; when it isn't, it records it on first use. knownhosts.New
+// won't create the file — it opens for read and returns ENOENT if
+// missing — so we touch it (0o600) on a fresh system before loading
+// the strict callback. The append path takes the mutex so two
+// parallel dials to a brand-new host can't interleave writes;
+// subsequent dials re-load the file via a fresh hostKeyCallback
+// invocation, which is when the new entry is verified against.
 func knownHostsCallback(path string) (ssh.HostKeyCallback, error) {
+	if err := ensureKnownHostsExists(path); err != nil {
+		return nil, err
+	}
 	if err := ensureKnownHostsMode(path); err != nil {
 		return nil, err
 	}
@@ -44,6 +52,19 @@ func knownHostsCallback(path string) (ssh.HostKeyCallback, error) {
 		}
 		return appendKnownHost(path, hostname, key)
 	}, nil
+}
+
+// ensureKnownHostsExists creates the file 0o600 if missing.
+// knownhosts.New opens-for-read and returns ENOENT otherwise,
+// which would push every fresh-system dial into fail-closed mode.
+// Touching the file is equivalent to the empty-file the user would
+// have ended up with on first ssh anyway.
+func ensureKnownHostsExists(path string) error {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		return fmt.Errorf("create known_hosts: %w", err)
+	}
+	return f.Close()
 }
 
 // ensureKnownHostsMode chmods the file to 0o600 if it is group- or
