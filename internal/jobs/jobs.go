@@ -117,15 +117,26 @@ type Snapshot struct {
 	EventCount int               `json:"eventCount"`
 }
 
-// Snapshot returns a stable copy of the job's metadata.
+// Snapshot returns a stable copy of the job's metadata. Summary is
+// deep-copied so a caller mutating the returned map can't alias the
+// Job's stored state — which could otherwise drop or rewrite fields
+// the next snapshot reader expects to see (the `provider` /
+// `hostname` / `ip` summary keys feed the active-runs UI banner).
 func (j *Job) Snapshot() Snapshot {
 	j.mu.Lock()
 	defer j.mu.Unlock()
+	var summary map[string]string
+	if len(j.Summary) > 0 {
+		summary = make(map[string]string, len(j.Summary))
+		for k, v := range j.Summary {
+			summary[k] = v
+		}
+	}
 	snap := Snapshot{
 		ID:         j.ID,
 		Kind:       j.Kind,
 		Status:     j.status,
-		Summary:    j.Summary,
+		Summary:    summary,
 		StartedAt:  j.StartedAt,
 		EventCount: len(j.events),
 		Error:      j.err,

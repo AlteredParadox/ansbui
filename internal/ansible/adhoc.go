@@ -7,7 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"regexp"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -56,11 +58,12 @@ type Event struct {
 
 // RunAdhoc streams events over the supplied channel. The channel is
 // closed when the run finishes. ctx cancels the remote process.
-func RunAdhoc(ctx context.Context, pool *sshpool.Pool, srv config.Server, req AdhocRequest, out chan<- Event) error {
+func RunAdhoc(ctx context.Context, pool *sshpool.Pool, srv config.Server, req AdhocRequest, out chan<- Event) (err error) {
 	defer close(out)
-	cmd, err := buildAdhocCmd(srv, req)
-	if err != nil {
-		return err
+	defer func() { err = recoverRunner(recover(), out, err) }()
+	cmd, berr := buildAdhocCmd(srv, req)
+	if berr != nil {
+		return berr
 	}
 	return runStreaming(ctx, pool, srv, cmd, "", out)
 }
@@ -75,13 +78,39 @@ func RunAdhoc(ctx context.Context, pool *sshpool.Pool, srv config.Server, req Ad
 // (internal/api/ws.go's prepPlaybook) before this is called, so
 // the persisted RunRecord and the live event log both reflect
 // the merged target set.
-func RunPlaybook(ctx context.Context, pool *sshpool.Pool, srv config.Server, req PlaybookRequest, out chan<- Event) error {
+func RunPlaybook(ctx context.Context, pool *sshpool.Pool, srv config.Server, req PlaybookRequest, out chan<- Event) (err error) {
 	defer close(out)
-	cmd, err := buildPlaybookCmd(srv, req)
-	if err != nil {
-		return err
+	defer func() { err = recoverRunner(recover(), out, err) }()
+	if req.VaultPassword != "" {
+		if verr := validateVaultPassword(req.VaultPassword); verr != nil {
+			out <- Event{Type: "error", Text: verr.Error()}
+			return verr
+		}
+	}
+	cmd, berr := buildPlaybookCmd(srv, req)
+	if berr != nil {
+		return berr
 	}
 	return runStreaming(ctx, pool, srv, cmd, req.VaultPassword, out)
+}
+
+// recoverRunner converts a panic in RunAdhoc/RunPlaybook into a
+// returned error, so a regression that nil-derefs in the regex
+// classification or a misuse of the SSH session doesn't crash the
+// whole binary and kill every other in-flight run. We emit an
+// error event BEFORE the deferred close(out) fires (defers run
+// LIFO; this function is registered after `defer close(out)` so
+// it runs first), which keeps the WS consumer's render loop
+// telling the operator something happened. The original panic
+// value is logged with a stack — the WS event is intentionally
+// generic since `r` could carry secrets.
+func recoverRunner(r any, out chan<- Event, prev error) error {
+	if r == nil {
+		return prev
+	}
+	log.Printf("ansible runner panic: %v\n%s", r, debug.Stack())
+	out <- Event{Type: "error", Text: "ansbui internal error — see server log"}
+	return errors.New("internal error in ansible runner")
 }
 
 func runStreaming(ctx context.Context, pool *sshpool.Pool, srv config.Server, cmd, stdin string, out chan<- Event) error {
@@ -320,9 +349,15 @@ func buildArgString(args map[string]string) string {
 		if v == "" {
 			continue
 		}
-		// Ansible's k=v parser needs the value quoted if it contains
-		// spaces. We wrap every value defensively.
-		escaped := strings.ReplaceAll(v, `"`, `\"`)
+		// Ansible parses k=v with shlex, which interprets backslash
+		// as a POSIX escape character — `path=C:\Users\foo` would
+		// reach the module as `path=C:Usersfoo` after shlex strips
+		// the unescaped backslashes. Escape `\` to `\\` BEFORE we
+		// escape `"` (so the trailing backslash of `\"` doesn't
+		// double-escape itself), then wrap the value in `"…"` so
+		// embedded spaces survive shlex's word split.
+		escaped := strings.ReplaceAll(v, `\`, `\\`)
+		escaped = strings.ReplaceAll(escaped, `"`, `\"`)
 		parts = append(parts, fmt.Sprintf(`%s="%s"`, k, escaped))
 	}
 	return strings.Join(parts, " ")

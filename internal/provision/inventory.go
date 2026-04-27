@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -78,7 +79,11 @@ func addHostToInventoryYAML(content []byte, provider, fqdn string) ([]byte, erro
 
 	var buf bytes.Buffer
 	enc := yaml.NewEncoder(&buf)
-	enc.SetIndent(2)
+	// Preserve the operator's indent — re-encoding with a hardcoded
+	// 2-space indent against an inventory written with 4-space rules
+	// reflows every nested key, producing a churn-heavy diff and
+	// breaking any downstream tool that diffs the inventory file.
+	enc.SetIndent(detectYAMLIndent(content))
 	if err := enc.Encode(&root); err != nil {
 		return nil, fmt.Errorf("encode inventory yaml: %w", err)
 	}
@@ -86,6 +91,34 @@ func addHostToInventoryYAML(content []byte, provider, fqdn string) ([]byte, erro
 		return nil, fmt.Errorf("close yaml encoder: %w", err)
 	}
 	return buf.Bytes(), nil
+}
+
+// detectYAMLIndent counts the leading-space width of the first
+// indented line in content. Returns 2 (yaml.v3's default) when the
+// file is empty, has no nested structure yet, or uses tabs (yaml
+// rejects tabs anyway, so a tab-using file is already bad input).
+// Caps at 8 so a freak first-indented-line of `      ` doesn't
+// produce a 6-space-indented re-render.
+func detectYAMLIndent(content []byte) int {
+	for _, line := range strings.Split(string(content), "\n") {
+		if line == "" || strings.HasPrefix(strings.TrimSpace(line), "#") {
+			continue
+		}
+		var n int
+		for _, r := range line {
+			if r != ' ' {
+				break
+			}
+			n++
+		}
+		if n > 0 {
+			if n > 8 {
+				return 8
+			}
+			return n
+		}
+	}
+	return 2
 }
 
 // emptyInventoryRoot returns the YAML node tree for `all: {}` —

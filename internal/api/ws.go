@@ -5,6 +5,8 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -259,14 +261,33 @@ func consumeAndPersist(conn *websocket.Conn, events <-chan ansible.Event, run *a
 	}
 }
 
+// recapSkippedRE pulls `skipped=N` out of an ansible PLAY RECAP
+// line. We don't try to track skipped per-task (classify maps
+// `skipping: [host]` to type "meta" because the UI renders them
+// that way) so the recap totals are the source of truth, summed
+// across hosts the same way OK/Changed/Failed sum across per-task
+// events.
+var recapSkippedRE = regexp.MustCompile(`\bskipped=(\d+)\b`)
+
 func tallyEvent(run *ansible.RunRecord, evt ansible.Event) {
 	switch evt.Type {
 	case "ok":
 		run.OK++
 	case "changed":
 		run.Changed++
-	case "fail":
+	case "fail", "error":
+		// "error" is a synthetic ansbui event (vault-password
+		// validation, runner panic recover) — counting it as a
+		// failure keeps finalStatus from labelling a panicked run
+		// "ok" just because no per-task events landed.
 		run.Failed++
+	}
+	if strings.HasPrefix(evt.Type, "recap") {
+		if m := recapSkippedRE.FindStringSubmatch(evt.Text); m != nil {
+			if n, err := strconv.Atoi(m[1]); err == nil {
+				run.Skipped += n
+			}
+		}
 	}
 }
 

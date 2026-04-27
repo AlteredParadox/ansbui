@@ -115,20 +115,18 @@ func (s *Server) setSettings(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSONBody(w, r, &body) {
 		return
 	}
-	if err := s.Config.SetPrometheus(body.PrometheusURL, body.PrometheusLabel); err != nil {
+	// One transactional write — previously this called four
+	// individual setters and a disk error mid-sequence could leave
+	// (e.g.) PrometheusURL applied but AutoGatherFacts at its old
+	// value. SetSettings validates first and persists once.
+	if err := s.Config.SetSettings(config.SettingsUpdate{
+		PrometheusURL:      body.PrometheusURL,
+		PrometheusLabel:    body.PrometheusLabel,
+		AutoGatherFacts:    body.AutoGatherFacts,
+		GeoIPEnabled:       body.GeoIPEnabled,
+		ControlPrivKeyPath: body.ControlPrivKeyPath,
+	}); err != nil {
 		writeError(w, http.StatusBadRequest, err)
-		return
-	}
-	if err := s.Config.SetAutoGatherFacts(body.AutoGatherFacts); err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-	if err := s.Config.SetGeoIPEnabled(body.GeoIPEnabled); err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-	if err := s.Config.SetControlPrivKeyPath(body.ControlPrivKeyPath); err != nil {
-		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, body)

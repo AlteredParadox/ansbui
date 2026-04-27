@@ -122,6 +122,9 @@ func DecryptInlineVaultValue(ctx context.Context, pool *sshpool.Pool, srv config
 	if !argKeyRE.MatchString(varName) {
 		return "", fmt.Errorf("invalid var name %q (must match %s)", varName, argKeyRE)
 	}
+	if err := validateVaultPassword(password); err != nil {
+		return "", err
+	}
 	content, err := readRemoteFile(ctx, pool, srv, rel)
 	if err != nil {
 		return "", err
@@ -165,8 +168,8 @@ func UpsertInlineVaultValue(ctx context.Context, pool *sshpool.Pool, srv config.
 	if !argKeyRE.MatchString(varName) {
 		return fmt.Errorf("invalid var name %q (must match %s)", varName, argKeyRE)
 	}
-	if password == "" {
-		return fmt.Errorf("password is required")
+	if err := validateVaultPassword(password); err != nil {
+		return err
 	}
 	content, err := readRemoteFile(ctx, pool, srv, rel)
 	if err != nil {

@@ -237,6 +237,21 @@ func Validate(req Request) error {
 	if req.UseSudo && req.SudoPassword == "" && req.Username != "root" {
 		return errors.New("sudo password is required when 'use sudo' is checked")
 	}
+	// Sudo + vault passwords ride through `read -r PASS` in the
+	// shell wrappers (sshtarget.runRoot's sudo-pass feed; the
+	// vault decrypt scripts in ansible/inline_vault.go). `read -r`
+	// stops at the first newline, so a multi-line value leaks the
+	// rest into the next stdin reader — for sudo that's the
+	// inner orchestration script's `read -r ANSPW`, which would
+	// then chpasswd the ansible user with the back-half of the
+	// operator's sudo password. Fail fast at the API boundary
+	// before any SSH side-effects happen.
+	if strings.ContainsAny(req.SudoPassword, "\r\n") {
+		return errors.New("sudo password must not contain newlines")
+	}
+	if strings.ContainsAny(req.VaultPassword, "\r\n") {
+		return errors.New("vault password must not contain newlines")
+	}
 	if err := validateHostname(req.Hostname); err != nil {
 		return err
 	}
@@ -281,9 +296,16 @@ func validateIP(raw string) error {
 }
 
 // validateHostname applies all hostname-shape rules in one place
-// (required, FQDN, no whitespace, length cap). Run wraps the
-// result so the API layer can return a 400 before allocating a
-// job slot.
+// (required, FQDN, no whitespace, length cap, RFC1035 charset).
+// Run wraps the result so the API layer can return a 400 before
+// allocating a job slot.
+//
+// The charset check matters because the hostname's subdomain part
+// is concatenated into porkbun URL paths in the DNS step
+// (`/dns/retrieveByNameType/<domain>/A/<subdomain>`) without
+// per-component encoding. A `/`, `?`, or `#` would silently
+// reroute the API call. RFC1035 only permits letters, digits,
+// hyphen — plus dot as label separator.
 func validateHostname(h string) error {
 	if strings.TrimSpace(h) == "" {
 		return errors.New("hostname is required")
@@ -293,6 +315,15 @@ func validateHostname(h string) error {
 	}
 	if strings.ContainsAny(h, " \t") {
 		return errors.New("hostname must not contain whitespace")
+	}
+	for _, r := range h {
+		ok := (r >= 'a' && r <= 'z') ||
+			(r >= 'A' && r <= 'Z') ||
+			(r >= '0' && r <= '9') ||
+			r == '.' || r == '-'
+		if !ok {
+			return fmt.Errorf("hostname contains invalid character %q (allowed: letters, digits, '.', '-')", r)
+		}
 	}
 	return boundLength("hostname", h, 253)
 }

@@ -19,6 +19,25 @@ import (
 // bounded so a stuck remote shell can't hang the request forever.
 const vaultRunTimeout = 30 * time.Second
 
+// validateVaultPassword rejects passwords with embedded CR/LF.
+// Every vault entry-point feeds the password into a bash wrapper
+// via `IFS= read -r PASS` (or `PASS=$(cat)` in the playbook
+// runner), both of which delimit on the first newline. A password
+// containing a newline would silently truncate at the first \n and
+// the rest would either be discarded or — worse — get consumed by
+// the next stdin reader (e.g. ansible-vault encrypt's `-` input)
+// as part of the plaintext, producing a vault file unlockable by
+// the operator's intended password.
+func validateVaultPassword(p string) error {
+	if p == "" {
+		return errors.New("vault password is required")
+	}
+	if strings.ContainsAny(p, "\r\n") {
+		return errors.New("vault password must not contain newlines (paste from a password manager that includes a trailing newline triggers this; trim before submitting)")
+	}
+	return nil
+}
+
 // VaultFile is the summary shape the UI consumes for the vault list.
 // Only metadata — no decrypted content — is returned by list calls.
 type VaultFile struct {
@@ -173,6 +192,9 @@ func ViewVault(ctx context.Context, pool *sshpool.Pool, srv config.Server, rel, 
 	if err := validateRelPath(rel); err != nil {
 		return "", err
 	}
+	if err := validateVaultPassword(password); err != nil {
+		return "", err
+	}
 	cli, err := pool.Client(ctx, srv)
 	if err != nil {
 		return "", err
@@ -205,6 +227,9 @@ func ViewVault(ctx context.Context, pool *sshpool.Pool, srv config.Server, rel, 
 // SSH user.
 func WriteVault(ctx context.Context, pool *sshpool.Pool, srv config.Server, rel, password, plaintext string) error {
 	if err := validateRelPath(rel); err != nil {
+		return err
+	}
+	if err := validateVaultPassword(password); err != nil {
 		return err
 	}
 	cli, err := pool.Client(ctx, srv)

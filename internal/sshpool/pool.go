@@ -189,10 +189,21 @@ func Stream(ctx context.Context, client *ssh.Client, cmd string, stdin io.Reader
 }
 
 func dial(ctx context.Context, srv config.Server) (*ssh.Client, error) {
-	auth, err := buildAuth(srv)
+	auth, cleanup, err := buildAuth(srv)
 	if err != nil {
+		// buildAuth may have registered a cleanup before the
+		// failing branch (e.g. agent socket dial succeeded but
+		// loadKey failed afterwards in a future code path). Run
+		// it now so we don't leak in the error path.
+		cleanup()
 		return nil, err
 	}
+	// Auth methods only need their backing resources during
+	// ssh.NewClientConn (the handshake). Once that returns we own
+	// an authenticated *ssh.Client and the agent socket / etc. is
+	// dead weight. cleanup runs after the handshake completes
+	// (success or failure).
+	defer cleanup()
 	cfg := &ssh.ClientConfig{
 		User:            srv.User,
 		Auth:            auth,
@@ -220,25 +231,39 @@ func portOrDefault(p int) string {
 	return fmt.Sprintf("%d", p)
 }
 
-func buildAuth(srv config.Server) ([]ssh.AuthMethod, error) {
+// buildAuth returns the SSH auth methods configured for srv plus a
+// cleanup function the caller must run after the handshake completes
+// (regardless of outcome). Cleanup closes any socket / file the
+// methods opened — currently the unix-domain socket to ssh-agent.
+// Without this, every dial leaked one socket connection because
+// agent.Client has no Close() and the goroutine sitting on the FD
+// outlived the *ssh.Client it served.
+func buildAuth(srv config.Server) ([]ssh.AuthMethod, func(), error) {
 	var methods []ssh.AuthMethod
+	var cleanups []func()
+	cleanup := func() {
+		for _, c := range cleanups {
+			c()
+		}
+	}
 	if srv.KeyPath != "" {
 		signer, err := loadKey(srv.KeyPath)
 		if err != nil {
-			return nil, err
+			return nil, cleanup, err
 		}
 		methods = append(methods, ssh.PublicKeys(signer))
 	}
 	if sock := os.Getenv("SSH_AUTH_SOCK"); sock != "" {
 		conn, err := net.Dial("unix", sock)
 		if err == nil {
+			cleanups = append(cleanups, func() { _ = conn.Close() })
 			methods = append(methods, ssh.PublicKeysCallback(agent.NewClient(conn).Signers))
 		}
 	}
 	if len(methods) == 0 {
-		return nil, errors.New("no SSH auth available: set keyPath or run an ssh-agent")
+		return nil, cleanup, errors.New("no SSH auth available: set keyPath or run an ssh-agent")
 	}
-	return methods, nil
+	return methods, cleanup, nil
 }
 
 func loadKey(path string) (ssh.Signer, error) {

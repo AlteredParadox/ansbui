@@ -283,29 +283,6 @@ func (m *Manager) SetActive(id string) error {
 	return fmt.Errorf("unknown server id %q", id)
 }
 
-// SetPrometheus updates the Prometheus integration settings. The URL is
-// normalised so that entries like "10.0.0.1:9090" (no scheme) and
-// trailing-slash variants all persist as a clean http(s):// URL.
-func (m *Manager) SetPrometheus(rawURL, label string) error {
-	normalised, err := normalisePromURL(rawURL)
-	if err != nil {
-		return err
-	}
-	label = strings.TrimSpace(label)
-	if label != "" {
-		if err := validatePromLabel(label); err != nil {
-			return err
-		}
-	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.store.PrometheusURL = normalised
-	if label != "" {
-		m.store.PrometheusLabel = label
-	}
-	return m.persistLocked()
-}
-
 // promLabelRE matches the Prometheus label-name grammar — the same
 // shape PromQL accepts for `by (...)` group keys. Validating at the
 // settings boundary stops a hostile label like `instance) +
@@ -437,29 +414,44 @@ func (m *Manager) Prometheus() (url, label string) {
 	return m.store.PrometheusURL, m.store.PrometheusLabel
 }
 
-// SetAutoGatherFacts persists the auto-gather toggle.
-func (m *Manager) SetAutoGatherFacts(v bool) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.store.AutoGatherFacts = v
-	return m.persistLocked()
+// SettingsUpdate bundles every field the /api/settings endpoint can
+// touch in one call. Used by SetSettings to apply all four values
+// under a single mutex + a single persist, so a mid-way disk error
+// can never leave the on-disk store with prom URL applied but
+// (say) GeoIPEnabled still at the old value.
+type SettingsUpdate struct {
+	PrometheusURL      string
+	PrometheusLabel    string
+	AutoGatherFacts    bool
+	GeoIPEnabled       bool
+	ControlPrivKeyPath string
 }
 
-// SetGeoIPEnabled persists the geoip enrichment toggle.
-func (m *Manager) SetGeoIPEnabled(v bool) error {
+// SetSettings applies every field in u atomically. Validation runs
+// before any mutation, so a bad Prometheus URL fails the whole call
+// and the store stays at its previous state. The single persist at
+// the end is the same atomicWrite the individual setters use, so a
+// crash inside the rename is still safe.
+func (m *Manager) SetSettings(u SettingsUpdate) error {
+	normalisedURL, err := normalisePromURL(u.PrometheusURL)
+	if err != nil {
+		return err
+	}
+	label := strings.TrimSpace(u.PrometheusLabel)
+	if label != "" {
+		if err := validatePromLabel(label); err != nil {
+			return err
+		}
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.store.GeoIPEnabled = v
-	return m.persistLocked()
-}
-
-// SetControlPrivKeyPath persists the path on the control node to
-// the SSH private key used for post-reinstall reconnection. Empty
-// strings are stored as-is and resolved to the default at read time.
-func (m *Manager) SetControlPrivKeyPath(path string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.store.ControlPrivKeyPath = strings.TrimSpace(path)
+	m.store.PrometheusURL = normalisedURL
+	if label != "" {
+		m.store.PrometheusLabel = label
+	}
+	m.store.AutoGatherFacts = u.AutoGatherFacts
+	m.store.GeoIPEnabled = u.GeoIPEnabled
+	m.store.ControlPrivKeyPath = strings.TrimSpace(u.ControlPrivKeyPath)
 	return m.persistLocked()
 }
 

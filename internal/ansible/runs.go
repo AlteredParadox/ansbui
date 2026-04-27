@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -69,13 +70,32 @@ type Recorder struct {
 }
 
 // NewRecorder loads or creates the run log at the given path.
+//
+// A corrupted runs.json — truncated by a crash mid-write, hand-
+// edited badly, hit by disk bit-rot — used to silently fall
+// through to an empty in-memory list, and the next Append would
+// happily overwrite the file with whatever was in memory: the
+// operator lost their entire run history without ever seeing
+// an error. We now quarantine the bad file as runs.json.bad-<ts>
+// before continuing with empty state, and log the path so the
+// operator can recover whatever was readable. NewRecorder still
+// succeeds (callers depend on it for boot) — surfacing the file
+// without aborting startup is the right balance.
 func NewRecorder(path string) (*Recorder, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, fmt.Errorf("create runs dir: %w", err)
 	}
 	r := &Recorder{path: path, limit: 200, lastPlay: make(map[string]LastPlay)}
 	if data, err := os.ReadFile(path); err == nil {
-		_ = json.Unmarshal(data, &r.runs)
+		if jerr := json.Unmarshal(data, &r.runs); jerr != nil {
+			r.runs = nil
+			quarantined := fmt.Sprintf("%s.bad-%s", path, time.Now().UTC().Format("20060102T150405"))
+			if rerr := os.Rename(path, quarantined); rerr != nil {
+				log.Printf("runs: %s is corrupt (%v); failed to quarantine: %v", path, jerr, rerr)
+			} else {
+				log.Printf("runs: %s was corrupt (%v); moved to %s and starting with empty history", path, jerr, quarantined)
+			}
+		}
 	}
 	r.ensureSorted()
 	r.rebuildLastPlay()
