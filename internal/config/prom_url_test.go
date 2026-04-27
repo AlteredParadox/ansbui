@@ -5,23 +5,35 @@ import (
 	"testing"
 )
 
+// Repeated URL/error fragments used across the table-driven
+// tests below — extracted as named constants both for clarity
+// and to silence Sonar's S1192 (duplicate string literal).
+const (
+	urlLoopback4      = "http://127.0.0.1:9090"
+	urlPrivateRFC1918 = "http://10.0.0.5:9090"
+	urlPromInternal   = "http://prom.internal:9090"
+	errMetadataDeny   = "cloud-metadata denylist"
+)
+
+type promURLCase struct {
+	name     string
+	raw      string
+	envAllow string
+	want     string
+	wantErr  string // substring; empty means must succeed
+}
+
 // TestNormalisePromURL is a table-driven test of the SSRF
 // guardrails on the Prometheus URL setter. The function is the
 // only barrier between operator-supplied free-form input and a
 // server-side fetch — every accepted shape and every refused
 // shape lives here.
 func TestNormalisePromURL(t *testing.T) {
-	cases := []struct {
-		name     string
-		raw      string
-		envAllow string
-		want     string
-		wantErr  string // substring; empty means must succeed
-	}{
+	cases := []promURLCase{
 		{
 			name: "loopback v4 ok by default",
-			raw:  "http://127.0.0.1:9090",
-			want: "http://127.0.0.1:9090",
+			raw:  urlLoopback4,
+			want: urlLoopback4,
 		},
 		{
 			name: "loopback v6 ok by default",
@@ -35,26 +47,26 @@ func TestNormalisePromURL(t *testing.T) {
 		},
 		{
 			name:    "rfc1918 rejected without allowlist",
-			raw:     "http://10.0.0.5:9090",
+			raw:     urlPrivateRFC1918,
 			wantErr: "is not loopback",
 		},
 		{
 			name:     "rfc1918 ok with allowlist",
-			raw:      "http://10.0.0.5:9090",
+			raw:      urlPrivateRFC1918,
 			envAllow: "10.0.0.5:9090",
-			want:     "http://10.0.0.5:9090",
+			want:     urlPrivateRFC1918,
 		},
 		{
 			name:     "allowlist matches host without port",
-			raw:      "http://prom.internal:9090",
+			raw:      urlPromInternal,
 			envAllow: "prom.internal",
-			want:     "http://prom.internal:9090",
+			want:     urlPromInternal,
 		},
 		{
 			name:     "allowlist matches host with port",
-			raw:      "http://prom.internal:9090",
+			raw:      urlPromInternal,
 			envAllow: "prom.internal:9090",
-			want:     "http://prom.internal:9090",
+			want:     urlPromInternal,
 		},
 		{
 			name:     "allowlist comma-separated picks one entry",
@@ -71,22 +83,22 @@ func TestNormalisePromURL(t *testing.T) {
 		{
 			name:    "aws imds rejected by denylist",
 			raw:     "http://169.254.169.254:80",
-			wantErr: "cloud-metadata denylist",
+			wantErr: errMetadataDeny,
 		},
 		{
 			name:    "ecs metadata rejected",
 			raw:     "http://169.254.170.2:80",
-			wantErr: "cloud-metadata denylist",
+			wantErr: errMetadataDeny,
 		},
 		{
 			name:    "gcp metadata.google.internal rejected",
 			raw:     "http://metadata.google.internal",
-			wantErr: "cloud-metadata denylist",
+			wantErr: errMetadataDeny,
 		},
 		{
 			name:    "nip.io imds bypass rejected",
 			raw:     "http://169.254.169.254.nip.io:80",
-			wantErr: "cloud-metadata denylist",
+			wantErr: errMetadataDeny,
 		},
 		{
 			name: "nip.io imds bypass rejected even when on allowlist",
@@ -95,7 +107,7 @@ func TestNormalisePromURL(t *testing.T) {
 			// accidentally allowlist a metadata host.
 			raw:      "http://169.254.169.254.nip.io:80",
 			envAllow: "169.254.169.254.nip.io:80",
-			wantErr:  "cloud-metadata denylist",
+			wantErr:  errMetadataDeny,
 		},
 		{
 			name:    "non-canonical link-local rejected",
@@ -115,30 +127,42 @@ func TestNormalisePromURL(t *testing.T) {
 		{
 			name: "scheme prepended when missing",
 			raw:  "127.0.0.1:9090",
-			want: "http://127.0.0.1:9090",
+			want: urlLoopback4,
 		},
 	}
 
 	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv("ANSBUI_PROM_ALLOWED_HOSTS", tc.envAllow)
-			got, err := normalisePromURL(tc.raw)
-			if tc.wantErr != "" {
-				if err == nil {
-					t.Fatalf("want err containing %q, got nil (out=%q)", tc.wantErr, got)
-				}
-				if !strings.Contains(err.Error(), tc.wantErr) {
-					t.Fatalf("err mismatch: got %q, want substring %q", err.Error(), tc.wantErr)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected err: %v", err)
-			}
-			if got != tc.want {
-				t.Fatalf("output mismatch: got %q, want %q", got, tc.want)
-			}
-		})
+		t.Run(tc.name, func(t *testing.T) { runPromURLCase(t, tc) })
+	}
+}
+
+// runPromURLCase executes one table entry. Pulled out of the
+// loop body to keep TestNormalisePromURL's cognitive complexity
+// under Sonar's threshold — the per-case logic is more readable
+// here too (one happy/error branch per function).
+func runPromURLCase(t *testing.T, tc promURLCase) {
+	t.Helper()
+	t.Setenv("ANSBUI_PROM_ALLOWED_HOSTS", tc.envAllow)
+	got, err := normalisePromURL(tc.raw)
+	if tc.wantErr != "" {
+		assertErrContains(t, err, tc.wantErr, got)
+		return
+	}
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if got != tc.want {
+		t.Fatalf("output mismatch: got %q, want %q", got, tc.want)
+	}
+}
+
+func assertErrContains(t *testing.T, err error, want, got string) {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("want err containing %q, got nil (out=%q)", want, got)
+	}
+	if !strings.Contains(err.Error(), want) {
+		t.Fatalf("err mismatch: got %q, want substring %q", err.Error(), want)
 	}
 }
 

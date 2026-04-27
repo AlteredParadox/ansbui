@@ -86,34 +86,45 @@ func parsePlaybookList(raw string) []Playbook {
 	lines := strings.Split(strings.TrimSpace(raw), "\n")
 	out := make([]Playbook, 0, len(lines))
 	for _, line := range lines {
-		if line == "" {
-			continue
+		if p, ok := parsePlaybookLine(line); ok {
+			out = append(out, p)
 		}
-		parts := strings.SplitN(line, "\t", 3)
-		if len(parts) < 1 {
-			continue
-		}
-		rel := parts[0]
-		name := path.Base(rel)
-		p := Playbook{
-			ID:   "pb-" + strings.TrimSuffix(strings.TrimSuffix(name, ".yml"), ".yaml"),
-			Name: name,
-			Path: rel,
-		}
-		if len(parts) >= 2 {
-			if n, err := strconv.Atoi(parts[1]); err == nil {
-				p.Size = n
-			}
-		}
-		if len(parts) >= 3 {
-			if ts, err := strconv.ParseFloat(parts[2], 64); err == nil && ts > 0 {
-				p.Modified = time.Unix(int64(ts), 0).UTC().Format(time.RFC3339)
-			}
-		}
-		out = append(out, p)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out
+}
+
+// parsePlaybookLine decodes one tab-separated `find -printf` row
+// of the form `relpath\tsize\tmtime`. Size and mtime are
+// best-effort: a malformed numeric field leaves the corresponding
+// Playbook field at its zero value, which is what the UI already
+// renders as "unknown".
+func parsePlaybookLine(line string) (Playbook, bool) {
+	if line == "" {
+		return Playbook{}, false
+	}
+	parts := strings.SplitN(line, "\t", 3)
+	if len(parts) < 1 {
+		return Playbook{}, false
+	}
+	rel := parts[0]
+	name := path.Base(rel)
+	p := Playbook{
+		ID:   "pb-" + strings.TrimSuffix(strings.TrimSuffix(name, ".yml"), ".yaml"),
+		Name: name,
+		Path: rel,
+	}
+	if len(parts) >= 2 {
+		if n, err := strconv.Atoi(parts[1]); err == nil {
+			p.Size = n
+		}
+	}
+	if len(parts) >= 3 {
+		if ts, err := strconv.ParseFloat(parts[2], 64); err == nil && ts > 0 {
+			p.Modified = time.Unix(int64(ts), 0).UTC().Format(time.RFC3339)
+		}
+	}
+	return p, true
 }
 
 // LoadPlaybook reads a single playbook's YAML contents.

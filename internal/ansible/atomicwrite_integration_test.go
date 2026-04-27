@@ -10,6 +10,11 @@ import (
 	"testing"
 )
 
+// bashNotAvailable is the skip reason for tests that need a real
+// bash to exercise the atomic-write script. Some minimal CI
+// images (alpine, distroless) don't ship bash by default.
+const bashNotAvailable = "bash not available"
+
 // TestAtomicWriteScript_SymlinkRefusal exercises the bash script
 // writeFileAtomicViaStdin hands to the remote shell, against a
 // local bash. Two paths matter for the security boundary:
@@ -25,7 +30,7 @@ import (
 func TestAtomicWriteScript_SymlinkRefusal(t *testing.T) {
 	t.Parallel()
 	if _, err := exec.LookPath("bash"); err != nil {
-		t.Skip("bash not available")
+		t.Skip(bashNotAvailable)
 	}
 
 	dir := t.TempDir()
@@ -82,7 +87,7 @@ func TestAtomicWriteScript_SymlinkRefusal(t *testing.T) {
 func TestAtomicWriteScript_NewFile(t *testing.T) {
 	t.Parallel()
 	if _, err := exec.LookPath("bash"); err != nil {
-		t.Skip("bash not available")
+		t.Skip(bashNotAvailable)
 	}
 
 	dir := t.TempDir()
@@ -114,7 +119,7 @@ func TestAtomicWriteScript_NewFile(t *testing.T) {
 func TestAtomicWriteScript_PreservesMode(t *testing.T) {
 	t.Parallel()
 	if _, err := exec.LookPath("bash"); err != nil {
-		t.Skip("bash not available")
+		t.Skip(bashNotAvailable)
 	}
 
 	dir := t.TempDir()

@@ -35,15 +35,33 @@ func TestAppendKnownHostRace(t *testing.T) {
 
 	keyA := mustEd25519Key(t)
 	keyB := mustEd25519Key(t)
-
-	const goroutines = 32
 	hostname := "racehost.example:22"
 	remote := &net.TCPAddr{IP: net.ParseIP("10.0.0.1"), Port: 22}
 
+	errs := burstAppend(path, hostname, remote, keyA, keyB, 32)
+	assertExactlyOneKeyRecorded(t, path, hostname, remote, keyA, keyB)
+
+	winners, mismatches, other := classifyAppendErrors(errs)
+	if other != 0 {
+		t.Fatalf("unexpected non-KeyError: winners=%d mismatches=%d other=%d errs=%v", winners, mismatches, other, errs)
+	}
+	if winners == 0 {
+		t.Fatalf("no goroutine succeeded: errs=%v", errs)
+	}
+	if mismatches == 0 {
+		t.Fatalf("expected losing key to surface a mismatch KeyError; got winners=%d mismatches=%d", winners, mismatches)
+	}
+}
+
+// burstAppend launches n goroutines all calling appendKnownHost
+// for the same hostname, splitting between keyA (even i) and
+// keyB (odd i). They synchronise on a `start` chan so the
+// contention window is as tight as possible.
+func burstAppend(path, hostname string, remote net.Addr, keyA, keyB ssh.PublicKey, n int) []error {
 	var wg sync.WaitGroup
-	errs := make([]error, goroutines)
+	errs := make([]error, n)
 	start := make(chan struct{})
-	for i := 0; i < goroutines; i++ {
+	for i := 0; i < n; i++ {
 		key := keyA
 		if i%2 == 1 {
 			key = keyB
@@ -57,14 +75,18 @@ func TestAppendKnownHostRace(t *testing.T) {
 	}
 	close(start)
 	wg.Wait()
+	return errs
+}
 
-	// Exactly one key should be recorded. Re-load and verify the
-	// file has a single entry.
+// assertExactlyOneKeyRecorded fails the test unless the file at
+// path contains exactly one of keyA or keyB recorded against
+// hostname. The race-fix invariant: only the first append wins.
+func assertExactlyOneKeyRecorded(t *testing.T, path, hostname string, remote net.Addr, keyA, keyB ssh.PublicKey) {
+	t.Helper()
 	cb, err := knownhosts.New(path)
 	if err != nil {
 		t.Fatalf("reload: %v", err)
 	}
-
 	var matchA, matchB int
 	if err := cb(hostname, remote, keyA); err == nil {
 		matchA++
@@ -76,11 +98,13 @@ func TestAppendKnownHostRace(t *testing.T) {
 		data, _ := os.ReadFile(path)
 		t.Fatalf("expected exactly one of (keyA, keyB) to be recorded, got matchA=%d matchB=%d; file:\n%s", matchA, matchB, data)
 	}
+}
 
-	// Among the goroutines, the ones that carried the recorded
-	// key see nil; the ones that carried the other key must see
-	// a KeyError with a populated Want.
-	winners, mismatches, other := 0, 0, 0
+// classifyAppendErrors buckets the per-goroutine errors into
+// the three legal outcomes for the burst: nil (winner), a
+// knownhosts.KeyError with Want populated (mismatch loser), or
+// anything else (unexpected — should fail the test).
+func classifyAppendErrors(errs []error) (winners, mismatches, other int) {
 	for _, e := range errs {
 		if e == nil {
 			winners++
@@ -93,15 +117,7 @@ func TestAppendKnownHostRace(t *testing.T) {
 			other++
 		}
 	}
-	if other != 0 {
-		t.Fatalf("unexpected non-KeyError: winners=%d mismatches=%d other=%d errs=%v", winners, mismatches, other, errs)
-	}
-	if winners == 0 {
-		t.Fatalf("no goroutine succeeded: errs=%v", errs)
-	}
-	if mismatches == 0 {
-		t.Fatalf("expected losing key to surface a mismatch KeyError; got winners=%d mismatches=%d", winners, mismatches)
-	}
+	return
 }
 
 func mustEd25519Key(t *testing.T) ssh.PublicKey {
