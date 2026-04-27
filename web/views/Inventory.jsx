@@ -153,11 +153,26 @@ function HostTable({ rows, selectedIds, toggleSelect, toggleAll, onRowClick, sor
     if (sort.key !== key) return '';
     return sort.dir === 'asc' ? '↑' : '↓';
   };
-  const col = (key, label, cls) => (
-    <th className={cls} onClick={() => setSort({ key, dir: sort.key === key && sort.dir === 'asc' ? 'desc' : 'asc' })}>
-      {label} <span className="mute mono">{sortArrow(key)}</span>
-    </th>
-  );
+  const col = (key, label, cls) => {
+    const toggle = () => setSort({ key, dir: sort.key === key && sort.dir === 'asc' ? 'desc' : 'asc' });
+    // role/tabIndex/onKeyDown make the sortable header reachable
+    // by keyboard — Sonar S6847 flags an onClick on a non-
+    // interactive element without a key handler, and accessibility
+    // genuinely benefits here (Tab into the header row, Enter or
+    // Space to toggle sort).
+    return (
+      <th
+        className={cls}
+        role="button"
+        tabIndex={0}
+        aria-sort={sort.key === key ? (sort.dir === 'asc' ? 'ascending' : 'descending') : 'none'}
+        onClick={toggle}
+        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); } }}
+      >
+        {label} <span className="mute mono">{sortArrow(key)}</span>
+      </th>
+    );
+  };
   return (
     <div className="host-table-wrap">
       <table className="t host-table">
@@ -180,7 +195,15 @@ function HostTable({ rows, selectedIds, toggleSelect, toggleAll, onRowClick, sor
         </thead>
         <tbody>
           {rows.map(h => (
-            <tr key={h.id} className={`t-row-click ${selectedIds.has(h.id) ? 'selected' : ''}`} onClick={() => onRowClick(h)}>
+            <tr
+              key={h.id}
+              className={`t-row-click ${selectedIds.has(h.id) ? 'selected' : ''}`}
+              role="button"
+              tabIndex={0}
+              aria-label={`Open details for ${h.name}`}
+              onClick={() => onRowClick(h)}
+              onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); onRowClick(h); } }}
+            >
               <td onClick={(e) => e.stopPropagation()}>
                 <input type="checkbox" aria-label={`Select ${h.name}`} checked={selectedIds.has(h.id)} onChange={() => toggleSelect(h.id)}/>
               </td>

@@ -153,7 +153,15 @@ function DashboardView({ onNavigate, onOpenAdhoc }) {
               </thead>
               <tbody>
                 {recentRuns.map(r => (
-                  <tr key={r.id} className="t-row-click" onClick={() => onNavigate('history')}>
+                  <tr
+                    key={r.id}
+                    className="t-row-click"
+                    role="button"
+                    tabIndex={0}
+                    aria-label={`Open run history`}
+                    onClick={() => onNavigate('history')}
+                    onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); onNavigate('history'); } }}
+                  >
                     <td><span className={`dot ${r.status}`}/></td>
                     <td className="mono">{r.id}</td>
                     <td className="mono">{r.pb || '—'}</td>

@@ -56,9 +56,10 @@ linters:
         # vector.
         - G304
         # G704: SSRF via taint analysis. The lone `net.Dial("unix",
-        # sock)` site at sshpool/pool.go:233 dials SSH_AUTH_SOCK to
-        # talk to the local ssh-agent — unix-domain socket, not
-        # network. SSRF doesn't apply.
+        # sock)` site in sshpool/pool.go (inside buildAuth) dials
+        # SSH_AUTH_SOCK to talk to the local ssh-agent — unix-domain
+        # socket, not network. SSRF doesn't apply. Path-not-line
+        # because line numbers drift; grep buildAuth in pool.go.
         - G704
 
     revive:
