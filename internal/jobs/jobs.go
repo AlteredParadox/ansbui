@@ -2,7 +2,7 @@
 // orchestrator runs whose lifecycle survives WebSocket disconnects.
 //
 // The legacy adhoc/playbook handlers tied run lifecycle to the WS
-// connection — closing the browser tab killed the run. Provisioning
+// connection — closing the browser tab killed the run. Bootstrap
 // (especially with a reinstall step) can take 30+ minutes and
 // routinely outlasts a browser session, so we needed a layer where
 // the run owns its own goroutine and the WS is just an attached
@@ -32,7 +32,7 @@ import (
 // the SSH pool / control-node connections.
 var ErrTooManyRunning = errors.New("too many concurrent jobs — try again when one finishes")
 
-// Default caps for the in-memory registry. Provisioning is rare
+// Default caps for the in-memory registry. Bootstrap is rare
 // enough that these are very loose; revisit if the framework
 // grows to host playbook runs too.
 //
@@ -394,7 +394,7 @@ func (m *Manager) List() []Snapshot {
 
 // Shutdown cancels every running job and waits for them to
 // finish. Intended for graceful server shutdown — wires through
-// the server's signal handler so an in-flight provisioning run
+// the server's signal handler so an in-flight bootstrap run
 // gets a chance to emit its own "cancelled" event before the
 // process exits.
 func (m *Manager) Shutdown(ctx context.Context) {

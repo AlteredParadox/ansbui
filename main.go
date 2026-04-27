@@ -95,7 +95,7 @@ func main() {
 	// Run the two shutdowns in parallel. Sequential ordering is
 	// wrong either way:
 	//  - jobMgr.Shutdown first leaves the HTTP listener accepting
-	//    new POST /api/provision/start requests during the wait
+	//    new POST /api/bootstrap/start requests during the wait
 	//    loop, so a job sneaks in past the snapshot.
 	//  - httpSrv.Shutdown first blocks until in-flight WS handlers
 	//    exit, but those handlers only exit when their job's

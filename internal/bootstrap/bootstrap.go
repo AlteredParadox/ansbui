@@ -1,4 +1,4 @@
-// Package provision drives the multi-step "set up a fresh server
+// Package bootstrap drives the multi-step "set up a fresh server
 // for ansible" workflow:
 //
 //  1. read porkbun creds from an inline vault on the control node
@@ -14,7 +14,7 @@
 //
 // Each step emits a streaming Event so the UI can show live
 // progress through the same channel adhoc/playbook runs use.
-package provision
+package bootstrap
 
 import (
 	"bytes"
@@ -36,7 +36,7 @@ import (
 )
 
 // Request is the operator-supplied form payload for one
-// provisioning run.
+// bootstrap run.
 type Request struct {
 	Provider      string        `json:"provider"`
 	IP            string        `json:"ip"`
@@ -65,7 +65,7 @@ const (
 	dnsTTLSeconds             = 300
 )
 
-// targetMu serialises provisioning runs against the same target.
+// targetMu serialises bootstrap runs against the same target.
 // Two operators (or a single one with two browser tabs) submitting
 // the same form would otherwise race the SSH bootstrap — `chpasswd`
 // runs twice with different random passwords, the sshd-port flip
@@ -79,7 +79,7 @@ var (
 
 // lockTarget returns a mutex specific to the IP:port pair. The
 // caller takes ownership and is responsible for unlocking; a Done
-// channel from ctx isn't honoured because provisioning steps are
+// channel from ctx isn't honoured because bootstrap steps are
 // short and a queued operator behind a lock is the correct UX.
 func lockTarget(key string) *sync.Mutex {
 	targetMuRegistry.Lock()
@@ -92,7 +92,7 @@ func lockTarget(key string) *sync.Mutex {
 	return m
 }
 
-// Run executes the full provisioning workflow, invoking emit for
+// Run executes the full bootstrap workflow, invoking emit for
 // every progress event. ctx cancels the workflow; emit must be
 // safe to call concurrently with itself only if the caller says so
 // (the jobs.Manager hosts emit under its mutex).
@@ -206,7 +206,7 @@ func Run(ctx context.Context, pool *sshpool.Pool, srv config.Server, req Request
 	}
 	emit("ok", "inventory updated")
 
-	emit("done", fmt.Sprintf("Provisioning complete. Reach via ansible@%s:%d", req.Hostname, targetSSHPort))
+	emit("done", fmt.Sprintf("Bootstrap complete. Reach via ansible@%s:%d", req.Hostname, targetSSHPort))
 	return nil
 }
 
@@ -426,7 +426,7 @@ func doReinstall(ctx context.Context, target *targetSession, req Request, in rei
 // key. The bytes are returned to the caller, who passes them to
 // dialKeyTarget for the post-reinstall reconnect. The key never
 // touches disk on ansbui's side and goes out of scope when the
-// provisioning run finishes.
+// bootstrap run finishes.
 //
 // The early ssh.ParsePrivateKey check converts a vague "auth
 // failed" 30 minutes from now into a fast, specific error before
@@ -462,7 +462,7 @@ func readControlNodePrivkey(ctx context.Context, pool *sshpool.Pool, srv config.
 		// is good enough for the operator to recheck their
 		// settings.
 		if strings.Contains(err.Error(), "encrypted") {
-			return nil, fmt.Errorf("control node private key %s is passphrase-protected — provisioning needs an unencrypted key for the post-reinstall reconnect", path)
+			return nil, fmt.Errorf("control node private key %s is passphrase-protected — bootstrap needs an unencrypted key for the post-reinstall reconnect", path)
 		}
 		return nil, fmt.Errorf("control node private key at %s did not parse as an OpenSSH private key", path)
 	}
@@ -660,7 +660,7 @@ func looksLikePublicKey(s string) bool {
 // tempfile + rename, EXIT trap).
 func updateInventoryFile(ctx context.Context, pool *sshpool.Pool, srv config.Server, provider, fqdn string) error {
 	if srv.Inventory == "" {
-		return errors.New("server has no inventory path configured — set it before provisioning so the new host can be registered")
+		return errors.New("server has no inventory path configured — set it before bootstrap so the new host can be registered")
 	}
 	cli, err := pool.Client(ctx, srv)
 	if err != nil {

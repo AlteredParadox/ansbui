@@ -1,4 +1,4 @@
-package provision
+package bootstrap
 
 import (
 	"context"
@@ -20,7 +20,7 @@ import (
 //  4. poll-dial :4242 with key auth until the freshly-installed
 //     system answers
 //
-// On success, provision.Run swaps the original password-auth target
+// On success, bootstrap.Run swaps the original password-auth target
 // for the new key-auth target and continues the rest of the
 // workflow (ansible user, sshd-port no-op-if-already-4242, inventory).
 type ReinstallOpts struct {
@@ -31,7 +31,7 @@ type ReinstallOpts struct {
 
 // reinstallOSMatrix is the curated OS/version allowlist exposed to
 // operators. It's intentionally narrower than reinstall.sh's full
-// catalogue — the rest of provision.go only knows how to bootstrap
+// catalogue — the rest of bootstrap.go only knows how to bootstrap
 // a Debian-family box (apt install sudo + python3), so allowing
 // alma / fedora / alpine / etc. via reinstall would just produce a
 // successful reinstall followed by an apt-install failure on the
@@ -48,7 +48,7 @@ var reinstallOSMatrix = map[string][]string{
 // reinstallScriptCommit pins bin456789/reinstall to a specific
 // commit. The script runs as root on the target — pulling from
 // `main` would mean any upstream compromise (or surprise change)
-// becomes root code execution on every freshly-provisioned host.
+// becomes root code execution on every freshly-bootstrapped host.
 // Updating both this SHA and reinstallScriptSHA256 below is a
 // deliberate, reviewable bump.
 //
@@ -75,7 +75,7 @@ var reinstallScriptURL = fmt.Sprintf("https://raw.githubusercontent.com/bin45678
 
 // reinstallSSHPort is the port reinstall.sh is told to bake into
 // the new system's sshd_config. Matches the port targetSSHPort
-// uses for the rest of the provisioning workflow so the rest of
+// uses for the rest of the bootstrap workflow so the rest of
 // the steps see "already on 4242" and no-op the flip script.
 const reinstallSSHPort = targetSSHPort
 
@@ -115,7 +115,7 @@ func reinstallOSList() []string {
 // caller before this is invoked.
 //
 // emit receives progress messages on the same channel as the rest
-// of provisioning. The "wait for SSH" phase periodically emits a
+// of bootstrap. The "wait for SSH" phase periodically emits a
 // heartbeat so the operator can tell the run is still alive — a
 // silent 20-minute install otherwise looks indistinguishable from
 // a hung process.
@@ -349,7 +349,7 @@ func tailLines(s string, n int) string {
 }
 
 // friendly formats d as e.g. "2m 15s" — matches the cadence of
-// provisioning emits, which are minute-scale during the reinstall
+// bootstrap emits, which are minute-scale during the reinstall
 // wait phase.
 func friendly(d time.Duration) string {
 	d = d.Round(time.Second)

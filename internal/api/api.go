@@ -73,11 +73,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/vault/inline/upsert", limitBody(largeBody, s.upsertInlineVault))
 	mux.HandleFunc("GET /api/adhoc/stream", s.wsAdhoc)
 	mux.HandleFunc("GET /api/playbook/stream", s.wsPlaybook)
-	mux.HandleFunc("POST /api/provision/start", limitBody(smallBody, s.httpProvisionStart))
-	mux.HandleFunc("GET /api/provision/jobs", s.httpProvisionList)
-	mux.HandleFunc("GET /api/provision/jobs/{id}", s.httpProvisionGet)
-	mux.HandleFunc("POST /api/provision/jobs/{id}/cancel", limitBody(emptyBody, s.httpProvisionCancel))
-	mux.HandleFunc("GET /api/provision/jobs/{id}/stream", s.wsProvisionStream)
+	mux.HandleFunc("POST /api/bootstrap/start", limitBody(smallBody, s.httpBootstrapStart))
+	mux.HandleFunc("GET /api/bootstrap/jobs", s.httpBootstrapList)
+	mux.HandleFunc("GET /api/bootstrap/jobs/{id}", s.httpBootstrapGet)
+	mux.HandleFunc("POST /api/bootstrap/jobs/{id}/cancel", limitBody(emptyBody, s.httpBootstrapCancel))
+	mux.HandleFunc("GET /api/bootstrap/jobs/{id}/stream", s.wsBootstrapStream)
 
 	mux.Handle("/", s.staticHandler())
 
@@ -89,7 +89,7 @@ func (s *Server) Handler() http.Handler {
 // anyone reaching the port can already drive ansible-playbook and
 // now SSH-bootstrap fresh boxes — so the deployment posture is
 // "behind a VPN / on localhost". But CORS quirks let a malicious
-// origin fire-and-forget POSTs (and, for the provisioning read
+// origin fire-and-forget POSTs (and, for the bootstrap read
 // endpoints that surface recent target IPs/hostnames, GETs) from
 // the operator's browser if they have ansbui open in another tab.
 // This guard mirrors the same-origin check the WebSocket upgrader
@@ -98,8 +98,8 @@ func (s *Server) Handler() http.Handler {
 // Coverage:
 //   - All state-mutating verbs (POST/PUT/DELETE/PATCH) on every
 //     route, since they all change durable state.
-//   - GETs on /api/provision/* because the job summaries leak
-//     recent provisioning targets (IPs, hostnames, providers) to
+//   - GETs on /api/bootstrap/* because the job summaries leak
+//     recent bootstrap targets (IPs, hostnames, providers) to
 //     anyone able to elicit a same-cookie-scope read from the
 //     operator's browser. Other GETs are intentionally not
 //     guarded — inventory/runs/etc. are designed to be readable.
@@ -115,7 +115,7 @@ func withOriginGuard(h http.Handler) http.Handler {
 		case http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodPatch:
 			guarded = true
 		case http.MethodGet, http.MethodHead:
-			if strings.HasPrefix(r.URL.Path, "/api/provision/") {
+			if strings.HasPrefix(r.URL.Path, "/api/bootstrap/") {
 				guarded = true
 			}
 		}

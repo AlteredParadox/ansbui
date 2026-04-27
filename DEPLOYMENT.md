@@ -1,7 +1,7 @@
 # ansbui deployment hardening
 
 ansbui has no built-in authentication. The control plane drives
-ansible-playbook and provisioning as the configured SSH user, so
+ansible-playbook and bootstrap as the configured SSH user, so
 "can reach the port" = "can run anything ansible can". This doc
 is the checklist for getting from `go build` to a production
 deployment.

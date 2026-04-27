@@ -60,7 +60,7 @@
 
   api.gatherFacts = (host) => json(`/api/facts?host=${encodeURIComponent(host)}`);
 
-  // Open a WebSocket to stream ad-hoc / playbook output. Provisioning
+  // Open a WebSocket to stream ad-hoc / playbook output. Bootstrap
   // uses the job-backed flow below — its lifecycle is decoupled from
   // any single WS attachment.
   const STREAM_PATHS = {
@@ -94,26 +94,26 @@
     };
   };
 
-  // Provisioning is backed by a server-side job manager so the run
+  // Bootstrap is backed by a server-side job manager so the run
   // outlives the operator's tab — important for the reinstall flow
   // which reboots the target and waits up to ~30 minutes for SSH
   // to come back. Lifecycle:
-  //   1. startProvisionJob(payload)    POST creates the job
-  //   2. attachProvisionJob(jobId)     WS subscribes (replay + tail)
-  //   3. cancelProvisionJob(jobId)     POST signals ctx-cancel
+  //   1. startBootstrapJob(payload)    POST creates the job
+  //   2. attachBootstrapJob(jobId)     WS subscribes (replay + tail)
+  //   3. cancelBootstrapJob(jobId)     POST signals ctx-cancel
   // Closing the WS does NOT cancel; only the explicit cancel call
-  // does. getProvisionJob backs the on-mount re-attach probe in
-  // Provisioning.jsx.
-  api.startProvisionJob = (payload) => json('/api/provision/start', {
+  // does. getBootstrapJob backs the on-mount re-attach probe in
+  // Bootstrap.jsx.
+  api.startBootstrapJob = (payload) => json('/api/bootstrap/start', {
     method: 'POST', body: JSON.stringify(payload)
   });
-  api.getProvisionJob = (id) => json(`/api/provision/jobs/${encodeURIComponent(id)}`);
-  api.cancelProvisionJob = (id) => json(`/api/provision/jobs/${encodeURIComponent(id)}/cancel`, {
+  api.getBootstrapJob = (id) => json(`/api/bootstrap/jobs/${encodeURIComponent(id)}`);
+  api.cancelBootstrapJob = (id) => json(`/api/bootstrap/jobs/${encodeURIComponent(id)}/cancel`, {
     method: 'POST'
   });
-  api.attachProvisionJob = (id) => {
+  api.attachBootstrapJob = (id) => {
     const wsProto = globalThis.location.protocol === 'https:' ? 'wss' : 'ws';
-    const ws = new WebSocket(`${wsProto}://${globalThis.location.host}/api/provision/jobs/${encodeURIComponent(id)}/stream`);
+    const ws = new WebSocket(`${wsProto}://${globalThis.location.host}/api/bootstrap/jobs/${encodeURIComponent(id)}/stream`);
     const listeners = new Set();
     ws.addEventListener('message', (e) => {
       let msg;

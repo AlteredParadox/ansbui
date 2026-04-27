@@ -109,7 +109,7 @@ linters:
 
   exclusions:
     rules:
-      # The deferred sess.Close patterns in sshpool / provision
+      # The deferred sess.Close patterns in sshpool / bootstrap
       # are ssh.Session.Close. The exclude-functions list above
       # covers the common case; this catches the few sites where
       # the receiver type isn't statically known to errcheck.

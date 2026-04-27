@@ -1,5 +1,5 @@
 // Package porkbun is a thin HTTP client for the subset of Porkbun's
-// JSON DNS API that the provisioning flow needs: look up an existing
+// JSON DNS API that the bootstrap flow needs: look up an existing
 // A record for a hostname, and create a new one when it doesn't
 // exist. Auth uses Porkbun's body-embedded `apikey`+`secretapikey`
 // pair on every request — there's no header-based form.
@@ -29,7 +29,7 @@ type Client struct {
 
 // New builds a Client with a 15-second per-request timeout — porkbun
 // is responsive in practice and a stuck request shouldn't hold up
-// a provisioning run.
+// a bootstrap run.
 func New(apiKey, secretKey string) *Client {
 	return &Client{
 		apiKey:    apiKey,
@@ -96,7 +96,7 @@ func (c *Client) FindARecords(ctx context.Context, domain, subdomain, fqdn strin
 // CreateARecord adds a new A record under domain pointing at ip.
 // `subdomain` "" creates the apex; otherwise the resulting record
 // is `<sub>.<domain>`. ttlSeconds is what Porkbun stores; 300 is
-// a sensible default for newly-provisioned hosts.
+// a sensible default for newly-bootstrapped hosts.
 func (c *Client) CreateARecord(ctx context.Context, domain, subdomain, ip string, ttlSeconds int) error {
 	path := fmt.Sprintf("/dns/create/%s", domain)
 	payload := map[string]any{

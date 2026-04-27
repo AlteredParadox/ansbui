@@ -1,4 +1,4 @@
-// Provisioning view — operator enters the credentials for a fresh
+// Bootstrap view — operator enters the credentials for a fresh
 // VPS, and the backend orchestrates DNS + SSH bootstrap + ansible
 // user setup + sshd hardening + inventory registration. The run
 // itself is owned by a backend job (internal/jobs); this view kicks
@@ -6,12 +6,12 @@
 // tab leaves the job running — we re-attach via localStorage on
 // mount so a 30-minute reinstall isn't lost to a refresh.
 
-const { useState: useStateProv, useEffect: useEffectProv, useRef: useRefProv } = React;
+const { useState: useStateBoot, useEffect: useEffectBoot, useRef: useRefBoot } = React;
 
-const PROVISION_JOB_KEY = 'ansbui.provisionJobId';
+const BOOTSTRAP_JOB_KEY = 'ansbui.bootstrapJobId';
 
 // REINSTALL_MATRIX must mirror reinstallOSMatrix in
-// internal/provision/reinstall.go — the backend re-validates, so a
+// internal/bootstrap/reinstall.go — the backend re-validates, so a
 // drift here just means the form rejects something the backend
 // would accept (or vice versa). Versions are listed newest-first
 // because the version dropdown defaults to index 0; the set
@@ -31,63 +31,63 @@ const REINSTALL_OS_LIST = Object.keys(REINSTALL_MATRIX);
 // IPv6 literal — fast, before submit.
 const IPV4_RE = /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/;
 
-function ProvisioningView() {
-  const [provider, setProvider] = useStateProv('');
-  const [ip, setIp] = useStateProv('');
-  const [port, setPort] = useStateProv('22');
-  const [username, setUsername] = useStateProv('root');
-  const [useSudo, setUseSudo] = useStateProv(false);
-  const [password, setPassword] = useStateProv('');
-  const [sudoPassword, setSudoPassword] = useStateProv('');
-  const [hostname, setHostname] = useStateProv('');
-  const [vaultPassword, setVaultPassword] = useStateProv('');
-  const [reinstallEnabled, setReinstallEnabled] = useStateProv(false);
-  const [reinstallOS, setReinstallOS] = useStateProv(REINSTALL_OS_LIST[0]);
-  const [reinstallVersion, setReinstallVersion] = useStateProv(REINSTALL_MATRIX[REINSTALL_OS_LIST[0]][0]);
-  const [running, setRunning] = useStateProv(false);
-  const [output, setOutput] = useStateProv([]);
-  const [error, setError] = useStateProv('');
-  const [activeSummary, setActiveSummary] = useStateProv(null);
-  const streamRef = useRefProv(null);
-  const outRef = useRefProv(null);
+function BootstrapView() {
+  const [provider, setProvider] = useStateBoot('');
+  const [ip, setIp] = useStateBoot('');
+  const [port, setPort] = useStateBoot('22');
+  const [username, setUsername] = useStateBoot('root');
+  const [useSudo, setUseSudo] = useStateBoot(false);
+  const [password, setPassword] = useStateBoot('');
+  const [sudoPassword, setSudoPassword] = useStateBoot('');
+  const [hostname, setHostname] = useStateBoot('');
+  const [vaultPassword, setVaultPassword] = useStateBoot('');
+  const [reinstallEnabled, setReinstallEnabled] = useStateBoot(false);
+  const [reinstallOS, setReinstallOS] = useStateBoot(REINSTALL_OS_LIST[0]);
+  const [reinstallVersion, setReinstallVersion] = useStateBoot(REINSTALL_MATRIX[REINSTALL_OS_LIST[0]][0]);
+  const [running, setRunning] = useStateBoot(false);
+  const [output, setOutput] = useStateBoot([]);
+  const [error, setError] = useStateBoot('');
+  const [activeSummary, setActiveSummary] = useStateBoot(null);
+  const streamRef = useRefBoot(null);
+  const outRef = useRefBoot(null);
 
-  useEffectProv(() => {
+  useEffectBoot(() => {
     if (username === 'root' && useSudo) setUseSudo(false);
   }, [username, useSudo]);
 
   // Reset version when OS changes — the previous selection isn't
   // valid for the new OS's version list.
-  useEffectProv(() => {
+  useEffectBoot(() => {
     const versions = REINSTALL_MATRIX[reinstallOS] || [];
     if (!versions.includes(reinstallVersion)) {
       setReinstallVersion(versions[0] || '');
     }
   }, [reinstallOS, reinstallVersion]);
 
-  useEffectProv(() => () => { if (streamRef.current) streamRef.current.close(); }, []);
+  useEffectBoot(() => () => { if (streamRef.current) streamRef.current.close(); }, []);
 
-  useEffectProv(() => {
+  useEffectBoot(() => {
     outRef.current?.scrollTo({ top: outRef.current.scrollHeight });
   }, [output]);
 
   // On mount: if we left a run going in a previous tab/session,
   // re-attach instead of starting fresh. The backend job survives
   // closed tabs by design — see internal/jobs.
-  useEffectProv(() => {
-    const id = globalThis.localStorage?.getItem(PROVISION_JOB_KEY);
+  useEffectBoot(() => {
+    const id = globalThis.localStorage?.getItem(BOOTSTRAP_JOB_KEY);
     if (!id || !globalThis.AnsbuiAPI) return;
     let cancelled = false;
-    globalThis.AnsbuiAPI.getProvisionJob(id).then(snap => {
+    globalThis.AnsbuiAPI.getBootstrapJob(id).then(snap => {
       if (cancelled) return;
       if (snap?.status !== 'running') {
-        globalThis.localStorage?.removeItem(PROVISION_JOB_KEY);
+        globalThis.localStorage?.removeItem(BOOTSTRAP_JOB_KEY);
         return;
       }
       setActiveSummary(snap.summary || {});
       setRunning(true);
       attachStream(id);
     }).catch(() => {
-      globalThis.localStorage?.removeItem(PROVISION_JOB_KEY);
+      globalThis.localStorage?.removeItem(BOOTSTRAP_JOB_KEY);
     });
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -99,11 +99,11 @@ function ProvisioningView() {
     append({ t: ok ? 'done' : 'fail', text });
     setRunning(false);
     setActiveSummary(null);
-    globalThis.localStorage?.removeItem(PROVISION_JOB_KEY);
+    globalThis.localStorage?.removeItem(BOOTSTRAP_JOB_KEY);
     // Drop the secrets out of React state once the run is over.
     // The form is the only path that holds three operator-supplied
     // passwords simultaneously; clearing on every terminal event
-    // keeps the next provisioning session — or a forgotten browser
+    // keeps the next bootstrap session — or a forgotten browser
     // tab — from showing the last operator's input pre-filled.
     setPassword('');
     setSudoPassword('');
@@ -118,7 +118,7 @@ function ProvisioningView() {
   // Local `finished` latch lets us treat an unexpected close as a
   // failure without double-firing finish().
   const attachStream = (jobId) => {
-    const ws = globalThis.AnsbuiAPI.attachProvisionJob(jobId);
+    const ws = globalThis.AnsbuiAPI.attachBootstrapJob(jobId);
     streamRef.current = ws;
     let finished = false;
     const fin = (ok, text) => {
@@ -183,14 +183,14 @@ function ProvisioningView() {
     };
 
     try {
-      const res = await globalThis.AnsbuiAPI.startProvisionJob(payload);
+      const res = await globalThis.AnsbuiAPI.startBootstrapJob(payload);
       const jobId = res?.jobId;
       if (!jobId) {
         setRunning(false);
         setError('Backend did not return a job ID.');
         return;
       }
-      globalThis.localStorage?.setItem(PROVISION_JOB_KEY, jobId);
+      globalThis.localStorage?.setItem(BOOTSTRAP_JOB_KEY, jobId);
       attachStream(jobId);
     } catch (e) {
       setRunning(false);
@@ -203,17 +203,17 @@ function ProvisioningView() {
   // own terminal event, which routes through the normal finish()
   // path.
   const cancel = async () => {
-    const id = globalThis.localStorage?.getItem(PROVISION_JOB_KEY);
+    const id = globalThis.localStorage?.getItem(BOOTSTRAP_JOB_KEY);
     if (!id) return;
     try {
-      await globalThis.AnsbuiAPI.cancelProvisionJob(id);
+      await globalThis.AnsbuiAPI.cancelBootstrapJob(id);
     } catch (e) {
       setError(`cancel failed: ${e.message || e}`);
     }
   };
 
   return (
-    <div className="view view-provision">
+    <div className="view view-bootstrap">
       <div className="view-head">
         <div>
           <h1 className="view-title">Bootstrap</h1>
@@ -236,82 +236,82 @@ function ProvisioningView() {
 
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
           <div>
-            <label htmlFor="prov-provider" className="cm-field-label">Provider</label>
-            <input id="prov-provider" className="input mono" placeholder="hetzner, dartnode, …" value={provider} onChange={e => setProvider(e.target.value)} disabled={running}/>
+            <label htmlFor="boot-provider" className="cm-field-label">Provider</label>
+            <input id="boot-provider" className="input mono" placeholder="hetzner, dartnode, …" value={provider} onChange={e => setProvider(e.target.value)} disabled={running}/>
             <div className="mute" style={{ fontSize: 11, marginTop: 4 }}>Used as the inventory group name. Created if it doesn&rsquo;t exist.</div>
           </div>
           <div>
-            <label htmlFor="prov-hostname" className="cm-field-label">Hostname / FQDN</label>
-            <input id="prov-hostname" className="input mono" placeholder="ca-on-vps01.example.com" value={hostname} onChange={e => setHostname(e.target.value)} disabled={running}/>
+            <label htmlFor="boot-hostname" className="cm-field-label">Hostname / FQDN</label>
+            <input id="boot-hostname" className="input mono" placeholder="ca-on-vps01.example.com" value={hostname} onChange={e => setHostname(e.target.value)} disabled={running}/>
             <div className="mute" style={{ fontSize: 11, marginTop: 4 }}>Last two labels become the porkbun domain.</div>
           </div>
         </div>
 
         <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 10, marginTop: 10 }}>
           <div>
-            <label htmlFor="prov-ip" className="cm-field-label">IP address</label>
-            <input id="prov-ip" className="input mono" placeholder="203.0.113.42" value={ip} onChange={e => setIp(e.target.value)} disabled={running}/>
+            <label htmlFor="boot-ip" className="cm-field-label">IP address</label>
+            <input id="boot-ip" className="input mono" placeholder="203.0.113.42" value={ip} onChange={e => setIp(e.target.value)} disabled={running}/>
             <div className="mute" style={{ fontSize: 11, marginTop: 4 }}>
               First contact — the target&rsquo;s SSH host key is not verified, so use a trusted network.
             </div>
           </div>
           <div>
-            <label htmlFor="prov-port" className="cm-field-label">SSH port</label>
-            <input id="prov-port" className="input mono" placeholder="22" value={port} onChange={e => setPort(e.target.value)} disabled={running}/>
+            <label htmlFor="boot-port" className="cm-field-label">SSH port</label>
+            <input id="boot-port" className="input mono" placeholder="22" value={port} onChange={e => setPort(e.target.value)} disabled={running}/>
           </div>
         </div>
 
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginTop: 10 }}>
           <div>
-            <label htmlFor="prov-user" className="cm-field-label">Username</label>
-            <input id="prov-user" className="input mono" placeholder="root" value={username} onChange={e => setUsername(e.target.value)} disabled={running}/>
+            <label htmlFor="boot-user" className="cm-field-label">Username</label>
+            <input id="boot-user" className="input mono" placeholder="root" value={username} onChange={e => setUsername(e.target.value)} disabled={running}/>
           </div>
           <div>
-            <label htmlFor="prov-pw" className="cm-field-label">Password</label>
-            <input id="prov-pw" className="input mono" type="password" autoComplete="new-password" value={password} onChange={e => setPassword(e.target.value)} disabled={running}/>
+            <label htmlFor="boot-pw" className="cm-field-label">Password</label>
+            <input id="boot-pw" className="input mono" type="password" autoComplete="new-password" value={password} onChange={e => setPassword(e.target.value)} disabled={running}/>
           </div>
         </div>
 
         {username !== 'root' && (
           <div style={{ marginTop: 10 }}>
-            <label className="opt" htmlFor="prov-usesudo">
-              <input id="prov-usesudo" type="checkbox" checked={useSudo} onChange={e => setUseSudo(e.target.checked)} disabled={running}/>
+            <label className="opt" htmlFor="boot-usesudo">
+              <input id="boot-usesudo" type="checkbox" checked={useSudo} onChange={e => setUseSudo(e.target.checked)} disabled={running}/>
               <span className="mono">use sudo</span> <span className="mute">(needed for non-root users to run setup commands)</span>
             </label>
             {useSudo && (
               <div style={{ marginTop: 8 }}>
-                <label htmlFor="prov-sudopw" className="cm-field-label">Sudo password</label>
-                <input id="prov-sudopw" className="input mono" type="password" autoComplete="new-password" value={sudoPassword} onChange={e => setSudoPassword(e.target.value)} disabled={running}/>
+                <label htmlFor="boot-sudopw" className="cm-field-label">Sudo password</label>
+                <input id="boot-sudopw" className="input mono" type="password" autoComplete="new-password" value={sudoPassword} onChange={e => setSudoPassword(e.target.value)} disabled={running}/>
               </div>
             )}
           </div>
         )}
 
         <div style={{ marginTop: 12 }}>
-          <label htmlFor="prov-vaultpw" className="cm-field-label">Vault password</label>
-          <input id="prov-vaultpw" className="input mono" type="password" autoComplete="new-password" placeholder="decrypts porkbun_api_key + porkbun_secret_key" value={vaultPassword} onChange={e => setVaultPassword(e.target.value)} disabled={running}/>
+          <label htmlFor="boot-vaultpw" className="cm-field-label">Vault password</label>
+          <input id="boot-vaultpw" className="input mono" type="password" autoComplete="new-password" placeholder="decrypts porkbun_api_key + porkbun_secret_key" value={vaultPassword} onChange={e => setVaultPassword(e.target.value)} disabled={running}/>
           <div className="mute" style={{ fontSize: 11, marginTop: 4 }}>
             Read from <span className="mono">inventory/group_vars/all/vault.yml</span> on the active control node.
           </div>
         </div>
 
         <div style={{ marginTop: 14 }}>
-          <label className="opt" htmlFor="prov-reinstall">
-            <input id="prov-reinstall" type="checkbox" checked={reinstallEnabled} onChange={e => setReinstallEnabled(e.target.checked)} disabled={running}/>
+          <label className="opt" htmlFor="boot-reinstall">
+            <input id="boot-reinstall" type="checkbox" checked={reinstallEnabled} onChange={e => setReinstallEnabled(e.target.checked)} disabled={running}/>
             <span className="mono">reinstall the OS first</span> <span className="mute">(via <a href="https://github.com/bin456789/reinstall" target="_blank" rel="noreferrer">bin456789/reinstall</a>)</span>
           </label>
           {reinstallEnabled && (
             <div style={{ marginTop: 8 }}>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
                 <div>
-                  <label htmlFor="prov-reinstall-os" className="cm-field-label">OS</label>
-                  <select id="prov-reinstall-os" className="input mono" value={reinstallOS} onChange={e => setReinstallOS(e.target.value)} disabled={running}>
+                  <label htmlFor="boot-reinstall-os" className="cm-field-label">OS</label>
+                  <select id="boot-reinstall-os" className="input mono" value={reinstallOS} onChange={e => setReinstallOS(e.target.value)} disabled={running}>
                     {REINSTALL_OS_LIST.map(os => <option key={os} value={os}>{os}</option>)}
                   </select>
                 </div>
                 <div>
-                  <label htmlFor="prov-reinstall-ver" className="cm-field-label">Version</label>
-                  <select id="prov-reinstall-ver" className="input mono" value={reinstallVersion} onChange={e => setReinstallVersion(e.target.value)} disabled={running}>
+                  <label htmlFor="boot-reinstall-ver" className="cm-field-label">Version</label>
+                  <select id="boot-reinstall-ver" className="input mono" value={reinstallVersion} onChange={e => setReinstallVersion(e.target.value)} disabled={running}>
                     {(REINSTALL_MATRIX[reinstallOS] || []).map(v => <option key={v} value={v}>{v}</option>)}
                   </select>
                 </div>
@@ -360,4 +360,4 @@ function ProvisioningView() {
   );
 }
 
-globalThis.ProvisioningView = ProvisioningView;
+globalThis.BootstrapView = BootstrapView;

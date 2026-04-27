@@ -28,7 +28,7 @@
   <script type="text/babel" src="views/Inventory.jsx"></script>
   <script type="text/babel" src="views/Playbooks.jsx"></script>
   <script type="text/babel" src="views/Adhoc.jsx"></script>
-  <script type="text/babel" src="views/Provisioning.jsx"></script>
+  <script type="text/babel" src="views/Bootstrap.jsx"></script>
   <script type="text/babel" src="views/History.jsx"></script>
   <script type="text/babel" src="views/Vault.jsx"></script>
 
@@ -140,7 +140,14 @@
     }
 
     function App({ activeId, servers, onReload }) {
-      const [view, setView] = useState(() => localStorage.getItem('ansbui.view') || 'dashboard');
+      const [view, setView] = useState(() => {
+        // Coerce the legacy 'provision' value so an operator who had
+        // the Bootstrap view active when this rename shipped lands on
+        // it again instead of a blank screen.
+        const raw = localStorage.getItem('ansbui.view');
+        if (raw === 'provision') return 'bootstrap';
+        return raw || 'dashboard';
+      });
       const [paletteOpen, setPaletteOpen] = useState(false);
       const [adhocPrefill, setAdhocPrefill] = useState(null);
       const [playbookId, setPlaybookId] = useState(null);
@@ -174,7 +181,7 @@
           if (e.key === 'g') { gBuffer = now; return; }
           if (gBuffer && now - gBuffer < 900) {
             gBuffer = 0;
-            const map = { d: 'dashboard', i: 'inventory', p: 'playbooks', a: 'adhoc', n: 'provision', r: 'history', s: 'vault' };
+            const map = { d: 'dashboard', i: 'inventory', p: 'playbooks', a: 'adhoc', n: 'bootstrap', r: 'history', s: 'vault' };
             if (map[e.key]) { e.preventDefault(); setView(map[e.key]); }
           }
         };
@@ -211,7 +218,7 @@
         inventory: ['Workspace', 'Inventory'],
         playbooks: ['Workspace', 'Playbooks'],
         adhoc: ['Workspace', 'Ad-hoc'],
-        provision: ['Workspace', 'Provision'],
+        bootstrap: ['Workspace', 'Bootstrap'],
         history: ['Workspace', 'Runs'],
         vault: ['Workspace', 'Secrets']
       }[view];
@@ -222,7 +229,7 @@
           case 'inventory': return <window.InventoryView onOpenAdhoc={openAdhoc}/>;
           case 'playbooks': return <window.PlaybooksView initialId={playbookId} runnerPrefill={pbRunnerPrefill}/>;
           case 'adhoc': return <window.AdhocView prefill={adhocPrefill}/>;
-          case 'provision': return <window.ProvisioningView/>;
+          case 'bootstrap': return <window.BootstrapView/>;
           case 'history': return <window.HistoryView onOpenPlaybook={runPlaybook} onRunPlaybook={openPlaybookRunner} onOpenAdhoc={openAdhoc}/>;
           case 'vault': return <window.VaultView/>;
           default: return null;

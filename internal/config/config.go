@@ -54,7 +54,7 @@ type Store struct {
 	GeoIPEnabled bool `json:"geoIpEnabled,omitempty"`
 	// ControlPrivKeyPath is the path on the active control node to
 	// the SSH private key whose public counterpart gets installed
-	// into the ansible user's authorized_keys during provisioning.
+	// into the ansible user's authorized_keys during bootstrap.
 	// Used by the post-reinstall reconnect step to dial the freshly-
 	// installed target on :4242 with key auth. Empty means use the
 	// default (~/.ssh/ansible_ed25519).

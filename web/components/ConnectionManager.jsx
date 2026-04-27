@@ -294,11 +294,11 @@ function SettingsTab({ promUrl, promLabel, autoGatherFacts, geoIpEnabled, contro
         </label>
 
         <div className="divider" style={{ margin: '16px 0 12px' }}/>
-        <div className="section-title">Provisioning</div>
+        <div className="section-title">Bootstrap</div>
         <div className="mute" style={{ fontSize: 12, marginBottom: 8 }}>
-          Path on the active control node to the SSH private key whose public counterpart is installed in each provisioned host&rsquo;s <span className="mono">authorized_keys</span>. Used by the OS-reinstall flow to dial the freshly-installed target on <span className="mono">:4242</span> with key auth. Defaults to <span className="mono">~/.ssh/ansible_ed25519</span>.
+          Path on the active control node to the SSH private key whose public counterpart is installed in each bootstrapped host&rsquo;s <span className="mono">authorized_keys</span>. Used by the OS-reinstall flow to dial the freshly-installed target on <span className="mono">:4242</span> with key auth. Defaults to <span className="mono">~/.ssh/ansible_ed25519</span>.
         </div>
-        <Field id="prov-privkey" label="Control-node private key path" placeholder="~/.ssh/ansible_ed25519"
+        <Field id="boot-privkey" label="Control-node private key path" placeholder="~/.ssh/ansible_ed25519"
                value={controlPrivKeyPath} onChange={onChangeControlPrivKeyPath}/>
 
         <div style={{ display: 'flex', gap: 8, marginTop: 14 }}>

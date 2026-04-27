@@ -1,4 +1,4 @@
-package provision
+package bootstrap
 
 import (
 	"bytes"
@@ -12,7 +12,7 @@ import (
 // inventoryUmbrellaGroups is the chain of intermediate groups every
 // new host gets nested under, in order from the outermost. The
 // existing fleet's convention is `all → vps_servers → debian_servers
-// → <provider>`; provisioning v1 only handles Debian/Ubuntu so
+// → <provider>`; bootstrap v1 only handles Debian/Ubuntu so
 // debian_servers is hardcoded here. If a future revision adds e.g.
 // a freebsd_servers branch, this is the place to dispatch on distro.
 var inventoryUmbrellaGroups = []string{"vps_servers", "debian_servers"}
@@ -55,7 +55,7 @@ func addHostToInventoryYAML(content []byte, provider, fqdn string) ([]byte, erro
 	// dependent.
 	for _, group := range inventoryUmbrellaGroups {
 		if existing := findMapValue(top, group); existing != nil {
-			return nil, fmt.Errorf("inventory has top-level group %q — move it under all.children before provisioning so the new host doesn't get added to a duplicate group", group)
+			return nil, fmt.Errorf("inventory has top-level group %q — move it under all.children before bootstrap so the new host doesn't get added to a duplicate group", group)
 		}
 	}
 

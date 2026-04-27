@@ -28,7 +28,7 @@ var wsUpgrader = websocket.Upgrader{
 // gorilla/websocket's default ReadLimit is unlimited, which would
 // let a malicious peer (or a non-browser client whose missing
 // Origin header bypasses the same-origin check) buffer arbitrarily
-// large frames into the server's memory. The provisioning request
+// large frames into the server's memory. The bootstrap request
 // envelope is a few hundred bytes; even an adhoc/playbook
 // JSON-decoded request maxes out at low-KB. 64 KiB matches the
 // HTTP smallBody ceiling and stays comfortably above any

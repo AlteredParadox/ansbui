@@ -256,7 +256,7 @@ func WriteVault(ctx context.Context, pool *sshpool.Pool, srv config.Server, rel,
 // Wraps ctx with vaultRunTimeout so a wedged ansible-vault
 // invocation can't hang a UI request indefinitely. runRemoteScript
 // no longer applies this bound itself — we own it at the vault
-// boundary so atomic-write callers (provisioning) get the more
+// boundary so atomic-write callers (bootstrap) get the more
 // generous remoteWriteTimeout instead.
 func runVaultScript(ctx context.Context, cli *ssh.Client, script, stdin string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, vaultRunTimeout)

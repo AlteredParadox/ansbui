@@ -47,7 +47,7 @@ const NAV_BASE = [
   { id: 'inventory', label: 'Inventory', icon: 'inventory', hint: 'g i', countKey: 'HOSTS' },
   { id: 'playbooks', label: 'Playbooks', icon: 'playbooks', hint: 'g p', countKey: 'PLAYBOOKS' },
   { id: 'adhoc', label: 'Ad-hoc', icon: 'terminal', hint: 'g a' },
-  { id: 'provision', label: 'Bootstrap', icon: 'plus', hint: 'g n' },
+  { id: 'bootstrap', label: 'Bootstrap', icon: 'plus', hint: 'g n' },
   { id: 'history', label: 'Runs', icon: 'history', hint: 'g r', countKey: 'RUNS' },
   { id: 'vault', label: 'Secrets', icon: 'vault', hint: 'g s' }
 ];

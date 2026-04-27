@@ -1,4 +1,4 @@
-package provision
+package bootstrap
 
 import (
 	"bytes"
@@ -14,7 +14,7 @@ import (
 // targetSession is an SSH connection to a freshly-supplied server.
 // Auth is password-only (we typically don't have a key on the box
 // yet), and host-key verification is intentionally disabled — the
-// whole point of provisioning is the operator's first contact with
+// whole point of bootstrap is the operator's first contact with
 // the machine, before any key is on record.
 type targetSession struct {
 	client       *ssh.Client
@@ -29,7 +29,7 @@ func dialPasswordTarget(ctx context.Context, host string, port int, user, passwo
 	cfg := &ssh.ClientConfig{
 		User:            user,
 		Auth:            []ssh.AuthMethod{ssh.Password(password)},
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(), //nolint:gosec // first-contact provisioning — see package doc
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(), //nolint:gosec // first-contact bootstrap — see package doc
 		Timeout:         15 * time.Second,
 	}
 	return dialTargetWithConfig(ctx, host, port, sudoPassword, cfg)
@@ -40,7 +40,7 @@ func dialPasswordTarget(ctx context.Context, host string, port int, user, passwo
 // reconnect: reinstall.sh has installed the public counterpart into
 // the freshly-installed system's /root/.ssh/authorized_keys, sshd is
 // already listening on the requested port, and we need to drive the
-// rest of the provisioning steps (ansible user setup, sshd flip if
+// rest of the bootstrap steps (ansible user setup, sshd flip if
 // not already on 4242, inventory edit) from this new session.
 //
 // Host-key verification is still disabled — the reinstall replaces
@@ -136,7 +136,7 @@ func (s *targetSession) requireSudo(ctx context.Context) error {
 		return nil
 	}
 	if _, _, err := s.run(ctx, "command -v sudo >/dev/null 2>&1", ""); err != nil {
-		return fmt.Errorf("the `sudo` binary isn't on the target user's PATH — connect as root for first-time provisioning so the orchestrator can apt-install sudo, then re-run as the ansible user. (sudoers membership is checked separately by the first elevated command.)")
+		return fmt.Errorf("the `sudo` binary isn't on the target user's PATH — connect as root for first-time bootstrap so the orchestrator can apt-install sudo, then re-run as the ansible user. (sudoers membership is checked separately by the first elevated command.)")
 	}
 	return nil
 }
