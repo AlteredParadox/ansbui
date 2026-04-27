@@ -50,7 +50,7 @@ function DashboardView({ onNavigate, onOpenAdhoc }) {
   const reload = async () => {
     if (!globalThis.AnsbuiAPI || refreshing) return;
     setRefreshing(true);
-    try { await globalThis.AnsbuiAPI.bootstrap(); } finally { setRefreshing(false); }
+    try { await globalThis.AnsbuiAPI.refreshData(); } finally { setRefreshing(false); }
   };
 
   const recentRuns = RUNS.slice(0, 6);

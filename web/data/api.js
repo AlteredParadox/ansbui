@@ -182,8 +182,11 @@
     return { close: () => stream.close() };
   };
 
-  // Bootstrap globalThis.AnsibleData with the shape the views expect.
-  api.bootstrap = async () => {
+  // (Re)load globalThis.AnsibleData with the shape the views expect.
+  // Called once at boot and any time a view wants to re-sync after
+  // an action that mutated server-side state (inventory edits,
+  // playbook runs, vault writes, etc).
+  api.refreshData = async () => {
     const [inv, pbs, runs, settings] = await Promise.all([
       api.inventory().catch(() => ({ groups: [], hosts: [] })),
       api.listPlaybooks().catch(() => ({ playbooks: [] })),

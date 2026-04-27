@@ -517,7 +517,7 @@ function AdhocSavePlaybookDialog({ open, composition, onClose }) {
     setBusy(true);
     try {
       await globalThis.AnsbuiAPI.savePlaybook(path, yaml);
-      await globalThis.AnsbuiAPI.bootstrap();
+      await globalThis.AnsbuiAPI.refreshData();
       setDone(true);
     } catch (e) { setError(e.message); }
     finally { setBusy(false); }

@@ -726,7 +726,7 @@ function InventoryView({ onOpenAdhoc }) {
     if (refreshing || !globalThis.AnsbuiAPI) return;
     setRefreshing(true); setRefreshError('');
     try {
-      await globalThis.AnsbuiAPI.bootstrap();
+      await globalThis.AnsbuiAPI.refreshData();
       setRefreshTick(t => t + 1);
     } catch (e) {
       setRefreshError(e.message);

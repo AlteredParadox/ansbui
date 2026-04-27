@@ -53,7 +53,7 @@
             setShowManager(true);
             return;
           }
-          await window.AnsbuiAPI.bootstrap();
+          await window.AnsbuiAPI.refreshData();
           setPhase('ready');
           setShowManager(options.keepManagerOpen || false);
         } catch (e) {
