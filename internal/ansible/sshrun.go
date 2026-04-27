@@ -70,8 +70,20 @@ func writeFileAtomicViaStdin(ctx context.Context, cli *ssh.Client, full, content
 	// to apply implicitly via runRemoteScript.
 	ctx, cancel := context.WithTimeout(ctx, remoteWriteTimeout)
 	defer cancel()
+	_, stderr, err = runRemoteScript(ctx, cli, atomicWriteScript(full), content)
+	return stderr, err
+}
+
+// atomicWriteScript is the bash one-liner writeFileAtomicViaStdin
+// hands to the remote shell. Extracted so the symlink-refusal
+// branch can be exercised by integration tests against a local
+// bash without standing up a full SSH server. The contract is the
+// same on the wire: stdin = file content, exit 2 + stderr message
+// when the destination is a symlink, exit 0 + atomic rename
+// otherwise.
+func atomicWriteScript(full string) string {
 	q := shellQuote(full)
-	script := fmt.Sprintf(
+	return fmt.Sprintf(
 		`set -eo pipefail; trap '[ -n "${TMP:-}" ] && rm -f "$TMP"' EXIT; `+
 			`if [ -L %s ]; then echo "refusing to write through symlink" >&2; exit 2; fi; `+
 			`if [ -e %s ]; then PERM=$(stat -c '%%a' %s); else PERM=0644; fi; `+
@@ -81,8 +93,6 @@ func writeFileAtomicViaStdin(ctx context.Context, cli *ssh.Client, full, content
 			`mv "$TMP" %s`,
 		q, q, q, q, q,
 	)
-	_, stderr, err = runRemoteScript(ctx, cli, script, content)
-	return stderr, err
 }
 
 // runRemoteScript opens a session, optionally feeds stdin, runs the

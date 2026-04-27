@@ -180,7 +180,12 @@ func withLogging(h http.Handler) http.Handler {
 		rw := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 		h.ServeHTTP(rw, r)
 		if strings.HasPrefix(r.URL.Path, "/api/") {
-			log.Printf("%s %s %d %s", r.Method, r.URL.Path, rw.status, time.Since(start))
+			// %q on Method + Path so a request with embedded
+			// CR/LF or control bytes can't forge a second log
+			// line — gosec G706 (log injection via taint
+			// analysis). r.URL.Path is operator-controlled at
+			// the boundary, so quoting is the cheap fix.
+			log.Printf("%q %q %d %s", r.Method, r.URL.Path, rw.status, time.Since(start))
 		}
 	})
 }

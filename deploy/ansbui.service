@@ -1,0 +1,69 @@
+[Unit]
+Description=ansbui — Ansible control-plane web UI
+Documentation=https://github.com/AlteredParadox/ansbui
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ansbui
+Group=ansbui
+WorkingDirectory=/opt/ansbui
+ExecStart=/opt/ansbui/bin/ansbui -addr 127.0.0.1:8787
+Restart=on-failure
+RestartSec=3
+Environment=ANSBUI_CONFIG=/opt/ansbui/data/config.json
+Environment=ANSBUI_RUNS=/opt/ansbui/data/runs.json
+Environment=HOME=/opt/ansbui
+
+# --- Hardening (systemd-analyze security baseline) ---
+# ansbui only needs: TCP/UDP for HTTP listen + SSH + Prom fetch,
+# AF_UNIX for ssh-agent socket, file IO inside /opt/ansbui.
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectProc=invisible
+ProcSubset=pid
+ReadWritePaths=/opt/ansbui
+
+# Drop every capability — the service binds 8787 (unprivileged
+# port) and runs entirely in user space. Empty bounding set
+# means even a privilege-escalation bug in a Go dependency has
+# no caps to inherit.
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+# Network surface: TCP for HTTP/SSH/Prom, AF_UNIX for ssh-agent.
+# AF_NETLINK / AF_PACKET / AF_BLUETOOTH etc. all blocked.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+# Block clone-namespace tricks an attacker might use to escape
+# the cgroup/private-tmp jail.
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+
+# @system-service is the systemd-curated "normal long-running
+# daemon" syscall set. It already excludes @privileged. Adding
+# ~@resources would block setrlimit, which Go's runtime uses —
+# don't.
+SystemCallFilter=@system-service
+SystemCallArchitectures=native
+
+# Tighten the default file-creation mode so anything ansbui
+# writes outside its own atomic writers (e.g. a panic log) still
+# lands at 0600 / 0700.
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

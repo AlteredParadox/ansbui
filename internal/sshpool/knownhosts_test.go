@@ -116,3 +116,58 @@ func mustEd25519Key(t *testing.T) ssh.PublicKey {
 	}
 	return signer
 }
+
+// TestKnownHostsCallbackTOFU walks the closure returned by
+// knownHostsCallback through its three productive states:
+//
+//  1. empty DB, fresh host → append (TOFU)
+//  2. recorded key, same key on next dial → nil
+//  3. recorded key, different key on next dial → KeyError (mismatch)
+//
+// This is the integration glue between strict callback + append
+// path that the lower-level appendKnownHost tests don't exercise.
+func TestKnownHostsCallbackTOFU(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "known_hosts")
+
+	keyA := mustEd25519Key(t)
+	keyB := mustEd25519Key(t)
+	hostname := "tofu.example:22"
+	remote := &net.TCPAddr{IP: net.ParseIP("10.0.0.1"), Port: 22}
+
+	// (1) Empty file → first dial appends.
+	cb1, err := knownHostsCallback(path)
+	if err != nil {
+		t.Fatalf("init cb: %v", err)
+	}
+	if err := cb1(hostname, remote, keyA); err != nil {
+		t.Fatalf("first dial should TOFU-accept, got %v", err)
+	}
+
+	// (2) Re-load: same host + same key → nil.
+	cb2, err := knownHostsCallback(path)
+	if err != nil {
+		t.Fatalf("init cb2: %v", err)
+	}
+	if err := cb2(hostname, remote, keyA); err != nil {
+		t.Fatalf("repeat dial with same key should accept, got %v", err)
+	}
+
+	// (3) Re-load: same host + different key → mismatch (KeyError with Want).
+	cb3, err := knownHostsCallback(path)
+	if err != nil {
+		t.Fatalf("init cb3: %v", err)
+	}
+	err = cb3(hostname, remote, keyB)
+	if err == nil {
+		t.Fatalf("dial with rotated key should fail, got nil")
+	}
+	var keyErr *knownhosts.KeyError
+	if !errors.As(err, &keyErr) {
+		t.Fatalf("expected *knownhosts.KeyError, got %T (%v)", err, err)
+	}
+	if len(keyErr.Want) == 0 {
+		t.Fatalf("expected Want populated on mismatch, got empty (err=%v)", err)
+	}
+}

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"path"
+	"strconv"
 	"strings"
 	"time"
 
@@ -137,13 +138,17 @@ func applyAnnotationLine(v *VaultFile, step int, line string) {
 }
 
 // readStatLine parses "<size> <mtime>" — stat -c doesn't interpret
-// backslash escapes, so the separator is a literal space.
+// backslash escapes, so the separator is a literal space. The size
+// field is best-effort; a malformed/missing stat line leaves Size
+// at zero rather than failing the whole vault listing.
 func readStatLine(v *VaultFile, line string) {
 	parts := strings.SplitN(line, " ", 2)
 	if len(parts) == 0 {
 		return
 	}
-	fmt.Sscanf(parts[0], "%d", &v.Size)
+	if n, err := strconv.Atoi(parts[0]); err == nil {
+		v.Size = n
+	}
 }
 
 // readFirstContentLine classifies the file as whole-file vs inline

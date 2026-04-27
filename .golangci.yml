@@ -41,11 +41,6 @@ linters:
         - (*os.File).Close
         - (io.Closer).Close
         - (*golang.org/x/crypto/ssh.Session).Close
-        # fmt.Sscanf is used as a best-effort parser for inventory
-        # / playbook list output where each field is independently
-        # optional and a parse miss leaves the destination at zero
-        # — that's the intended fallback, not a bug.
-        - fmt.Sscanf
 
     gosec:
       severity: medium

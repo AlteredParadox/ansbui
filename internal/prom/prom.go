@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -242,8 +243,8 @@ func (c *Client) instantQuery(ctx context.Context, q string) (map[string]float64
 		if !ok {
 			continue
 		}
-		var v float64
-		if _, err := fmt.Sscanf(raw, "%f", &v); err != nil {
+		v, err := strconv.ParseFloat(raw, 64)
+		if err != nil {
 			continue
 		}
 		out[host] = v

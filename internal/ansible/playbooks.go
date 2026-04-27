@@ -7,6 +7,7 @@ import (
 	"path"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -100,12 +101,12 @@ func parsePlaybookList(raw string) []Playbook {
 			Path: rel,
 		}
 		if len(parts) >= 2 {
-			fmt.Sscanf(parts[1], "%d", &p.Size)
+			if n, err := strconv.Atoi(parts[1]); err == nil {
+				p.Size = n
+			}
 		}
 		if len(parts) >= 3 {
-			var ts float64
-			fmt.Sscanf(parts[2], "%f", &ts)
-			if ts > 0 {
+			if ts, err := strconv.ParseFloat(parts[2], 64); err == nil && ts > 0 {
 				p.Modified = time.Unix(int64(ts), 0).UTC().Format(time.RFC3339)
 			}
 		}

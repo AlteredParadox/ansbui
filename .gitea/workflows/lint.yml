@@ -39,3 +39,11 @@ jobs:
 
       - run: npm ci
       - run: npm run lint
+
+      # npm audit gates on advisory severity. We accept "moderate"
+      # and below quietly; "high" or "critical" fails the build so
+      # a freshly published transitive CVE is impossible to ignore.
+      # All deps are devDependencies (web/ runs raw via in-browser
+      # Babel, no bundle is shipped) — but the lint tools themselves
+      # land in CI and are worth auditing for supply-chain risk.
+      - run: npm audit --audit-level=high
