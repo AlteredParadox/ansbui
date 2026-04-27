@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 
 	"github.com/AlteredParadox/ansbui/internal/ansible"
@@ -20,6 +21,12 @@ import (
 // check rejects clients that sneak a second JSON object past the first
 // (json.Decoder is happy to read a single value and stop, leaving
 // arbitrary bytes unread).
+//
+// dec.More() is the wrong primitive for "is there another value after
+// this one" — it's only meaningful inside an array/object stream. Use
+// a second Decode and require io.EOF: any successful decode means a
+// second top-level value snuck through, any other error means
+// non-whitespace bytes after the first value.
 func decodeJSONBody(w http.ResponseWriter, r *http.Request, dst any) bool {
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
@@ -27,7 +34,8 @@ func decodeJSONBody(w http.ResponseWriter, r *http.Request, dst any) bool {
 		writeError(w, http.StatusBadRequest, fmt.Errorf("decode body: %w", err))
 		return false
 	}
-	if dec.More() {
+	var trailing json.RawMessage
+	if err := dec.Decode(&trailing); !errors.Is(err, io.EOF) {
 		writeError(w, http.StatusBadRequest, errors.New("decode body: unexpected trailing data"))
 		return false
 	}

@@ -181,13 +181,23 @@ func ViewVault(ctx context.Context, pool *sshpool.Pool, srv config.Server, rel, 
 }
 
 // WriteVault encrypts plaintext with the supplied password and writes
-// the ciphertext to rel, creating it if necessary. Both the password
-// and plaintext travel over the session's stdin: line 1 is the
-// password (consumed by `read -r`), the rest is the plaintext that
-// `ansible-vault encrypt -` reads from stdin and writes (encrypted)
-// to --output. This keeps the password out of argv and avoids the
-// 128 KB MAX_ARG_STRLEN ceiling that an embedded base64 plaintext
-// would hit on values larger than ~95 KB.
+// the ciphertext to rel, creating it if necessary.
+//
+// Two-stage to inherit the symlink-refusing atomic writer used for
+// playbooks and inventory:
+//
+//  1. ansible-vault encrypt to stdout (--output=-). Password is
+//     consumed via `read -r` from line 1 of stdin; plaintext follows.
+//     Both travel via stdin so neither hits MAX_ARG_STRLEN, and the
+//     password never appears in argv.
+//  2. WriteRemoteFile commits the ciphertext atomically — refuses
+//     to write through a symlink, preserves mode bits if the file
+//     already exists, otherwise creates 0644.
+//
+// The earlier single-stage form passed --output=<full> directly to
+// ansible-vault, which has no symlink protection. A symlink inside
+// workDir could redirect writes outside the intended tree as the
+// SSH user.
 func WriteVault(ctx context.Context, pool *sshpool.Pool, srv config.Server, rel, password, plaintext string) error {
 	if err := validateRelPath(rel); err != nil {
 		return err
@@ -197,14 +207,12 @@ func WriteVault(ctx context.Context, pool *sshpool.Pool, srv config.Server, rel,
 		return err
 	}
 	full := path.Join(srv.WorkDir, rel)
-	script := fmt.Sprintf(
-		`IFS= read -r PASS && exec 3< <(printf '%%s' "$PASS") && ansible-vault encrypt --output=%s --vault-password-file=/dev/fd/3 -`,
-		shellQuote(full),
-	)
-	if _, err := runVaultScript(ctx, cli, script, password+"\n"+plaintext); err != nil {
+	script := `IFS= read -r PASS && exec 3< <(printf '%s' "$PASS") && ansible-vault encrypt --output=- --vault-password-file=/dev/fd/3 -`
+	ciphertext, err := runVaultScript(ctx, cli, script, password+"\n"+plaintext)
+	if err != nil {
 		return err
 	}
-	return nil
+	return WriteRemoteFile(ctx, cli, full, ciphertext)
 }
 
 // runVaultScript is a thin wrapper over runRemoteScript that prefixes

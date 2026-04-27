@@ -14,9 +14,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -289,19 +291,55 @@ func (m *Manager) SetPrometheus(rawURL, label string) error {
 	if err != nil {
 		return err
 	}
+	label = strings.TrimSpace(label)
+	if label != "" {
+		if err := validatePromLabel(label); err != nil {
+			return err
+		}
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.store.PrometheusURL = normalised
-	if label = strings.TrimSpace(label); label != "" {
+	if label != "" {
 		m.store.PrometheusLabel = label
 	}
 	return m.persistLocked()
+}
+
+// promLabelRE matches the Prometheus label-name grammar — the same
+// shape PromQL accepts for `by (...)` group keys. Validating at the
+// settings boundary stops a hostile label like `instance) +
+// vector(0)` from being spliced into a query expression.
+var promLabelRE = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
+
+func validatePromLabel(s string) error {
+	if !promLabelRE.MatchString(s) {
+		return fmt.Errorf("prometheus label %q must match [a-zA-Z_][a-zA-Z0-9_]*", s)
+	}
+	return nil
 }
 
 // normalisePromURL trims whitespace + trailing slashes and prepends
 // http:// when no scheme is present. Returns "" for empty input.
 // Rejects anything other than http / https so a user can't sneak a
 // file:// or javascript: URL through the settings endpoint.
+//
+// SSRF guardrails: the metrics fetcher hits whatever URL is stored
+// here, server-side, with no per-user auth in front. Two layers of
+// defence:
+//   - hard-coded denylist for cloud-metadata addresses (AWS / GCP /
+//     OpenStack / DO IMDS), which are the highest-value SSRF targets
+//     on a typical control node;
+//   - optional ANSBUI_PROM_ALLOWED_HOSTS env var (comma-separated
+//     host[:port] entries) that, when set, restricts the URL host to
+//     the allowlist. Operators putting ansbui behind a reverse proxy
+//     with multi-tenant auth should set this to lock the setting
+//     down to a known Prometheus.
+//
+// We don't do DNS resolution here — it'd race with the actual fetch
+// (DNS rebinding) and the host strings users type are typically
+// literal. The denylist matches both literal IPs and the textual
+// hostnames cloud providers commonly use.
 func normalisePromURL(raw string) (string, error) {
 	s := strings.TrimRight(strings.TrimSpace(raw), "/")
 	if s == "" {
@@ -320,7 +358,50 @@ func normalisePromURL(raw string) (string, error) {
 	if u.Host == "" {
 		return "", errors.New("prometheus URL is missing a host")
 	}
+	if err := checkPromHost(u.Hostname(), u.Host); err != nil {
+		return "", err
+	}
 	return s, nil
+}
+
+// promMetadataDeny is the cloud-IMDS denylist. These addresses are
+// link-local (169.254.0.0/16) on every IaaS we know of — there is
+// no legitimate reason for ansbui to scrape Prometheus over them,
+// and reaching them server-side would expose IAM credentials.
+var promMetadataDeny = map[string]struct{}{
+	"169.254.169.254":          {}, // AWS / GCP / OpenStack / DigitalOcean IMDS
+	"169.254.170.2":            {}, // AWS ECS task metadata
+	"fd00:ec2::254":            {}, // AWS IMDSv6
+	"metadata.google.internal": {},
+	"metadata":                 {},
+	"169.254.169.254.nip.io":   {}, // common SSRF bypass
+}
+
+func checkPromHost(host, hostport string) error {
+	hostLower := strings.ToLower(host)
+	if _, blocked := promMetadataDeny[hostLower]; blocked {
+		return fmt.Errorf("prometheus host %q is on the cloud-metadata denylist", host)
+	}
+	// 169.254.0.0/16 catches arbitrary link-local addresses that
+	// aren't on the explicit denylist (some providers stick IMDS at
+	// a non-canonical link-local).
+	if ip := net.ParseIP(host); ip != nil && ip.IsLinkLocalUnicast() {
+		return fmt.Errorf("prometheus host %q is link-local (169.254.0.0/16) — denied", host)
+	}
+	allow := strings.TrimSpace(os.Getenv("ANSBUI_PROM_ALLOWED_HOSTS"))
+	if allow == "" {
+		return nil
+	}
+	for _, entry := range strings.Split(allow, ",") {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		if strings.EqualFold(entry, host) || strings.EqualFold(entry, hostport) {
+			return nil
+		}
+	}
+	return fmt.Errorf("prometheus host %q is not in ANSBUI_PROM_ALLOWED_HOSTS", hostport)
 }
 
 // Prometheus returns the configured Prometheus URL and host label.

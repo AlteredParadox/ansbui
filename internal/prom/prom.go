@@ -16,6 +16,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -39,6 +40,12 @@ type Client struct {
 	http  *http.Client
 }
 
+// promLabelRE matches the Prometheus label-name grammar. Defined
+// here too (mirrored from internal/config) so prom.NewClient is
+// self-contained and can fail closed without depending on the
+// settings layer to have validated.
+var promLabelRE = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
+
 // NewClient constructs a Client. baseURL is the Prometheus root (e.g.
 // http://prom:9090). hostLabel is the label name to key on (default
 // "instance"). Only http / https URLs are accepted; redirects are
@@ -60,6 +67,13 @@ func NewClient(baseURL, hostLabel string) (*Client, error) {
 	}
 	if hostLabel == "" {
 		hostLabel = "instance"
+	}
+	// Defensive: c.label is interpolated directly into the `avg by
+	// (...)` expression below. The settings setter already enforces
+	// this grammar, but an on-disk config edited by hand could still
+	// contain something hostile — fail closed at construction.
+	if !promLabelRE.MatchString(hostLabel) {
+		return nil, fmt.Errorf("prometheus label %q must match [a-zA-Z_][a-zA-Z0-9_]*", hostLabel)
 	}
 	return &Client{
 		base:  strings.TrimRight(baseURL, "/"),

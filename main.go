@@ -36,7 +36,7 @@ import (
 var webFS embed.FS
 
 func main() {
-	addr := flag.String("addr", ":8787", "listen address (host:port). Default ':8787' binds on all interfaces")
+	addr := flag.String("addr", "127.0.0.1:8787", "listen address (host:port). Default binds to loopback only — ansbui has no built-in auth, so exposing it requires an explicit override (e.g. -addr 0.0.0.0:8787) and a reverse proxy with auth in front.")
 	flag.Parse()
 
 	warnIfExposed(*addr)

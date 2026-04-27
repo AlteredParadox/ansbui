@@ -263,26 +263,63 @@ func expandHome(p string) string {
 	return p
 }
 
-// hostKeyCallback uses the user's ~/.ssh/known_hosts when available and
-// falls back to accept-on-first-use otherwise. Users who want strict TOFU
-// should pre-populate known_hosts via ssh-keyscan.
+// hostKeyCallback returns a verifying callback. The default path is
+// strict verification against ~/.ssh/known_hosts with TOFU on the
+// first sighting of a host (knownHostsCallback creates the file +
+// appends new keys; existing-key mismatches are a hard fail).
+//
+// If we genuinely can't establish that path — no home dir, can't
+// create ~/.ssh, can't initialise the strict callback — we now
+// fail closed by returning an error-returning callback. The
+// previous behaviour silently degraded to InsecureIgnoreHostKey,
+// which made MITM possible without any operator notice.
+//
+// The escape hatch is a single env var, ANSBUI_INSECURE_SSH=1: an
+// operator working in a known-trusted lab who *wants* to skip
+// verification can opt in explicitly. It logs once at startup so
+// the choice can't be made by accident in a deployment script.
 func hostKeyCallback(_ config.Server) ssh.HostKeyCallback {
+	if insecureSSHEnabled() {
+		return ssh.InsecureIgnoreHostKey() //nolint:gosec // explicit opt-in via env
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return ssh.InsecureIgnoreHostKey() //nolint:gosec // documented above
+		return failClosedCallback(fmt.Errorf("resolve home dir: %w", err))
 	}
-	known := filepath.Join(home, ".ssh", "known_hosts")
-	if _, err := os.Stat(known); err != nil {
-		return ssh.InsecureIgnoreHostKey() //nolint:gosec // documented above
+	sshDir := filepath.Join(home, ".ssh")
+	if err := os.MkdirAll(sshDir, 0o700); err != nil {
+		return failClosedCallback(fmt.Errorf("create ~/.ssh: %w", err))
 	}
-	// known_hosts exists: prefer strict verification. If the host is not
-	// recorded we fall back to accept-on-first-use so the UI doesn't hang
-	// on fresh servers.
+	known := filepath.Join(sshDir, "known_hosts")
 	strict, err := knownHostsCallback(known)
 	if err != nil {
-		return ssh.InsecureIgnoreHostKey() //nolint:gosec // documented above
+		return failClosedCallback(fmt.Errorf("init known_hosts callback: %w", err))
 	}
 	return strict
+}
+
+// failClosedCallback is invoked at dial time when host-key
+// verification can't be set up. ssh.HostKeyCallback has no error
+// channel of its own, so we surface the failure on every dial —
+// the operator gets a clear "host key verification not available"
+// instead of a silent insecure fallback.
+func failClosedCallback(reason error) ssh.HostKeyCallback {
+	return func(string, net.Addr, ssh.PublicKey) error {
+		return fmt.Errorf("host key verification unavailable: %w (set ANSBUI_INSECURE_SSH=1 to skip verification, NOT recommended)", reason)
+	}
+}
+
+var insecureSSHWarned sync.Once
+
+func insecureSSHEnabled() bool {
+	v := strings.TrimSpace(os.Getenv("ANSBUI_INSECURE_SSH"))
+	if v != "1" && !strings.EqualFold(v, "true") {
+		return false
+	}
+	insecureSSHWarned.Do(func() {
+		fmt.Fprintln(os.Stderr, "⚠  ANSBUI_INSECURE_SSH is set: SSH host keys will NOT be verified. MITM attacks are undetectable in this mode — unset for any non-lab deployment.")
+	})
+	return true
 }
 
 func pingClient(c *ssh.Client) bool {

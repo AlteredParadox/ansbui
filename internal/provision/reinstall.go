@@ -45,12 +45,33 @@ var reinstallOSMatrix = map[string][]string{
 	"ubuntu": {"26.04", "24.04", "22.04", "20.04", "18.04"},
 }
 
-// reinstallScriptURL is the canonical raw URL for bin456789's
-// reinstall.sh. Pinned to main on purpose — the project ships
-// distro support and bug fixes rolling, and we want operators to
-// pick up fixes without a binary rebuild. If supply-chain trust
-// becomes a concern we'd checksum-verify or vendor the script.
-const reinstallScriptURL = "https://raw.githubusercontent.com/bin456789/reinstall/main/reinstall.sh"
+// reinstallScriptCommit pins bin456789/reinstall to a specific
+// commit. The script runs as root on the target — pulling from
+// `main` would mean any upstream compromise (or surprise change)
+// becomes root code execution on every freshly-provisioned host.
+// Updating both this SHA and reinstallScriptSHA256 below is a
+// deliberate, reviewable bump.
+//
+// To roll: pick the new commit upstream, run
+//
+//	curl -fsSL https://raw.githubusercontent.com/bin456789/reinstall/<sha>/reinstall.sh | sha256sum
+//
+// and update both constants in the same commit.
+const reinstallScriptCommit = "190f36d473d7eda5f18c21f738ec0efbbab991e1"
+
+// reinstallScriptSHA256 is the expected sha256 of reinstall.sh at
+// reinstallScriptCommit. Verified on the target after download
+// before we hand it to bash. A mismatch aborts the run with a
+// clear error so the operator notices a tampered mirror or a
+// stale pin rather than silently running unverified code.
+const reinstallScriptSHA256 = "40c8772610d5d68c2de4e5ab4471141a35699396ce43f9d9b0d6f096035333f2"
+
+// reinstallScriptURL fetches by commit SHA so the file content is
+// content-addressed end-to-end. raw.githubusercontent.com serves
+// the exact file at the requested commit; combined with the local
+// sha256 check below, an MITM or upstream compromise would have to
+// produce a sha256 collision to slip past.
+var reinstallScriptURL = fmt.Sprintf("https://raw.githubusercontent.com/bin456789/reinstall/%s/reinstall.sh", reinstallScriptCommit)
 
 // reinstallSSHPort is the port reinstall.sh is told to bake into
 // the new system's sshd_config. Matches the port targetSSHPort
@@ -141,10 +162,17 @@ func runReinstall(ctx context.Context, target *targetSession, opts ReinstallOpts
 	return newTarget, nil
 }
 
-// reinstallPrepScript builds the bash one-liner that downloads and
-// runs reinstall.sh. The pubkey content goes through shellQuote,
-// which uses '"'"' escapes — safe even with the SSH option-prefix
-// shapes (`command="..." ssh-ed25519 ...`) authorized_keys allows.
+// reinstallPrepScript builds the bash one-liner that downloads,
+// verifies, and runs reinstall.sh. The pubkey content goes through
+// shellQuote, which uses '"'"' escapes — safe even with the SSH
+// option-prefix shapes (`command="..." ssh-ed25519 ...`)
+// authorized_keys allows.
+//
+// Verification: after download, sha256sum is compared to
+// reinstallScriptSHA256 before bash ever sees the file. A
+// mismatch aborts the run; the operator gets a "checksum
+// mismatch" message so a tampered mirror or stale pin is
+// distinguishable from a genuine reinstall failure.
 //
 // Output is teed to /tmp/reinstall.log so the operator has a copy
 // to inspect post-reboot via the new target session if anything
@@ -157,6 +185,8 @@ func reinstallPrepScript(opts ReinstallOpts, pubKey string) string {
 		`if command -v curl >/dev/null 2>&1; then curl -fsSLO ` + shellQuote(reinstallScriptURL) +
 			`; elif command -v wget >/dev/null 2>&1; then wget -q ` + shellQuote(reinstallScriptURL) +
 			`; else echo "neither curl nor wget available" >&2; exit 1; fi`,
+		`echo ` + shellQuote(reinstallScriptSHA256+"  reinstall.sh") + ` | sha256sum -c - ` +
+			`|| { echo "reinstall.sh sha256 mismatch — refusing to run (expected ` + reinstallScriptSHA256 + `)" >&2; exit 1; }`,
 		`chmod +x reinstall.sh`,
 		`bash reinstall.sh ` + shellQuote(opts.OS) + ` ` + shellQuote(opts.Version) +
 			` --ssh-port ` + fmt.Sprintf("%d", reinstallSSHPort) +

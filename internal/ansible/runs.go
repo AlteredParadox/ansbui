@@ -1,6 +1,8 @@
 package ansible
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -166,10 +168,23 @@ func (r *Recorder) Get(id string) (RunRecord, bool) {
 	return RunRecord{}, false
 }
 
-// NewID generates a monotonic-ish run id. Not a UUID — good enough for a
-// local history file.
+// NewID generates a monotonic-ish run id with a random suffix to
+// disambiguate concurrent starts that land in the same millisecond.
+// Without the suffix /api/runs/{id} would be ambiguous when two
+// WebSocket runs started in the same tick — both records exist in
+// the recorder but only one is fetchable by id. 32 bits of entropy
+// is overkill for our 200-run window; we round to 8 hex chars
+// because it's still a short, copy-pasteable id.
 func NewID() string {
-	return fmt.Sprintf("run-%d", time.Now().UnixMilli())
+	var b [4]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		// crypto/rand on linux only fails if /dev/urandom is
+		// unavailable, which would mean a deeply broken environment.
+		// Fall back to a time-only id rather than crash the request —
+		// collisions become possible again but the run still records.
+		return fmt.Sprintf("run-%d", time.Now().UnixMilli())
+	}
+	return fmt.Sprintf("run-%d-%s", time.Now().UnixMilli(), hex.EncodeToString(b[:]))
 }
 
 // LastPlay records what the most recent playbook against a single
