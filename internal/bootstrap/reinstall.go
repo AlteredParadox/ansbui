@@ -124,11 +124,11 @@ func runReinstall(ctx context.Context, target *targetSession, opts ReinstallOpts
 		return nil, err
 	}
 
-	emit("meta", "Ensuring curl is available on target (needed to download reinstall.sh)...")
-	if _, stderr, err := target.runRoot(ctx, ensureCurlScript(), ""); err != nil {
-		return nil, fmt.Errorf("install curl: %s: %w", strings.TrimSpace(stderr), err)
+	emit("meta", "Ensuring curl or wget is available on target (needed to download reinstall.sh)...")
+	if _, stderr, err := target.runRoot(ctx, ensureDownloadToolScript(), ""); err != nil {
+		return nil, fmt.Errorf("prepare reinstall downloader: %s: %w", strings.TrimSpace(stderr), err)
 	}
-	emit("ok", "curl available")
+	emit("ok", "download tool available")
 
 	emit("meta", fmt.Sprintf("Running reinstall.sh %s %s on target (this prepares the new install — actual reinstall happens after reboot)...", opts.OS, opts.Version))
 
@@ -169,19 +169,19 @@ func runReinstall(ctx context.Context, target *targetSession, opts ReinstallOpts
 	return newTarget, nil
 }
 
-// ensureCurlScript installs curl via apt-get if it isn't already on
-// the target. The reinstall path is allowlisted to debian/ubuntu
-// (see reinstallOSMatrix), so apt-get is guaranteed; minimal cloud
-// images (e.g. some Hetzner / OVH base templates) ship without curl
-// or wget, which would otherwise dead-end reinstallPrepScript on its
-// download line. No-op when curl is already present.
-func ensureCurlScript() string {
+// ensureDownloadToolScript installs curl via apt-get if possible. If
+// curl is absent and apt-get isn't available, an existing wget is still
+// acceptable because reinstallPrepScript already supports that fallback.
+// This catches minimal Debian/Ubuntu cloud images that ship without curl
+// while preserving the non-apt+wget path that already worked.
+func ensureDownloadToolScript() string {
 	return strings.Join([]string{
 		`set -e`,
 		`if command -v curl >/dev/null 2>&1; then exit 0; fi`,
-		`if ! command -v apt-get >/dev/null 2>&1; then echo "apt-get not found — cannot install curl on this distro" >&2; exit 1; fi`,
-		`DEBIAN_FRONTEND=noninteractive apt-get update -qq`,
-		`DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl`,
+		`if command -v apt-get >/dev/null 2>&1; then DEBIAN_FRONTEND=noninteractive apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl && exit 0; fi`,
+		`if command -v wget >/dev/null 2>&1; then exit 0; fi`,
+		`echo "neither curl nor wget available, and apt-get not found to install curl" >&2`,
+		`exit 1`,
 	}, "; ")
 }
 
