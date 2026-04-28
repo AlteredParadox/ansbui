@@ -124,11 +124,11 @@ func runReinstall(ctx context.Context, target *targetSession, opts ReinstallOpts
 		return nil, err
 	}
 
-	emit("meta", "Ensuring curl or wget is available on target (needed to download reinstall.sh)...")
-	if _, stderr, err := target.runRoot(ctx, ensureDownloadToolScript(), ""); err != nil {
-		return nil, fmt.Errorf("prepare reinstall downloader: %s: %w", strings.TrimSpace(stderr), err)
+	emit("meta", "Ensuring curl is available on target (needed by reinstall.sh)...")
+	if _, stderr, err := target.runRoot(ctx, ensureCurlScript(), ""); err != nil {
+		return nil, fmt.Errorf("prepare reinstall curl dependency: %s: %w", strings.TrimSpace(stderr), err)
 	}
-	emit("ok", "download tool available")
+	emit("ok", "curl available")
 
 	emit("meta", fmt.Sprintf("Running reinstall.sh %s %s on target (this prepares the new install — actual reinstall happens after reboot)...", opts.OS, opts.Version))
 
@@ -169,19 +169,19 @@ func runReinstall(ctx context.Context, target *targetSession, opts ReinstallOpts
 	return newTarget, nil
 }
 
-// ensureDownloadToolScript installs curl via apt-get if possible. If
-// curl is absent and apt-get isn't available, an existing wget is still
-// acceptable because reinstallPrepScript already supports that fallback.
-// This catches minimal Debian/Ubuntu cloud images that ship without curl
-// while preserving the non-apt+wget path that already worked.
-func ensureDownloadToolScript() string {
+// ensureCurlScript installs curl via apt-get if it isn't already on
+// the target. reinstallPrepScript can use wget to fetch the pinned
+// script, but reinstall.sh itself calls curl internally, so wget alone
+// is not enough. Fail before running reinstall.sh if curl cannot be
+// installed.
+func ensureCurlScript() string {
 	return strings.Join([]string{
 		`set -e`,
 		`if command -v curl >/dev/null 2>&1; then exit 0; fi`,
-		`if command -v apt-get >/dev/null 2>&1; then DEBIAN_FRONTEND=noninteractive apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl && exit 0; fi`,
-		`if command -v wget >/dev/null 2>&1; then exit 0; fi`,
-		`echo "neither curl nor wget available, and apt-get not found to install curl" >&2`,
-		`exit 1`,
+		`if ! command -v apt-get >/dev/null 2>&1; then echo "curl not found and apt-get not found to install it" >&2; exit 1; fi`,
+		`DEBIAN_FRONTEND=noninteractive apt-get update -qq`,
+		`DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl`,
+		`command -v curl >/dev/null 2>&1`,
 	}, "; ")
 }
 
@@ -201,6 +201,10 @@ func ensureDownloadToolScript() string {
 // to inspect post-reboot via the new target session if anything
 // looked suspicious during the prep phase.
 func reinstallPrepScript(opts ReinstallOpts, pubKey string) string {
+	runCmd := `bash reinstall.sh ` + shellQuote(opts.OS) + ` ` + shellQuote(opts.Version) +
+		` --ssh-port ` + fmt.Sprintf("%d", reinstallSSHPort) +
+		` --ssh-key ` + shellQuote(pubKey) +
+		` 2>&1 | tee /tmp/reinstall.log`
 	return strings.Join([]string{
 		`set -e`,
 		`cd /tmp`,
@@ -211,10 +215,7 @@ func reinstallPrepScript(opts ReinstallOpts, pubKey string) string {
 		`echo ` + shellQuote(reinstallScriptSHA256+"  reinstall.sh") + ` | sha256sum -c - ` +
 			`|| { echo "reinstall.sh sha256 mismatch — refusing to run (expected ` + reinstallScriptSHA256 + `)" >&2; exit 1; }`,
 		`chmod +x reinstall.sh`,
-		`bash reinstall.sh ` + shellQuote(opts.OS) + ` ` + shellQuote(opts.Version) +
-			` --ssh-port ` + fmt.Sprintf("%d", reinstallSSHPort) +
-			` --ssh-key ` + shellQuote(pubKey) +
-			` 2>&1 | tee /tmp/reinstall.log`,
+		`bash -o pipefail -c ` + shellQuote(runCmd),
 	}, "; ")
 }
 
