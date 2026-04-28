@@ -123,6 +123,13 @@ func runReinstall(ctx context.Context, target *targetSession, opts ReinstallOpts
 	if err := validateReinstall(opts); err != nil {
 		return nil, err
 	}
+
+	emit("meta", "Ensuring curl is available on target (needed to download reinstall.sh)...")
+	if _, stderr, err := target.runRoot(ctx, ensureCurlScript(), ""); err != nil {
+		return nil, fmt.Errorf("install curl: %s: %w", strings.TrimSpace(stderr), err)
+	}
+	emit("ok", "curl available")
+
 	emit("meta", fmt.Sprintf("Running reinstall.sh %s %s on target (this prepares the new install — actual reinstall happens after reboot)...", opts.OS, opts.Version))
 
 	heartbeat := startHeartbeat(ctx, "reinstall.sh still running", emit)
@@ -160,6 +167,22 @@ func runReinstall(ctx context.Context, target *targetSession, opts ReinstallOpts
 	}
 	emit("ok", fmt.Sprintf("connected to freshly-installed %s %s on :%d", opts.OS, opts.Version, reinstallSSHPort))
 	return newTarget, nil
+}
+
+// ensureCurlScript installs curl via apt-get if it isn't already on
+// the target. The reinstall path is allowlisted to debian/ubuntu
+// (see reinstallOSMatrix), so apt-get is guaranteed; minimal cloud
+// images (e.g. some Hetzner / OVH base templates) ship without curl
+// or wget, which would otherwise dead-end reinstallPrepScript on its
+// download line. No-op when curl is already present.
+func ensureCurlScript() string {
+	return strings.Join([]string{
+		`set -e`,
+		`if command -v curl >/dev/null 2>&1; then exit 0; fi`,
+		`if ! command -v apt-get >/dev/null 2>&1; then echo "apt-get not found — cannot install curl on this distro" >&2; exit 1; fi`,
+		`DEBIAN_FRONTEND=noninteractive apt-get update -qq`,
+		`DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl`,
+	}, "; ")
 }
 
 // reinstallPrepScript builds the bash one-liner that downloads,
