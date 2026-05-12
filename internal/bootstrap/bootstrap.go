@@ -27,6 +27,7 @@ import (
 	"fmt"
 	"net"
 	"path"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -154,7 +155,7 @@ func Run(ctx context.Context, pool *sshpool.Pool, srv config.Server, req Request
 		req.SudoPassword = ""
 	}
 
-	mu := lockTarget(fmt.Sprintf("%s:%d", req.IP, req.Port))
+	mu := lockTarget(net.JoinHostPort(req.IP, strconv.Itoa(req.Port)))
 	mu.Lock()
 	defer mu.Unlock()
 
@@ -232,6 +233,14 @@ func Run(ctx context.Context, pool *sshpool.Pool, srv config.Server, req Request
 func Validate(req Request) error {
 	if strings.TrimSpace(req.Provider) == "" {
 		return errors.New("provider is required")
+	}
+	// normalizeProviderName drops every char outside [a-z0-9_-]; a
+	// pathological input like `"!!!"` collapses to "" and would
+	// otherwise reach addHostToInventoryYAML which rejects empty
+	// provider with a confusing internal message. Reject upstream
+	// with the actionable hint.
+	if normalizeProviderName(req.Provider) == "" {
+		return errors.New("provider name has no usable characters after normalization (allowed: letters, digits, underscore, hyphen, space)")
 	}
 	if err := validateAddress(req.IP); err != nil {
 		return err
@@ -317,6 +326,17 @@ func validateAddress(raw string) error {
 		}
 		return errors.New("address must be a valid IPv4 address (e.g. 203.0.113.42), IPv6 address (e.g. 2001:db8::1), or DNS hostname (e.g. host.example.com)")
 	}
+	// Reject sentinel / non-routable IP literals so an operator
+	// can't bootstrap against `0.0.0.0`, `127.0.0.1`,
+	// `255.255.255.255`, or a multicast / link-local address —
+	// the SSH dial would either fail loudly or (worse) hit a
+	// loopback service that happens to listen on the chosen port.
+	// Hostnames bypass this check; their resolved address is the
+	// orchestrator's problem at dial time, not the form's.
+	if ip := net.ParseIP(s); ip != nil &&
+		(ip.IsUnspecified() || ip.IsLoopback() || ip.IsMulticast() || ip.IsLinkLocalUnicast() || ip.Equal(net.IPv4bcast)) {
+		return errors.New("address must be a routable unicast IP — loopback, link-local, multicast, broadcast, and unspecified addresses can't reach a fresh server")
+	}
 	return nil
 }
 
@@ -401,6 +421,12 @@ func validateHostname(h string) error {
 	if strings.TrimSpace(h) == "" {
 		return errors.New("hostname is required")
 	}
+	// Bound length up front so a pathologically large input gets
+	// the actionable cap-message instead of whichever per-rune /
+	// per-label rule it happens to break first.
+	if err := boundLength("hostname", h, 253); err != nil {
+		return err
+	}
 	if !strings.Contains(h, ".") {
 		return errors.New("hostname must be fully-qualified (include the domain)")
 	}
@@ -416,10 +442,7 @@ func validateHostname(h string) error {
 			return fmt.Errorf("hostname contains invalid character %q (allowed: letters, digits, '.', '-')", r)
 		}
 	}
-	if err := validateHostnameLabels(h); err != nil {
-		return err
-	}
-	return boundLength("hostname", h, 253)
+	return validateHostnameLabels(h)
 }
 
 // validateHostnameLabels enforces the per-label RFC1035 rules the

@@ -36,8 +36,8 @@ const REINSTALL_OS_LIST = Object.keys(REINSTALL_MATRIX);
 // a label-shape gate (RFC1035: 1-63 bytes, no leading/trailing
 // '-', no empty labels) so a typo like `-bad.example.com` is
 // caught inline rather than via a backend 400.
-const ADDR_OCTET = '(25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]\\d|\\d)';
-const ADDR_IPV4_RE = new RegExp(`^${ADDR_OCTET}\\.${ADDR_OCTET}\\.${ADDR_OCTET}\\.${ADDR_OCTET}$`);
+const ADDR_OCTET = String.raw`(25[0-5]|2[0-4]\d|1\d\d|[1-9]\d|\d)`;
+const ADDR_IPV4_RE = new RegExp(String.raw`^${ADDR_OCTET}\.${ADDR_OCTET}\.${ADDR_OCTET}\.${ADDR_OCTET}$`);
 const ADDR_IPV6_RE = /^(?=.*:.*:)[0-9a-fA-F:]+$/;
 const ADDR_DIGITDOT_RE = /^[0-9.]+$/;
 const ADDR_HOST_RE = /^[a-zA-Z0-9.-]+$/;
@@ -155,6 +155,24 @@ function BootstrapView() {
     ws.onError(() => fin(false, 'WebSocket error — check backend logs'));
   };
 
+  // hostnameError / reinstallError split off the multi-check field
+  // groups so validateForm itself stays under Sonar's S3776
+  // cognitive-complexity ceiling. Each returns the first failed
+  // check's text or null when the field group passes.
+  const hostnameError = () => {
+    const trimmedHost = hostname.trim();
+    if (!trimmedHost?.includes('.')) return 'Hostname must be fully-qualified (include the domain).';
+    if (trimmedHost.length > 253 || !ADDR_HOST_RE.test(trimmedHost) || !hostLabelsOK(trimmedHost)) return 'Hostname has an invalid label (RFC1035: 1-63 bytes per label, no leading/trailing "-", no empty labels).';
+    return null;
+  };
+  const reinstallError = () => {
+    if (!reinstallEnabled) return null;
+    const versions = REINSTALL_MATRIX[reinstallOS];
+    if (!versions) return 'Pick a reinstall OS.';
+    if (!versions.includes(reinstallVersion)) return 'Pick a reinstall version.';
+    return null;
+  };
+
   // validateForm returns either { error } describing the first
   // failed check or { portNum } with the parsed SSH port. Pulled
   // out of start() so each function stays under Sonar's S3776
@@ -169,13 +187,11 @@ function BootstrapView() {
     if (!username.trim()) return { error: 'Username is required.' };
     if (!password) return { error: 'Password is required.' };
     if (useSudo && !sudoPassword) return { error: 'Sudo password is required when using sudo.' };
-    const trimmedHost = hostname.trim();
-    if (!trimmedHost || !trimmedHost.includes('.')) return { error: 'Hostname must be fully-qualified (include the domain).' };
-    if (trimmedHost.length > 253 || !ADDR_HOST_RE.test(trimmedHost) || !hostLabelsOK(trimmedHost)) return { error: 'Hostname has an invalid label (RFC1035: 1-63 bytes per label, no leading/trailing "-", no empty labels).' };
+    const hostErr = hostnameError();
+    if (hostErr) return { error: hostErr };
     if (!vaultPassword) return { error: 'Vault password is required (used to decrypt porkbun credentials).' };
-    if (reinstallEnabled && !REINSTALL_MATRIX[reinstallOS]) return { error: 'Pick a reinstall OS.' };
-    const versions = REINSTALL_MATRIX[reinstallOS] || [];
-    if (reinstallEnabled && !versions.includes(reinstallVersion)) return { error: 'Pick a reinstall version.' };
+    const reErr = reinstallError();
+    if (reErr) return { error: reErr };
     return { portNum };
   };
 
@@ -338,7 +354,7 @@ function BootstrapView() {
                 </div>
               </div>
               <div className="mute" style={{ fontSize: 11, marginTop: 6 }}>
-                The target reboots into the chosen OS, sshd is set to <span className="mono">:4242</span> with the ansible public key in root&rsquo;s <span className="mono">authorized_keys</span>, then bootstrap continues. Expect 10&ndash;30 minutes; the run lives on the backend so you can close this tab and re-attach later. <b>Assumes your provider preserves the IP through reinstall.</b>
+                The target reboots into the chosen OS, sshd is set to <span className="mono">:4242</span> with the ansible public key in root&rsquo;s <span className="mono">authorized_keys</span>, then bootstrap continues. Expect 10&ndash;30 minutes; the run lives on the backend so you can close this tab and re-attach later. <b>Assumes the target&rsquo;s address (IP or hostname&rsquo;s DNS) still points at the same machine after the reboot.</b>
               </div>
             </div>
           )}

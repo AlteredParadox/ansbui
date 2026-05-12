@@ -82,12 +82,21 @@ func FuzzRedactText(f *testing.F) {
 		}
 		// If the input contains no key trigger at all (case-fold),
 		// output should equal input — otherwise the regex matched
-		// something unintended.
+		// something unintended. Keep this list in lockstep with
+		// redactRE; substring matches (e.g. "apikey" inside
+		// "myapikey") are fine because over-scrub is the safe
+		// direction.
 		lower := strings.ToLower(s)
-		if !strings.Contains(lower, "password") && !strings.Contains(lower, "passphrase") {
-			if got != s {
-				t.Fatalf("RedactText(%q) = %q: changed despite no key", s, got)
+		triggers := []string{"password", "passphrase", "apikey", "api_key", "api-key"}
+		hasTrigger := false
+		for _, t := range triggers {
+			if strings.Contains(lower, t) {
+				hasTrigger = true
+				break
 			}
+		}
+		if !hasTrigger && got != s {
+			t.Fatalf("RedactText(%q) = %q: changed despite no key", s, got)
 		}
 	})
 }

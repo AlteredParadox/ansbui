@@ -60,6 +60,12 @@ func (s *Server) httpBootstrapStart(w http.ResponseWriter, r *http.Request) {
 	}
 	req.IP = strings.ToLower(req.IP)
 	req.Hostname = strings.ToLower(strings.TrimSpace(req.Hostname))
+	// Trim provider/username too. Run trims req.Username later but
+	// summary captured the un-trimmed copy first, leaving the
+	// active-runs banner showing `"  alice  "` while the
+	// orchestrator runs as `alice`.
+	req.Provider = strings.TrimSpace(req.Provider)
+	req.Username = strings.TrimSpace(req.Username)
 	// Summary must NOT contain any of the three secrets the form
 	// carries (target password, sudo password, vault password).
 	// What we keep is what the operator wants to see in an

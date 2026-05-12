@@ -65,6 +65,24 @@ func addHostToInventoryYAML(content []byte, provider, fqdn string) ([]byte, erro
 		cur = findOrCreateMapValue(cur, group)
 	}
 	cur = findOrCreateMapValue(cur, "children")
+	// Refuse to register fqdn under provider X if it already lives
+	// under provider Y. Otherwise an operator who retries with a
+	// different provider after a transient porkbun failure ends up
+	// with the host listed in two provider groups, and
+	// ansible-inventory reports it as a member of both — silent
+	// fan-out the bootstrap workflow can't undo.
+	if cur.Kind == yaml.MappingNode {
+		for i := 0; i+1 < len(cur.Content); i += 2 {
+			siblingProvider := cur.Content[i].Value
+			if siblingProvider == provider {
+				continue
+			}
+			siblingHosts := findMapValue(cur.Content[i+1], "hosts")
+			if findMapValue(siblingHosts, fqdn) != nil {
+				return nil, fmt.Errorf("host %q is already registered under provider %q — remove it from there before re-bootstrapping under %q", fqdn, siblingProvider, provider)
+			}
+		}
+	}
 	providerNode := findOrCreateMapValue(cur, provider)
 	hostsNode := findOrCreateMapValue(providerNode, "hosts")
 	if findMapValue(hostsNode, fqdn) != nil {

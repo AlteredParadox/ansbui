@@ -145,6 +145,38 @@ func hostInvariantBreak(s string) string {
 	return ""
 }
 
+// addressInvariantBreak runs the per-kind re-derivation that
+// FuzzValidateAddress checks. Returns "" when validateAddress
+// rejects s OR when classifyAddress's chosen kind agrees with an
+// independent re-parse; otherwise returns a short reason. Lifted
+// out of FuzzValidateAddress so the fuzz callback itself stays
+// under Sonar's S3776 cognitive-complexity ceiling.
+func addressInvariantBreak(s string) string {
+	if validateAddress(s) != nil {
+		return ""
+	}
+	trimmed := strings.TrimSpace(s)
+	switch classifyAddress(trimmed) {
+	case addressKindIPv4:
+		ip := net.ParseIP(trimmed)
+		if ip == nil || ip.To4() == nil || strings.Contains(trimmed, ":") {
+			return "accepted as IPv4 but re-parse rejects"
+		}
+	case addressKindIPv6:
+		ip := net.ParseIP(trimmed)
+		if ip == nil || ip.To4() != nil || strings.Contains(trimmed, ".") {
+			return "accepted as IPv6 but re-parse rejects, is v4-mapped, or has dotted-quad tail"
+		}
+	case addressKindHost:
+		if reason := hostInvariantBreak(trimmed); reason != "" {
+			return "accepted as host but " + reason
+		}
+	default:
+		return "accepted but classifyAddress returned empty"
+	}
+	return ""
+}
+
 // FuzzValidateAddress must accept the three operator-supplied
 // shapes the bootstrap form supports (IPv4 literal, IPv6 literal,
 // DNS hostname) and reject everything else without panicking.
@@ -160,27 +192,8 @@ func FuzzValidateAddress(f *testing.F) {
 		f.Add(seed)
 	}
 	f.Fuzz(func(t *testing.T, s string) {
-		if validateAddress(s) != nil {
-			return
-		}
-		trimmed := strings.TrimSpace(s)
-		switch classifyAddress(trimmed) {
-		case addressKindIPv4:
-			ip := net.ParseIP(trimmed)
-			if ip == nil || ip.To4() == nil || strings.Contains(trimmed, ":") {
-				t.Fatalf("validateAddress(%q) accepted as IPv4 but re-parse rejects", s)
-			}
-		case addressKindIPv6:
-			ip := net.ParseIP(trimmed)
-			if ip == nil || ip.To4() != nil || strings.Contains(trimmed, ".") {
-				t.Fatalf("validateAddress(%q) accepted as IPv6 but re-parse rejects, is v4-mapped, or has dotted-quad tail", s)
-			}
-		case addressKindHost:
-			if reason := hostInvariantBreak(trimmed); reason != "" {
-				t.Fatalf("validateAddress(%q) accepted as host but %s", s, reason)
-			}
-		default:
-			t.Fatalf("validateAddress(%q) accepted but classifyAddress returned %q", s, classifyAddress(trimmed))
+		if reason := addressInvariantBreak(s); reason != "" {
+			t.Fatalf("validateAddress(%q) %s", s, reason)
 		}
 	})
 }
