@@ -408,8 +408,16 @@ func classifyAddress(s string) string {
 // credentials configured). For IPv4/IPv6 addresses, decrypts the
 // vault, builds a porkbun client, and delegates to runDNSStep.
 func runPorkbunStepIfNeeded(ctx context.Context, pool *sshpool.Pool, srv config.Server, req Request, emit func(string, string)) error {
-	if classifyAddress(req.IP) == addressKindHost {
-		return runDNSStep(ctx, nil, req.IP, req.Hostname, emit)
+	// Trim once at the top so classification AND every downstream
+	// hand-off (runDNSStep's address arg, the porkbun A/AAAA record
+	// content) see the same canonical-shape input. Mirrors
+	// validateVaultRequirement so a future reorder of Run that
+	// drops the upstream trim/canonicalize doesn't silently
+	// misclassify ` host.example.com` or write a record with
+	// leading whitespace.
+	address := strings.TrimSpace(req.IP)
+	if classifyAddress(address) == addressKindHost {
+		return runDNSStep(ctx, nil, address, req.Hostname, emit)
 	}
 	emit("meta", "Decrypting porkbun credentials from "+defaultPorkbunVaultPath+"...")
 	apiKey, secretKey, err := readPorkbunCreds(ctx, pool, srv, req.VaultPassword)
@@ -418,7 +426,7 @@ func runPorkbunStepIfNeeded(ctx context.Context, pool *sshpool.Pool, srv config.
 		return err
 	}
 	emit("ok", "porkbun credentials decrypted")
-	return runDNSStep(ctx, porkbun.New(apiKey, secretKey), req.IP, req.Hostname, emit)
+	return runDNSStep(ctx, porkbun.New(apiKey, secretKey), address, req.Hostname, emit)
 }
 
 // runDNSStep ensures the operator's chosen FQDN resolves to the

@@ -69,6 +69,10 @@ function BootstrapView() {
   const [activeSummary, setActiveSummary] = useStateBoot(null);
   const streamRef = useRefBoot(null);
   const outRef = useRefBoot(null);
+  // mountedRef gates side-effects in WS callbacks so the unmount
+  // cleanup that closes the socket doesn't race a setState on a
+  // gone component (React dev warning, no prod impact).
+  const mountedRef = useRefBoot(true);
 
   useEffectBoot(() => {
     if (username === 'root' && useSudo) setUseSudo(false);
@@ -83,7 +87,10 @@ function BootstrapView() {
     }
   }, [reinstallOS, reinstallVersion]);
 
-  useEffectBoot(() => () => { if (streamRef.current) streamRef.current.close(); }, []);
+  useEffectBoot(() => () => {
+    mountedRef.current = false;
+    if (streamRef.current) streamRef.current.close();
+  }, []);
 
   useEffectBoot(() => {
     outRef.current?.scrollTo({ top: outRef.current.scrollHeight });
@@ -109,7 +116,6 @@ function BootstrapView() {
       globalThis.localStorage?.removeItem(BOOTSTRAP_JOB_KEY);
     });
     return () => { cancelled = true; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const append = (entry) => setOutput(prev => [...prev, entry]);
@@ -158,12 +164,12 @@ function BootstrapView() {
       else if (evt.type === 'done') fin(true, evt.text || 'done');
     });
     ws.onClose(() => {
-      if (finished) return;
+      if (finished || !mountedRef.current) return;
       append({ t: 'meta', text: 'stream disconnected; refresh to re-attach (backend job continues)' });
       streamRef.current = null;
     });
     ws.onError(() => {
-      if (finished) return;
+      if (finished || !mountedRef.current) return;
       append({ t: 'meta', text: 'WebSocket error; refresh to re-attach (backend job may still be running)' });
       streamRef.current = null;
     });
