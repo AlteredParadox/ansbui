@@ -33,76 +33,117 @@ func addHostToInventoryYAML(content []byte, provider, fqdn string) ([]byte, erro
 	if fqdn == "" {
 		return nil, errors.New("fqdn is required")
 	}
+	root, top, err := parseInventoryRoot(content)
+	if err != nil {
+		return nil, err
+	}
+	if err := guardNoLegacyTopLevel(top); err != nil {
+		return nil, err
+	}
+	childrenNode := ensureUmbrellaPath(top)
+	if err := guardNoCrossProviderDup(childrenNode, provider, fqdn); err != nil {
+		return nil, err
+	}
+	providerNode := findOrCreateMapValue(childrenNode, provider)
+	hostsNode := findOrCreateMapValue(providerNode, "hosts")
+	if findMapValue(hostsNode, fqdn) != nil {
+		return content, nil
+	}
+	appendHostNode(hostsNode, fqdn)
+	return encodeInventory(root, content)
+}
 
+// parseInventoryRoot turns operator-supplied inventory bytes into
+// a yaml.Node tree, returning both the document root (for re-encode)
+// and the top-level mapping (for findOrCreateMapValue walks). An
+// empty/invalid input yields an empty `all: {}` root rather than an
+// error so a fresh-host bootstrap into a never-existed inventory
+// still works.
+func parseInventoryRoot(content []byte) (*yaml.Node, *yaml.Node, error) {
 	var root yaml.Node
 	if len(bytes.TrimSpace(content)) == 0 {
 		root = emptyInventoryRoot()
 	} else if err := yaml.Unmarshal(content, &root); err != nil {
-		return nil, fmt.Errorf("parse inventory yaml: %w", err)
+		return nil, nil, fmt.Errorf("parse inventory yaml: %w", err)
 	}
 	if root.Kind != yaml.DocumentNode || len(root.Content) == 0 {
 		root = emptyInventoryRoot()
 	}
 	top := root.Content[0]
 	if top.Kind != yaml.MappingNode {
-		return nil, errors.New("inventory top-level must be a YAML mapping (e.g. `all:`)")
+		return nil, nil, errors.New("inventory top-level must be a YAML mapping (e.g. `all:`)")
 	}
+	return &root, top, nil
+}
 
-	// Refuse to bifurcate if any umbrella group already lives at the
-	// top level (legacy pre-`all` inventory layout). Creating a
-	// nested copy would split the fleet across two same-named
-	// groups and ansible's behaviour on duplicates is parser-
-	// dependent.
+// guardNoLegacyTopLevel refuses to bifurcate if any umbrella group
+// already lives at the top level (legacy pre-`all` inventory
+// layout). Creating a nested copy would split the fleet across two
+// same-named groups and ansible's behaviour on duplicates is
+// parser-dependent.
+func guardNoLegacyTopLevel(top *yaml.Node) error {
 	for _, group := range inventoryUmbrellaGroups {
 		if existing := findMapValue(top, group); existing != nil {
-			return nil, fmt.Errorf("inventory has top-level group %q — move it under all.children before bootstrap so the new host doesn't get added to a duplicate group", group)
+			return fmt.Errorf("inventory has top-level group %q — move it under all.children before bootstrap so the new host doesn't get added to a duplicate group", group)
 		}
 	}
+	return nil
+}
 
+// ensureUmbrellaPath walks `all.children.<umbrella>...children` in
+// the YAML tree, creating any missing rungs, and returns the leaf
+// `children` map where provider groups live as keys.
+func ensureUmbrellaPath(top *yaml.Node) *yaml.Node {
 	cur := findOrCreateMapValue(top, "all")
 	for _, group := range inventoryUmbrellaGroups {
 		cur = findOrCreateMapValue(cur, "children")
 		cur = findOrCreateMapValue(cur, group)
 	}
-	cur = findOrCreateMapValue(cur, "children")
-	// Refuse to register fqdn under provider X if it already lives
-	// under provider Y. Otherwise an operator who retries with a
-	// different provider after a transient porkbun failure ends up
-	// with the host listed in two provider groups, and
-	// ansible-inventory reports it as a member of both — silent
-	// fan-out the bootstrap workflow can't undo.
-	if cur.Kind == yaml.MappingNode {
-		for i := 0; i+1 < len(cur.Content); i += 2 {
-			siblingProvider := cur.Content[i].Value
-			if siblingProvider == provider {
-				continue
-			}
-			siblingHosts := findMapValue(cur.Content[i+1], "hosts")
-			if findMapValue(siblingHosts, fqdn) != nil {
-				return nil, fmt.Errorf("host %q is already registered under provider %q — remove it from there before re-bootstrapping under %q", fqdn, siblingProvider, provider)
-			}
+	return findOrCreateMapValue(cur, "children")
+}
+
+// guardNoCrossProviderDup refuses to register fqdn under provider X
+// if it already lives under provider Y. Otherwise an operator who
+// retries with a different provider after a transient porkbun
+// failure ends up with the host listed in two provider groups, and
+// ansible-inventory reports it as a member of both — silent fan-out
+// the bootstrap workflow can't undo.
+func guardNoCrossProviderDup(childrenNode *yaml.Node, provider, fqdn string) error {
+	if childrenNode.Kind != yaml.MappingNode {
+		return nil
+	}
+	for i := 0; i+1 < len(childrenNode.Content); i += 2 {
+		siblingProvider := childrenNode.Content[i].Value
+		if siblingProvider == provider {
+			continue
+		}
+		siblingHosts := findMapValue(childrenNode.Content[i+1], "hosts")
+		if findMapValue(siblingHosts, fqdn) != nil {
+			return fmt.Errorf("host %q is already registered under provider %q — remove it from there before re-bootstrapping under %q", fqdn, siblingProvider, provider)
 		}
 	}
-	providerNode := findOrCreateMapValue(cur, provider)
-	hostsNode := findOrCreateMapValue(providerNode, "hosts")
-	if findMapValue(hostsNode, fqdn) != nil {
-		return content, nil
-	}
+	return nil
+}
+
+// appendHostNode adds fqdn as a `<fqdn>:` (bare-key, no value) entry
+// under hostsNode. Empty scalar with the !!null tag renders that
+// way, matching how operators usually hand-write ansible inventory
+// entries.
+func appendHostNode(hostsNode *yaml.Node, fqdn string) {
 	keyNode := &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: fqdn}
-	// Empty scalar with the !!null tag renders as a bare key with no
-	// value (`vps01.example.com:`), matching how operators usually
-	// hand-write ansible inventory entries.
 	valNode := &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!null"}
 	hostsNode.Content = append(hostsNode.Content, keyNode, valNode)
+}
 
+// encodeInventory renders root back to bytes, preserving the
+// operator's original indent so a re-encode with a hardcoded
+// 2-space indent against a 4-space file doesn't reflow every
+// nested key (churn-heavy diff, breaks downstream tooling).
+func encodeInventory(root *yaml.Node, content []byte) ([]byte, error) {
 	var buf bytes.Buffer
 	enc := yaml.NewEncoder(&buf)
-	// Preserve the operator's indent — re-encoding with a hardcoded
-	// 2-space indent against an inventory written with 4-space rules
-	// reflows every nested key, producing a churn-heavy diff and
-	// breaking any downstream tool that diffs the inventory file.
 	enc.SetIndent(detectYAMLIndent(content))
-	if err := enc.Encode(&root); err != nil {
+	if err := enc.Encode(root); err != nil {
 		return nil, fmt.Errorf("encode inventory yaml: %w", err)
 	}
 	if err := enc.Close(); err != nil {

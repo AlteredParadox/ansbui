@@ -159,15 +159,7 @@ func Run(ctx context.Context, pool *sshpool.Pool, srv config.Server, req Request
 	mu.Lock()
 	defer mu.Unlock()
 
-	emit("meta", "Decrypting porkbun credentials from "+defaultPorkbunVaultPath+"...")
-	apiKey, secretKey, err := readPorkbunCreds(ctx, pool, srv, req.VaultPassword)
-	if err != nil {
-		emit("fail", "vault decrypt: "+err.Error())
-		return err
-	}
-	emit("ok", "porkbun credentials decrypted")
-
-	if err := runDNSStep(ctx, porkbun.New(apiKey, secretKey), req.IP, req.Hostname, emit); err != nil {
+	if err := runPorkbunStepIfNeeded(ctx, pool, srv, req, emit); err != nil {
 		return err
 	}
 
@@ -231,16 +223,8 @@ func Run(ctx context.Context, pool *sshpool.Pool, srv config.Server, req Request
 // because the job's Summary captures fields verbatim and the
 // registry retains them across the run's lifetime.
 func Validate(req Request) error {
-	if strings.TrimSpace(req.Provider) == "" {
-		return errors.New("provider is required")
-	}
-	// normalizeProviderName drops every char outside [a-z0-9_-]; a
-	// pathological input like `"!!!"` collapses to "" and would
-	// otherwise reach addHostToInventoryYAML which rejects empty
-	// provider with a confusing internal message. Reject upstream
-	// with the actionable hint.
-	if normalizeProviderName(req.Provider) == "" {
-		return errors.New("provider name has no usable characters after normalization (allowed: letters, digits, underscore, hyphen, space)")
+	if err := validateProvider(req.Provider); err != nil {
+		return err
 	}
 	if err := validateAddress(req.IP); err != nil {
 		return err
@@ -251,32 +235,14 @@ func Validate(req Request) error {
 	if strings.TrimSpace(req.Username) == "" {
 		return errors.New("username is required")
 	}
-	if req.Password == "" {
-		return errors.New("password is required")
-	}
-	if req.UseSudo && req.SudoPassword == "" && req.Username != "root" {
-		return errors.New("sudo password is required when 'use sudo' is checked")
-	}
-	// Sudo + vault passwords ride through `read -r PASS` in the
-	// shell wrappers (sshtarget.runRoot's sudo-pass feed; the
-	// vault decrypt scripts in ansible/inline_vault.go). `read -r`
-	// stops at the first newline, so a multi-line value leaks the
-	// rest into the next stdin reader — for sudo that's the
-	// inner orchestration script's `read -r ANSPW`, which would
-	// then chpasswd the ansible user with the back-half of the
-	// operator's sudo password. Fail fast at the API boundary
-	// before any SSH side-effects happen.
-	if strings.ContainsAny(req.SudoPassword, "\r\n") {
-		return errors.New("sudo password must not contain newlines")
-	}
-	if strings.ContainsAny(req.VaultPassword, "\r\n") {
-		return errors.New("vault password must not contain newlines")
+	if err := validateAuthPasswords(req); err != nil {
+		return err
 	}
 	if err := validateHostname(req.Hostname); err != nil {
 		return err
 	}
-	if strings.TrimSpace(req.VaultPassword) == "" {
-		return errors.New("vault password is required (used to decrypt porkbun credentials)")
+	if err := validateVaultRequirement(req); err != nil {
+		return err
 	}
 	// Per-field length caps — every value here is summarised /
 	// retained in the in-memory job registry, and the redact pass
@@ -289,8 +255,60 @@ func Validate(req Request) error {
 	if err := boundLength("username", req.Username, 64); err != nil {
 		return err
 	}
-	if err := validateReinstall(req.Reinstall); err != nil {
-		return err
+	return validateReinstall(req.Reinstall)
+}
+
+// validateProvider gates required + post-normalize-non-empty so
+// pathological labels like `"!!!"` (which normalizeProviderName
+// would collapse to "") get rejected at the API boundary instead
+// of surfacing inside addHostToInventoryYAML with a less-actionable
+// internal message.
+func validateProvider(p string) error {
+	if strings.TrimSpace(p) == "" {
+		return errors.New("provider is required")
+	}
+	if normalizeProviderName(p) == "" {
+		return errors.New("provider name has no usable characters after normalization (allowed: letters, digits, underscore, hyphen, space)")
+	}
+	return nil
+}
+
+// validateAuthPasswords groups the auth-credential checks. Sudo +
+// vault passwords ride through `read -r PASS` in the shell wrappers
+// (sshtarget.runRoot's sudo-pass feed; the vault decrypt scripts in
+// ansible/inline_vault.go). `read -r` stops at the first newline,
+// so a multi-line value would leak the rest into the next stdin
+// reader — for sudo that's the inner orchestration script's
+// `read -r ANSPW`, which would then chpasswd the ansible user with
+// the back-half of the operator's sudo password. Fail fast at the
+// API boundary before any SSH side-effects happen.
+func validateAuthPasswords(req Request) error {
+	if req.Password == "" {
+		return errors.New("password is required")
+	}
+	if req.UseSudo && req.SudoPassword == "" && req.Username != "root" {
+		return errors.New("sudo password is required when 'use sudo' is checked")
+	}
+	if strings.ContainsAny(req.SudoPassword, "\r\n") {
+		return errors.New("sudo password must not contain newlines")
+	}
+	if strings.ContainsAny(req.VaultPassword, "\r\n") {
+		return errors.New("vault password must not contain newlines")
+	}
+	return nil
+}
+
+// validateVaultRequirement only requires the vault password when
+// the porkbun DNS step will actually run — hostname addresses skip
+// porkbun entirely (managed out of band) and don't need the vault
+// decrypt. Operators bootstrapping against a hostname can leave
+// the field blank.
+func validateVaultRequirement(req Request) error {
+	if classifyAddress(strings.TrimSpace(req.IP)) == addressKindHost {
+		return nil
+	}
+	if strings.TrimSpace(req.VaultPassword) == "" {
+		return errors.New("vault password is required (used to decrypt porkbun credentials for the DNS step)")
 	}
 	return nil
 }
@@ -381,6 +399,26 @@ func classifyAddress(s string) string {
 		return addressKindHost
 	}
 	return ""
+}
+
+// runPorkbunStepIfNeeded skips the vault decrypt entirely when the
+// address is itself a hostname (porkbun would be bypassed anyway,
+// so reading credentials we won't use is wasted work and would
+// fail for an operator who legitimately doesn't have porkbun
+// credentials configured). For IPv4/IPv6 addresses, decrypts the
+// vault, builds a porkbun client, and delegates to runDNSStep.
+func runPorkbunStepIfNeeded(ctx context.Context, pool *sshpool.Pool, srv config.Server, req Request, emit func(string, string)) error {
+	if classifyAddress(req.IP) == addressKindHost {
+		return runDNSStep(ctx, nil, req.IP, req.Hostname, emit)
+	}
+	emit("meta", "Decrypting porkbun credentials from "+defaultPorkbunVaultPath+"...")
+	apiKey, secretKey, err := readPorkbunCreds(ctx, pool, srv, req.VaultPassword)
+	if err != nil {
+		emit("fail", "vault decrypt: "+err.Error())
+		return err
+	}
+	emit("ok", "porkbun credentials decrypted")
+	return runDNSStep(ctx, porkbun.New(apiKey, secretKey), req.IP, req.Hostname, emit)
 }
 
 // runDNSStep ensures the operator's chosen FQDN resolves to the

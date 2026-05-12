@@ -134,8 +134,14 @@ function BootstrapView() {
   // attachStream wires a fresh WebSocket to a job and routes its
   // events into the terminal. The same handler powers both the
   // initial start (via start()) and the re-attach-on-mount path.
-  // Local `finished` latch lets us treat an unexpected close as a
-  // failure without double-firing finish().
+  // Local `finished` latch lets us treat backend done/fail events
+  // as terminal exactly once. WS close/error are NOT treated as
+  // failure: the backend job outlives the socket by design (a
+  // navigate-away during a 30-minute reinstall closes the socket
+  // but the run keeps going), so a non-terminal close just stops
+  // the local stream and leaves localStorage so the next mount
+  // re-attaches via getBootstrapJob, which reads ground-truth
+  // status from the backend registry.
   const attachStream = (jobId) => {
     const ws = globalThis.AnsbuiAPI.attachBootstrapJob(jobId);
     streamRef.current = ws;
@@ -151,8 +157,16 @@ function BootstrapView() {
       else if (evt.type === 'fail' || evt.type === 'error') fin(false, evt.text || 'failed');
       else if (evt.type === 'done') fin(true, evt.text || 'done');
     });
-    ws.onClose(() => { if (!finished) fin(false, 'connection closed before completion'); });
-    ws.onError(() => fin(false, 'WebSocket error — check backend logs'));
+    ws.onClose(() => {
+      if (finished) return;
+      append({ t: 'meta', text: 'stream disconnected; refresh to re-attach (backend job continues)' });
+      streamRef.current = null;
+    });
+    ws.onError(() => {
+      if (finished) return;
+      append({ t: 'meta', text: 'WebSocket error; refresh to re-attach (backend job may still be running)' });
+      streamRef.current = null;
+    });
   };
 
   // hostnameError / reinstallError split off the multi-check field
@@ -189,7 +203,11 @@ function BootstrapView() {
     if (useSudo && !sudoPassword) return { error: 'Sudo password is required when using sudo.' };
     const hostErr = hostnameError();
     if (hostErr) return { error: hostErr };
-    if (!vaultPassword) return { error: 'Vault password is required (used to decrypt porkbun credentials).' };
+    // Vault password is only consumed by the porkbun DNS step, so
+    // skip the requirement when the address is itself a hostname
+    // (porkbun is bypassed in that case — operator manages DNS
+    // out of band).
+    if (classifyAddress(ip.trim()) !== 'host' && !vaultPassword) return { error: 'Vault password is required (used to decrypt porkbun credentials).' };
     const reErr = reinstallError();
     if (reErr) return { error: reErr };
     return { portNum };
