@@ -342,7 +342,7 @@ func runDNSStep(ctx context.Context, pb *porkbun.Client, address, fqdn string, e
 		return errors.New("invalid hostname")
 	}
 	emit("meta", fmt.Sprintf("Checking porkbun %s record for %s under %s...", recordType, subdomainOrApex(subdomain), domain))
-	return ensureRecord(ctx, pb, recordType, domain, subdomain, address, fqdn, emit)
+	return ensureRecord(ctx, pb, recordType, domain, subdomain, address, emit)
 }
 
 // validateHostname applies all hostname-shape rules in one place
@@ -554,7 +554,11 @@ func connectAndPrecheck(ctx context.Context, req Request, emit func(string, stri
 // the same name — silently appending a "correct" one alongside a
 // stale one would round-robin traffic between the new box and a
 // stranger.
-func ensureRecord(ctx context.Context, pb *porkbun.Client, recordType, domain, subdomain, ip, fqdn string, emit func(string, string)) error {
+func ensureRecord(ctx context.Context, pb *porkbun.Client, recordType, domain, subdomain, ip string, emit func(string, string)) error {
+	fqdn := domain
+	if subdomain != "" {
+		fqdn = subdomain + "." + domain
+	}
 	records, err := pb.FindRecords(ctx, recordType, domain, subdomain, fqdn)
 	if err != nil {
 		emit("fail", err.Error())
@@ -580,7 +584,7 @@ func ensureRecord(ctx context.Context, pb *porkbun.Client, recordType, domain, s
 		emit("fail", msg)
 		return errors.New(msg)
 	}
-	emit("ok", "A record already correct")
+	emit("ok", recordType+" record already correct")
 	return nil
 }
 

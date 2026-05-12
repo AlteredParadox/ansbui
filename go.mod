@@ -2,6 +2,8 @@ module github.com/AlteredParadox/ansbui
 
 go 1.25.0
 
+toolchain go1.25.10
+
 require (
 	github.com/gorilla/websocket v1.5.3 // indirect
 	golang.org/x/crypto v0.50.0 // indirect

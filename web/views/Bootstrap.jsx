@@ -33,7 +33,7 @@ const REINSTALL_OS_LIST = Object.keys(REINSTALL_MATRIX);
 const ADDR_HEXCOLON_RE = /^[0-9a-fA-F:.]+$/;
 const ADDR_DIGITDOT_RE = /^[0-9.]+$/;
 const ADDR_IPV4_RE = /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/;
-const ADDR_HOST_RE = /^[a-zA-Z0-9.\-]+$/;
+const ADDR_HOST_RE = /^[a-zA-Z0-9.-]+$/;
 const classifyAddress = (s) => {
   if (!s || s.length > 253) return '';
   if (s.includes(':')) return ADDR_HEXCOLON_RE.test(s) ? 'ipv6' : '';
