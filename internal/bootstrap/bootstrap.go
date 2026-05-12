@@ -2,7 +2,9 @@
 // for ansible" workflow:
 //
 //  1. read porkbun creds from an inline vault on the control node
-//  2. ensure an A record for the new hostname exists at porkbun
+//  2. ensure a DNS record (A for IPv4, AAAA for IPv6, or skipped
+//     entirely when the address is already a hostname) exists at
+//     porkbun for the new hostname
 //  3. SSH to the new server with the operator-supplied password
 //  4. install sudo + python3 (Debian/Ubuntu only in v1)
 //  5. create an `ansible` user with a random password and
@@ -123,8 +125,23 @@ func Run(ctx context.Context, pool *sshpool.Pool, srv config.Server, req Request
 	// copy and accepts " 1.2.3.4 ", but the un-trimmed value
 	// flows into lockTarget's key, dialPasswordTarget's address,
 	// and the porkbun record content — all of which fail or
-	// behave wrong with surrounding whitespace.
+	// behave wrong with surrounding whitespace. Canonicalize IP
+	// literals on top of the trim so two operators submitting
+	// `2001:DB8::1` and `2001:db8::1` against the same target
+	// acquire the same `targetMu` lock instead of racing.
+	// Lowercase the address unconditionally to extend that lock
+	// invariant to the hostname-as-address path: DNS is
+	// case-insensitive, so `Host.Example.com` and
+	// `host.example.com` resolve to the same box and must share
+	// a mutex. ip.String() already lowercases for IP literals so
+	// the second pass is a no-op there. The API path
+	// canonicalizes upstream too; this keeps Run self-consistent
+	// for any future direct caller.
 	req.IP = strings.TrimSpace(req.IP)
+	if ip := net.ParseIP(req.IP); ip != nil {
+		req.IP = ip.String()
+	}
+	req.IP = strings.ToLower(req.IP)
 	// A forged / stale client could submit `username=root` together
 	// with `useSudo=true`. Root never needs sudo; coerce to false so
 	// the orchestrator skips the wrapper entirely instead of running
@@ -282,12 +299,22 @@ const (
 // hostname. Each downstream step (porkbun record type, SSH dial
 // via net.JoinHostPort) keys off classifyAddress, so anything it
 // returns "" for is rejected here with a single user-facing error.
+//
+// IPv4-mapped IPv6 (`::ffff:1.2.3.4`, `::ffff:0102:0304`) gets a
+// dedicated error so operators understand the rejection reason
+// and can re-enter as plain IPv4 — the generic message wouldn't
+// hint at the right fix. Frontend's IPv6 regex ignores this case
+// because a substring guard would false-positive on legitimate
+// but exotic forms like `1::ffff:1:2`.
 func validateAddress(raw string) error {
 	s := strings.TrimSpace(raw)
 	if s == "" {
 		return errors.New("address is required")
 	}
 	if classifyAddress(s) == "" {
+		if ip := net.ParseIP(s); ip != nil && ip.To4() != nil && strings.Contains(s, ":") {
+			return errors.New("address is an IPv4-mapped IPv6 form (e.g. ::ffff:0102:0304) — re-enter as a plain IPv4 address (e.g. 1.2.3.4) since porkbun's AAAA endpoint won't accept v4-mapped content")
+		}
 		return errors.New("address must be a valid IPv4 address (e.g. 203.0.113.42), IPv6 address (e.g. 2001:db8::1), or DNS hostname (e.g. host.example.com)")
 	}
 	return nil
@@ -300,9 +327,23 @@ func validateAddress(raw string) error {
 // be IPv4) prevents typo'd IP literals from silently classifying
 // as a hostname — e.g. "999.0.0.0" should fail loudly here, not
 // drift through to `dialPasswordTarget` as an unresolvable name.
+//
+// IPv6 with a dotted-quad tail (v4-mapped `::ffff:1.2.3.4`,
+// IPv4-compatible `::1.2.3.4`, NAT64 `64:ff9b::1.2.3.4`) is
+// rejected by the dot-ban. The all-hex v4-mapped form
+// (`::ffff:0102:0304`) is rejected by the To4()==nil guard:
+// without it, the API-layer canonicalize via `ip.String()` would
+// rewrite `::ffff:0102:0304` to `1.2.3.4`, Run would re-classify
+// as IPv4 on the second pass, and an A record (not the intended
+// AAAA) would land at porkbun. Operators wanting a v6 record
+// must enter a pure-hex form like `2001:db8::1`; v4 operators
+// must enter `1.2.3.4`.
 func classifyAddress(s string) string {
 	if strings.Contains(s, ":") {
-		if ip := net.ParseIP(s); ip != nil {
+		if strings.Contains(s, ".") {
+			return ""
+		}
+		if ip := net.ParseIP(s); ip != nil && ip.To4() == nil {
 			return addressKindIPv6
 		}
 		return ""
@@ -375,7 +416,31 @@ func validateHostname(h string) error {
 			return fmt.Errorf("hostname contains invalid character %q (allowed: letters, digits, '.', '-')", r)
 		}
 	}
+	if err := validateHostnameLabels(h); err != nil {
+		return err
+	}
 	return boundLength("hostname", h, 253)
+}
+
+// validateHostnameLabels enforces the per-label RFC1035 rules the
+// charset check can't catch: each label must be 1-63 bytes and
+// must not start or end with `-`. Empty labels (caused by a
+// leading/trailing dot or a `..` run) are caught by the length
+// check. Pulled out so validateHostname stays under the cognitive-
+// complexity ceiling (S3776).
+func validateHostnameLabels(h string) error {
+	for _, label := range strings.Split(h, ".") {
+		if label == "" {
+			return errors.New("hostname must not contain empty labels (no leading/trailing dot or `..`)")
+		}
+		if len(label) > 63 {
+			return fmt.Errorf("hostname label %q exceeds 63 bytes", label)
+		}
+		if label[0] == '-' || label[len(label)-1] == '-' {
+			return fmt.Errorf("hostname label %q must not start or end with '-'", label)
+		}
+	}
+	return nil
 }
 
 func boundLength(name, value string, max int) error {
@@ -559,6 +624,17 @@ func ensureRecord(ctx context.Context, pb *porkbun.Client, recordType, domain, s
 	if subdomain != "" {
 		fqdn = subdomain + "." + domain
 	}
+	// Canonicalize ip so a mixed-case IPv6 input (`2001:DB8::1`)
+	// round-trips against porkbun's lowercased read-back. Without
+	// this, every retry after a successful create would treat the
+	// stored record as a "conflict" against the operator's literal
+	// input and abort. The parse can't fail at the call site
+	// (classifyAddress already validated), but the guard keeps the
+	// function safe if a future caller is looser.
+	want := net.ParseIP(ip)
+	if want != nil {
+		ip = want.String()
+	}
 	records, err := pb.FindRecords(ctx, recordType, domain, subdomain, fqdn)
 	if err != nil {
 		emit("fail", err.Error())
@@ -575,7 +651,8 @@ func ensureRecord(ctx context.Context, pb *porkbun.Client, recordType, domain, s
 	}
 	var conflicts []string
 	for _, r := range records {
-		if r.Content != ip {
+		got := net.ParseIP(r.Content)
+		if got == nil || !want.Equal(got) {
 			conflicts = append(conflicts, r.Content)
 		}
 	}

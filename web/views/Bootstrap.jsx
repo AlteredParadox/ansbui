@@ -24,21 +24,29 @@ const REINSTALL_MATRIX = {
 const REINSTALL_OS_LIST = Object.keys(REINSTALL_MATRIX);
 
 // classifyAddress mirrors the backend's classifyAddress: returns
-// 'ipv4', 'ipv6', 'host', or '' for inputs that match none. Cheap
-// shape gates only — backend's net.ParseIP / RFC1035 charset is
-// the canonical check (S5843 keeps us out of per-octet validation
-// here). The shape disambiguator (`:` ⇒ must be IPv6-shaped,
-// all-digits-and-dots ⇒ must be IPv4-shaped) prevents typo'd IP
-// literals from silently passing as a hostname.
-const ADDR_HEXCOLON_RE = /^[0-9a-fA-F:.]+$/;
+// 'ipv4', 'ipv6', 'host', or '' for inputs that match none. The
+// per-octet IPv4 alternation has fixed-width branches (no
+// backtracking, S5852-safe). IPv6 requires ≥2 colons and bans
+// '.', so the dotted-tail v4-mapped form (`::ffff:1.2.3.4`) is
+// rejected here. The all-hex v4-mapped form (`::ffff:0102:0304`)
+// passes this gate but is caught by the backend's To4()==nil
+// guard with a dedicated error message — the FE doesn't try to
+// detect it because a substring guard would false-positive on
+// legitimate but exotic IPv6 like `1::ffff:1:2`. Hostnames pass
+// a label-shape gate (RFC1035: 1-63 bytes, no leading/trailing
+// '-', no empty labels) so a typo like `-bad.example.com` is
+// caught inline rather than via a backend 400.
+const ADDR_OCTET = '(25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]\\d|\\d)';
+const ADDR_IPV4_RE = new RegExp(`^${ADDR_OCTET}\\.${ADDR_OCTET}\\.${ADDR_OCTET}\\.${ADDR_OCTET}$`);
+const ADDR_IPV6_RE = /^(?=.*:.*:)[0-9a-fA-F:]+$/;
 const ADDR_DIGITDOT_RE = /^[0-9.]+$/;
-const ADDR_IPV4_RE = /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/;
 const ADDR_HOST_RE = /^[a-zA-Z0-9.-]+$/;
+const hostLabelsOK = (s) => s.split('.').every(l => l.length >= 1 && l.length <= 63 && l[0] !== '-' && l[l.length - 1] !== '-');
 const classifyAddress = (s) => {
   if (!s || s.length > 253) return '';
-  if (s.includes(':')) return ADDR_HEXCOLON_RE.test(s) ? 'ipv6' : '';
+  if (s.includes(':')) return ADDR_IPV6_RE.test(s) ? 'ipv6' : '';
   if (ADDR_DIGITDOT_RE.test(s)) return ADDR_IPV4_RE.test(s) ? 'ipv4' : '';
-  if (s.includes('.') && ADDR_HOST_RE.test(s)) return 'host';
+  if (s.includes('.') && ADDR_HOST_RE.test(s) && hostLabelsOK(s)) return 'host';
   return '';
 };
 
@@ -161,7 +169,9 @@ function BootstrapView() {
     if (!username.trim()) return { error: 'Username is required.' };
     if (!password) return { error: 'Password is required.' };
     if (useSudo && !sudoPassword) return { error: 'Sudo password is required when using sudo.' };
-    if (!hostname.trim() || !hostname.includes('.')) return { error: 'Hostname must be fully-qualified (include the domain).' };
+    const trimmedHost = hostname.trim();
+    if (!trimmedHost || !trimmedHost.includes('.')) return { error: 'Hostname must be fully-qualified (include the domain).' };
+    if (trimmedHost.length > 253 || !ADDR_HOST_RE.test(trimmedHost) || !hostLabelsOK(trimmedHost)) return { error: 'Hostname has an invalid label (RFC1035: 1-63 bytes per label, no leading/trailing "-", no empty labels).' };
     if (!vaultPassword) return { error: 'Vault password is required (used to decrypt porkbun credentials).' };
     if (reinstallEnabled && !REINSTALL_MATRIX[reinstallOS]) return { error: 'Pick a reinstall OS.' };
     const versions = REINSTALL_MATRIX[reinstallOS] || [];

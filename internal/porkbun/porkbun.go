@@ -1,8 +1,9 @@
 // Package porkbun is a thin HTTP client for the subset of Porkbun's
 // JSON DNS API that the bootstrap flow needs: look up an existing
-// A record for a hostname, and create a new one when it doesn't
-// exist. Auth uses Porkbun's body-embedded `apikey`+`secretapikey`
-// pair on every request — there's no header-based form.
+// DNS record (A for IPv4, AAAA for IPv6) for a hostname, and create
+// a new one when it doesn't exist. Auth uses Porkbun's body-embedded
+// `apikey`+`secretapikey` pair on every request — there's no
+// header-based form.
 package porkbun
 
 import (

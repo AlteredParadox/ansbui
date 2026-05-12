@@ -3,7 +3,9 @@ package api
 import (
 	"context"
 	"errors"
+	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/AlteredParadox/ansbui/internal/bootstrap"
@@ -44,6 +46,20 @@ func (s *Server) httpBootstrapStart(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	// Canonicalize before snapshotting so the "active runs" banner
+	// matches what the orchestrator (and porkbun) actually see.
+	// Without this, an operator who enters `2001:DB8::1` sees that
+	// literal in the snapshot while the run uses `2001:db8::1` —
+	// confusing on re-attach. The trailing ToLower also collapses
+	// case-variant hostname addresses so `Host.Example.com` and
+	// `host.example.com` share one mutex / snapshot row. Run does
+	// the same normalization idempotently as belt-and-suspenders.
+	req.IP = strings.TrimSpace(req.IP)
+	if ip := net.ParseIP(req.IP); ip != nil {
+		req.IP = ip.String()
+	}
+	req.IP = strings.ToLower(req.IP)
+	req.Hostname = strings.ToLower(strings.TrimSpace(req.Hostname))
 	// Summary must NOT contain any of the three secrets the form
 	// carries (target password, sudo password, vault password).
 	// What we keep is what the operator wants to see in an

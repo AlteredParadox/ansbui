@@ -1,6 +1,7 @@
 package bootstrap
 
 import (
+	"net"
 	"strings"
 	"testing"
 )
@@ -111,26 +112,80 @@ func FuzzNormalizeProviderName(f *testing.F) {
 	})
 }
 
+// hostInvariantBreak re-derives validateHostname's invariants from
+// scratch so a regression in validateHostname (charset hole,
+// missing whitespace check, missing length cap, missing per-label
+// rule) is caught by FuzzValidateAddress's host branch instead of
+// passing silently. Returns "" when all invariants hold; otherwise
+// a short reason string.
+func hostInvariantBreak(s string) string {
+	if !strings.Contains(s, ".") {
+		return "no dot"
+	}
+	if len(s) > 253 {
+		return "exceeds 253 bytes"
+	}
+	if strings.ContainsAny(s, " \t") {
+		return "contains whitespace"
+	}
+	for _, r := range s {
+		ok := (r >= 'a' && r <= 'z') ||
+			(r >= 'A' && r <= 'Z') ||
+			(r >= '0' && r <= '9') ||
+			r == '.' || r == '-'
+		if !ok {
+			return "contains rune outside RFC1035 charset"
+		}
+	}
+	for _, label := range strings.Split(s, ".") {
+		if label == "" || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return "label " + label + " breaks RFC1035"
+		}
+	}
+	return ""
+}
+
 // FuzzValidateAddress must accept the three operator-supplied
 // shapes the bootstrap form supports (IPv4 literal, IPv6 literal,
-// DNS hostname) and reject everything else without panicking. We
-// can't enumerate every valid input but we can assert the
-// invariant that any accepted input classifies as one of the
-// three known kinds — i.e. validateAddress and classifyAddress
-// agree.
+// DNS hostname) and reject everything else without panicking.
+//
+// The previous version asserted "accepted ⇒ classifyAddress
+// non-empty" — tautological, since validateAddress is implemented
+// by calling classifyAddress. We now re-derive each kind's
+// invariant from a different code path (net.ParseIP for IPs,
+// per-label decomposition for hostnames) so a regression in the
+// classifier is caught even when validateAddress agrees with it.
 func FuzzValidateAddress(f *testing.F) {
-	for _, seed := range []string{"", "1.2.3.4", "  1.2.3.4  ", "::1", "2001:db8::1", "::ffff:1.2.3.4", "999.0.0.0", "1.2.3", "host.example.com", "no.tab\there", "single"} {
+	for _, seed := range []string{"", "1.2.3.4", "  1.2.3.4  ", "::1", "2001:db8::1", "::ffff:1.2.3.4", "999.0.0.0", "1.2.3", "host.example.com", "no.tab\there", "single", "01.2.3.4", "-bad.example.com", "a..b", ".x.com", "x.com."} {
 		f.Add(seed)
 	}
 	f.Fuzz(func(t *testing.T, s string) {
-		err := validateAddress(s)
-		if err == nil && classifyAddress(strings.TrimSpace(s)) == "" {
-			t.Fatalf("validateAddress(%q) accepted but classifyAddress returned empty", s)
+		if validateAddress(s) != nil {
+			return
+		}
+		trimmed := strings.TrimSpace(s)
+		switch classifyAddress(trimmed) {
+		case addressKindIPv4:
+			ip := net.ParseIP(trimmed)
+			if ip == nil || ip.To4() == nil || strings.Contains(trimmed, ":") {
+				t.Fatalf("validateAddress(%q) accepted as IPv4 but re-parse rejects", s)
+			}
+		case addressKindIPv6:
+			ip := net.ParseIP(trimmed)
+			if ip == nil || ip.To4() != nil || strings.Contains(trimmed, ".") {
+				t.Fatalf("validateAddress(%q) accepted as IPv6 but re-parse rejects, is v4-mapped, or has dotted-quad tail", s)
+			}
+		case addressKindHost:
+			if reason := hostInvariantBreak(trimmed); reason != "" {
+				t.Fatalf("validateAddress(%q) accepted as host but %s", s, reason)
+			}
+		default:
+			t.Fatalf("validateAddress(%q) accepted but classifyAddress returned %q", s, classifyAddress(trimmed))
 		}
 	})
 }
 
-// FuzzValidateHostname mirrors validateIP for hostnames — never
+// FuzzValidateHostname mirrors validateAddress for hostnames — never
 // panic; rejected inputs are rejected; accepted inputs match the
 // length cap and the dot/whitespace constraints.
 func FuzzValidateHostname(f *testing.F) {
