@@ -119,10 +119,10 @@ func Run(ctx context.Context, pool *sshpool.Pool, srv config.Server, req Request
 	// record all benefit from a single form. Mixed-case input from
 	// the operator (`Vps01.Example.com`) is silently normalised.
 	req.Hostname = strings.ToLower(strings.TrimSpace(req.Hostname))
-	// Trim req.IP too. Validate's net.ParseIP runs on a trimmed
+	// Trim req.IP too. Validate's classifier runs on a trimmed
 	// copy and accepts " 1.2.3.4 ", but the un-trimmed value
 	// flows into lockTarget's key, dialPasswordTarget's address,
-	// and the porkbun A-record content — all of which fail or
+	// and the porkbun record content — all of which fail or
 	// behave wrong with surrounding whitespace.
 	req.IP = strings.TrimSpace(req.IP)
 	// A forged / stale client could submit `username=root` together
@@ -149,13 +149,7 @@ func Run(ctx context.Context, pool *sshpool.Pool, srv config.Server, req Request
 	}
 	emit("ok", "porkbun credentials decrypted")
 
-	domain, subdomain := splitFQDN(req.Hostname)
-	if domain == "" {
-		emit("fail", "could not derive registered domain from hostname "+req.Hostname)
-		return errors.New("invalid hostname")
-	}
-	emit("meta", fmt.Sprintf("Checking porkbun A record for %s under %s...", subdomainOrApex(subdomain), domain))
-	if err := ensureARecord(ctx, porkbun.New(apiKey, secretKey), domain, subdomain, req.IP, req.Hostname, emit); err != nil {
+	if err := runDNSStep(ctx, porkbun.New(apiKey, secretKey), req.IP, req.Hostname, emit); err != nil {
 		return err
 	}
 
@@ -222,7 +216,7 @@ func Validate(req Request) error {
 	if strings.TrimSpace(req.Provider) == "" {
 		return errors.New("provider is required")
 	}
-	if err := validateIP(req.IP); err != nil {
+	if err := validateAddress(req.IP); err != nil {
 		return err
 	}
 	if req.Port <= 0 || req.Port > 65535 {
@@ -275,24 +269,80 @@ func Validate(req Request) error {
 	return nil
 }
 
-// validateIP enforces the IPv4-literal contract: porkbun A records
-// are IPv4-only and the SSH bootstrap connects directly to this
-// address. We reject hostnames (DNS could move the box mid-run)
-// and IPv6 (including IPv4-mapped `::ffff:1.2.3.4` forms that
-// net.ParseIP would otherwise accept) to avoid a confusing failure
-// later when porkbun rejects the A-record content.
-func validateIP(raw string) error {
+// Address kinds returned by classifyAddress. The bootstrap
+// orchestrator uses the kind to choose a porkbun record type
+// (A vs AAAA) or to skip the porkbun step entirely (host).
+const (
+	addressKindIPv4 = "ipv4"
+	addressKindIPv6 = "ipv6"
+	addressKindHost = "host"
+)
+
+// validateAddress accepts an IPv4 literal, IPv6 literal, or DNS
+// hostname. Each downstream step (porkbun record type, SSH dial
+// via net.JoinHostPort) keys off classifyAddress, so anything it
+// returns "" for is rejected here with a single user-facing error.
+func validateAddress(raw string) error {
 	s := strings.TrimSpace(raw)
 	if s == "" {
-		return errors.New("IP address is required")
+		return errors.New("address is required")
 	}
-	if strings.Contains(s, ":") {
-		return errors.New("IP must be in dotted-quad form (e.g. 203.0.113.42) — IPv6 addresses, including IPv4-mapped forms like ::ffff:1.2.3.4, are not supported")
-	}
-	if ip := net.ParseIP(s); ip == nil || ip.To4() == nil {
-		return errors.New("IP must be a valid IPv4 literal address — hostnames are rejected so DNS changes can't move the box mid-run")
+	if classifyAddress(s) == "" {
+		return errors.New("address must be a valid IPv4 address (e.g. 203.0.113.42), IPv6 address (e.g. 2001:db8::1), or DNS hostname (e.g. host.example.com)")
 	}
 	return nil
+}
+
+// classifyAddress returns "ipv4", "ipv6", "host", or "" for inputs
+// that don't match any. Caller should TrimSpace first.
+//
+// The shape gate (`:` ⇒ must be IPv6, all-digits-and-dots ⇒ must
+// be IPv4) prevents typo'd IP literals from silently classifying
+// as a hostname — e.g. "999.0.0.0" should fail loudly here, not
+// drift through to `dialPasswordTarget` as an unresolvable name.
+func classifyAddress(s string) string {
+	if strings.Contains(s, ":") {
+		if ip := net.ParseIP(s); ip != nil {
+			return addressKindIPv6
+		}
+		return ""
+	}
+	looksIPv4 := s != "" && strings.IndexFunc(s, func(r rune) bool {
+		return (r < '0' || r > '9') && r != '.'
+	}) == -1
+	if looksIPv4 {
+		if ip := net.ParseIP(s); ip != nil && ip.To4() != nil {
+			return addressKindIPv4
+		}
+		return ""
+	}
+	if validateHostname(s) == nil {
+		return addressKindHost
+	}
+	return ""
+}
+
+// runDNSStep ensures the operator's chosen FQDN resolves to the
+// supplied address. IPv4 → A record, IPv6 → AAAA record, hostname
+// → skip the porkbun step (the operator's hostname is presumed to
+// resolve itself; ansbui doesn't manage someone else's DNS).
+func runDNSStep(ctx context.Context, pb *porkbun.Client, address, fqdn string, emit func(string, string)) error {
+	kind := classifyAddress(address)
+	if kind == addressKindHost {
+		emit("ok", "address is a hostname; skipping porkbun DNS step (manage its DNS out of band)")
+		return nil
+	}
+	recordType := "A"
+	if kind == addressKindIPv6 {
+		recordType = "AAAA"
+	}
+	domain, subdomain := splitFQDN(fqdn)
+	if domain == "" {
+		emit("fail", "could not derive registered domain from hostname "+fqdn)
+		return errors.New("invalid hostname")
+	}
+	emit("meta", fmt.Sprintf("Checking porkbun %s record for %s under %s...", recordType, subdomainOrApex(subdomain), domain))
+	return ensureRecord(ctx, pb, recordType, domain, subdomain, address, fqdn, emit)
 }
 
 // validateHostname applies all hostname-shape rules in one place
@@ -491,31 +541,32 @@ func connectAndPrecheck(ctx context.Context, req Request, emit func(string, stri
 	return target, nil
 }
 
-// ensureARecord makes the porkbun A record set for fqdn match ip.
-// Three outcomes:
+// ensureRecord makes the porkbun record set of recordType for fqdn
+// match ip. Three outcomes:
 //   - no records → create one and emit ok
 //   - all existing records point at ip → emit ok (idempotent)
 //   - any record points elsewhere → emit fail and return, listing
-//     every conflicting IP. The operator fixes the typo / stale
-//     entry / multi-A round-robin manually before retrying
+//     every conflicting address. The operator fixes the typo /
+//     stale entry / multi-record round-robin manually before retrying
 //
 // We refuse to add a parallel record when one already conflicts
-// because porkbun allows multiple A records under the same name —
-// silently appending a "correct" one alongside a stale one would
-// round-robin traffic between the new box and a stranger.
-func ensureARecord(ctx context.Context, pb *porkbun.Client, domain, subdomain, ip, fqdn string, emit func(string, string)) error {
-	records, err := pb.FindARecords(ctx, domain, subdomain, fqdn)
+// because porkbun allows multiple records of the same type under
+// the same name — silently appending a "correct" one alongside a
+// stale one would round-robin traffic between the new box and a
+// stranger.
+func ensureRecord(ctx context.Context, pb *porkbun.Client, recordType, domain, subdomain, ip, fqdn string, emit func(string, string)) error {
+	records, err := pb.FindRecords(ctx, recordType, domain, subdomain, fqdn)
 	if err != nil {
 		emit("fail", err.Error())
 		return err
 	}
 	if len(records) == 0 {
 		emit("meta", "No record exists; creating...")
-		if err := pb.CreateARecord(ctx, domain, subdomain, ip, dnsTTLSeconds); err != nil {
+		if err := pb.CreateRecord(ctx, recordType, domain, subdomain, ip, dnsTTLSeconds); err != nil {
 			emit("fail", err.Error())
 			return err
 		}
-		emit("ok", fmt.Sprintf("created A record %s -> %s", fqdn, ip))
+		emit("ok", fmt.Sprintf("created %s record %s -> %s", recordType, fqdn, ip))
 		return nil
 	}
 	var conflicts []string
@@ -525,7 +576,7 @@ func ensureARecord(ctx context.Context, pb *porkbun.Client, domain, subdomain, i
 		}
 	}
 	if len(conflicts) > 0 {
-		msg := fmt.Sprintf("A record(s) exist pointing to %s, not %s — update via porkbun manually before retrying", strings.Join(conflicts, ", "), ip)
+		msg := fmt.Sprintf("%s record(s) exist pointing to %s, not %s — update via porkbun manually before retrying", recordType, strings.Join(conflicts, ", "), ip)
 		emit("fail", msg)
 		return errors.New(msg)
 	}

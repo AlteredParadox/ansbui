@@ -23,13 +23,24 @@ const REINSTALL_MATRIX = {
 };
 const REINSTALL_OS_LIST = Object.keys(REINSTALL_MATRIX);
 
-// IPV4_RE is the cheap shape check — four dot-separated runs of
-// digits. We deliberately don't enforce 0-255 per octet here
-// (S5843 flags that as too complex); the backend's net.ParseIP
-// is the canonical check and rejects 999.0.0.0 etc. The point of
-// this regex is to catch the common UX mistakes — pasted hostname,
-// IPv6 literal — fast, before submit.
-const IPV4_RE = /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/;
+// classifyAddress mirrors the backend's classifyAddress: returns
+// 'ipv4', 'ipv6', 'host', or '' for inputs that match none. Cheap
+// shape gates only — backend's net.ParseIP / RFC1035 charset is
+// the canonical check (S5843 keeps us out of per-octet validation
+// here). The shape disambiguator (`:` ⇒ must be IPv6-shaped,
+// all-digits-and-dots ⇒ must be IPv4-shaped) prevents typo'd IP
+// literals from silently passing as a hostname.
+const ADDR_HEXCOLON_RE = /^[0-9a-fA-F:.]+$/;
+const ADDR_DIGITDOT_RE = /^[0-9.]+$/;
+const ADDR_IPV4_RE = /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/;
+const ADDR_HOST_RE = /^[a-zA-Z0-9.\-]+$/;
+const classifyAddress = (s) => {
+  if (!s || s.length > 253) return '';
+  if (s.includes(':')) return ADDR_HEXCOLON_RE.test(s) ? 'ipv6' : '';
+  if (ADDR_DIGITDOT_RE.test(s)) return ADDR_IPV4_RE.test(s) ? 'ipv4' : '';
+  if (s.includes('.') && ADDR_HOST_RE.test(s)) return 'host';
+  return '';
+};
 
 function BootstrapView() {
   const [provider, setProvider] = useStateBoot('');
@@ -142,8 +153,8 @@ function BootstrapView() {
   // cognitive-complexity ceiling.
   const validateForm = () => {
     if (!provider.trim()) return { error: 'Provider is required.' };
-    if (!ip.trim()) return { error: 'IP address is required.' };
-    if (!IPV4_RE.test(ip.trim())) return { error: 'IP must be in dotted-quad form (e.g. 203.0.113.42) — hostnames and IPv6 are not supported.' };
+    if (!ip.trim()) return { error: 'Address is required.' };
+    if (!classifyAddress(ip.trim())) return { error: 'Address must be an IPv4 address (e.g. 203.0.113.42), IPv6 address (e.g. 2001:db8::1), or DNS hostname (e.g. host.example.com).' };
     const portNum = Number.parseInt(port, 10);
     const portOk = Number.isInteger(portNum) && portNum > 0 && portNum <= 65535;
     if (!portOk) return { error: 'SSH port must be a valid TCP port.' };
@@ -249,10 +260,10 @@ function BootstrapView() {
 
         <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 10, marginTop: 10 }}>
           <div>
-            <label htmlFor="boot-ip" className="cm-field-label">IP address</label>
-            <input id="boot-ip" className="input mono" placeholder="203.0.113.42" value={ip} onChange={e => setIp(e.target.value)} disabled={running}/>
+            <label htmlFor="boot-ip" className="cm-field-label">Address</label>
+            <input id="boot-ip" className="input mono" placeholder="203.0.113.42, 2001:db8::1, or host.example.com" value={ip} onChange={e => setIp(e.target.value)} disabled={running}/>
             <div className="mute" style={{ fontSize: 11, marginTop: 4 }}>
-              First contact — the target&rsquo;s SSH host key is not verified, so use a trusted network.
+              IPv4, IPv6, or DNS hostname. First contact &mdash; the target&rsquo;s SSH host key is not verified, so use a trusted network. Hostnames skip the porkbun DNS step.
             </div>
           </div>
           <div>

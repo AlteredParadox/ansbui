@@ -48,23 +48,26 @@ type Record struct {
 	TTL     string `json:"ttl"`
 }
 
-// FindARecords returns every A record whose Name exactly matches
-// fqdn. Two reasons it returns a slice rather than a single record:
+// FindRecords returns every record of recordType whose Name
+// exactly matches fqdn. recordType is the porkbun-supported value
+// ("A", "AAAA", etc.); v1 callers use only "A" and "AAAA".
 //
-//  1. The apex endpoint (`/dns/retrieveByNameType/<domain>/A`)
-//     returns every A record under the domain, not just the apex.
-//     Filtering by Name is the only way to isolate the apex from
-//     all the subdomains.
-//  2. Multi-A round-robin is legal — a given hostname may have
-//     several A records pointing at different IPs. The caller
+// Two reasons it returns a slice rather than a single record:
+//
+//  1. The apex endpoint (`/dns/retrieveByNameType/<domain>/<type>`)
+//     returns every record of that type under the domain, not just
+//     the apex. Filtering by Name is the only way to isolate the
+//     apex from all the subdomains.
+//  2. Multi-record round-robin is legal — a given hostname may have
+//     several records pointing at different addresses. The caller
 //     needs to inspect all of them to know whether ANY conflict
-//     with the IP they're about to bootstrap.
+//     with the address they're about to bootstrap.
 //
 // fqdn is the full hostname (e.g. "vps01.example.com" or just
 // "example.com" for the apex); subdomain is the prefix porkbun
 // uses for the URL path ("" for the apex).
-func (c *Client) FindARecords(ctx context.Context, domain, subdomain, fqdn string) ([]Record, error) {
-	path := fmt.Sprintf("/dns/retrieveByNameType/%s/A", domain)
+func (c *Client) FindRecords(ctx context.Context, recordType, domain, subdomain, fqdn string) ([]Record, error) {
+	path := fmt.Sprintf("/dns/retrieveByNameType/%s/%s", domain, recordType)
 	if subdomain != "" {
 		path += "/" + subdomain
 	}
@@ -93,16 +96,18 @@ func (c *Client) FindARecords(ctx context.Context, domain, subdomain, fqdn strin
 	return out, nil
 }
 
-// CreateARecord adds a new A record under domain pointing at ip.
-// `subdomain` "" creates the apex; otherwise the resulting record
-// is `<sub>.<domain>`. ttlSeconds is what Porkbun stores; 300 is
-// a sensible default for newly-bootstrapped hosts.
-func (c *Client) CreateARecord(ctx context.Context, domain, subdomain, ip string, ttlSeconds int) error {
+// CreateRecord adds a new record of recordType under domain
+// pointing at content. `subdomain` "" creates the apex; otherwise
+// the resulting record is `<sub>.<domain>`. ttlSeconds is what
+// Porkbun stores; 300 is a sensible default for newly-bootstrapped
+// hosts. Caller is responsible for matching content to recordType
+// (IPv4 literal for "A", IPv6 literal for "AAAA").
+func (c *Client) CreateRecord(ctx context.Context, recordType, domain, subdomain, content string, ttlSeconds int) error {
 	path := fmt.Sprintf("/dns/create/%s", domain)
 	payload := map[string]any{
 		"name":    subdomain,
-		"type":    "A",
-		"content": ip,
+		"type":    recordType,
+		"content": content,
 		"ttl":     fmt.Sprintf("%d", ttlSeconds),
 	}
 	body, err := c.post(ctx, path, payload)

@@ -111,24 +111,21 @@ func FuzzNormalizeProviderName(f *testing.F) {
 	})
 }
 
-// FuzzValidateIP must accept dotted-quad IPv4 (the four-octet
-// form) and reject everything else without panicking. We can't
-// enumerate "all valid IPv4" but we can check that the rejection
-// is total for shapes that obviously aren't IPv4 — the regex
-// inversion catches the easy cases.
-func FuzzValidateIP(f *testing.F) {
-	for _, seed := range []string{"", "1.2.3.4", "  1.2.3.4  ", "::1", "::ffff:1.2.3.4", "999.0.0.0", "1.2.3", "host.example.com"} {
+// FuzzValidateAddress must accept the three operator-supplied
+// shapes the bootstrap form supports (IPv4 literal, IPv6 literal,
+// DNS hostname) and reject everything else without panicking. We
+// can't enumerate every valid input but we can assert the
+// invariant that any accepted input classifies as one of the
+// three known kinds — i.e. validateAddress and classifyAddress
+// agree.
+func FuzzValidateAddress(f *testing.F) {
+	for _, seed := range []string{"", "1.2.3.4", "  1.2.3.4  ", "::1", "2001:db8::1", "::ffff:1.2.3.4", "999.0.0.0", "1.2.3", "host.example.com", "no.tab\there", "single"} {
 		f.Add(seed)
 	}
 	f.Fuzz(func(t *testing.T, s string) {
-		err := validateIP(s)
-		if err == nil {
-			// If accepted, the trimmed input must be a dotted-quad
-			// shape (four `.`-separated digit runs).
-			parts := strings.Split(strings.TrimSpace(s), ".")
-			if len(parts) != 4 {
-				t.Fatalf("validateIP(%q) accepted but not dotted-quad", s)
-			}
+		err := validateAddress(s)
+		if err == nil && classifyAddress(strings.TrimSpace(s)) == "" {
+			t.Fatalf("validateAddress(%q) accepted but classifyAddress returned empty", s)
 		}
 	})
 }
