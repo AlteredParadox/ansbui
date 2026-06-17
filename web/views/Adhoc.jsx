@@ -598,9 +598,9 @@ function renderAdhocAsPlaybook({ target, module, args, become }) {
 // <script type="text/babel"> sharing one global scope, and Babel caches
 // each String.raw tag in a colliding module-level `_templateObject` var
 // — this tag once poisoned Bootstrap.jsx's ADDR_OCTET regex. Building
-// the backslash from its char code avoids the tagged template and
+// the backslash from its code point avoids the tagged template and
 // leaves no escaped-backslash string literal for S7780 to flag.
-const YAML_QUOTE_ESCAPE = String.fromCharCode(92) + '"';
+const YAML_QUOTE_ESCAPE = String.fromCodePoint(92) + '"';
 
 function yamlScalar(v) {
   if (v == null) return '""';
