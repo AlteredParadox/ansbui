@@ -4,9 +4,12 @@ package api
 
 import (
 	"bufio"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log"
 	"net"
@@ -34,6 +37,11 @@ type Server struct {
 	// on geoip enrichment don't pay the dns-cache + http client cost.
 	geoOnce sync.Once
 	geo     *geoResolver
+
+	// staticETags memoises content-hash ETags for embedded web assets.
+	// The bundle is baked in at build time and never changes at runtime,
+	// so each hash is computed once. Keyed by asset path.
+	staticETags sync.Map
 }
 
 func (s *Server) geoResolver() *geoResolver {
@@ -157,21 +165,67 @@ func limitBody(max int64, h http.HandlerFunc) http.HandlerFunc {
 }
 
 func (s *Server) staticHandler() http.Handler {
-	fileServer := http.FileServer(http.FS(s.WebRoot))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Serve index.html at "/"; /api/ already handled above. Static
-		// files fall through to fileServer.
-		p := strings.TrimPrefix(r.URL.Path, "/")
-		if p == "" {
-			p = "index.html"
+		// Serve index.html at "/"; /api/ already handled above. Unknown
+		// paths (and bare directories) fall back to index.html so client
+		// routing survives deep links and refreshes.
+		name := strings.TrimPrefix(r.URL.Path, "/")
+		if name == "" {
+			name = "index.html"
 		}
-		if _, err := fs.Stat(s.WebRoot, p); err != nil {
-			if errors.Is(err, fs.ErrNotExist) {
-				r.URL.Path = "/index.html"
-			}
+		if fi, err := fs.Stat(s.WebRoot, name); err != nil || fi.IsDir() {
+			name = "index.html"
 		}
-		fileServer.ServeHTTP(w, r)
+		s.serveStaticFile(w, r, name)
 	})
+}
+
+// serveStaticFile writes an embedded asset with a content-hash ETag and
+// Cache-Control: no-cache. The bundle is baked in at build time, so the
+// hash is stable for the binary's life but changes whenever the file
+// does — browsers revalidate cheaply (304) and always pick up a fresh
+// build without a manual hard-refresh. embed.FS reports a zero modtime,
+// so before this every response had no validator and stale JS lingered
+// in browser caches (which is how a broken Bootstrap.jsx survived a fix).
+func (s *Server) serveStaticFile(w http.ResponseWriter, r *http.Request, name string) {
+	f, err := s.WebRoot.Open(name)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	defer func() { _ = f.Close() }()
+	rs, ok := f.(io.ReadSeeker)
+	if !ok {
+		// embed.FS files are seekable; this guards a future FS swap.
+		http.Error(w, "asset not seekable", http.StatusInternalServerError)
+		return
+	}
+	if etag := s.staticETag(name); etag != "" {
+		w.Header().Set("Etag", etag)
+		w.Header().Set("Cache-Control", "no-cache")
+	}
+	// Zero modtime skips Last-Modified (embed has none); the ETag is the
+	// validator. ServeContent matches If-None-Match against the ETag we
+	// set and returns 304 when it matches, and infers Content-Type from
+	// the name's extension.
+	http.ServeContent(w, r, name, time.Time{}, rs)
+}
+
+// staticETag returns a strong content-hash ETag for an embedded asset,
+// memoised since the bundle never changes at runtime. Empty string if
+// the asset can't be read (caller then serves without a validator).
+func (s *Server) staticETag(name string) string {
+	if v, ok := s.staticETags.Load(name); ok {
+		return v.(string)
+	}
+	data, err := fs.ReadFile(s.WebRoot, name)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(data)
+	etag := `"` + hex.EncodeToString(sum[:]) + `"`
+	s.staticETags.Store(name, etag)
+	return etag
 }
 
 func withLogging(h http.Handler) http.Handler {
