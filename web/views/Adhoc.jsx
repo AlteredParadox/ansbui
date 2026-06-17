@@ -608,12 +608,26 @@ function yamlScalar(v) {
   const s = String(v);
   if (/^(true|false|null|yes|no|\d+(\.\d+)?)$/i.test(s)) return `"${s}"`;
   if (/^[\w./@:-]+$/.test(s)) return s;
-  // Backslash is the escape char in a YAML double-quoted scalar, so it
-  // must be doubled BEFORE quotes are escaped (quote-escaping itself
-  // emits a backslash). Skipping this corrupts the saved playbook: a
-  // value like `C:\Users` becomes an invalid `\U` escape and a trailing
-  // backslash escapes the closing quote, swallowing the next line.
-  return `"${s.replaceAll(YAML_BACKSLASH, YAML_BACKSLASH + YAML_BACKSLASH).replaceAll('"', YAML_QUOTE_ESCAPE)}"`;
+  // Build a YAML double-quoted scalar, escaping everything that would
+  // otherwise corrupt the saved, executable playbook: backslash (the
+  // escape char) and quote must be escaped, and a literal newline/CR/tab
+  // or other C0 control char would break the scalar (a trailing
+  // backslash escapes the closing quote and swallows the next line; a
+  // bare newline folds). Scanning code points instead of using a
+  // control-char regex keeps eslint's no-control-regex happy and handles
+  // astral chars (emoji) correctly.
+  let out = '';
+  for (const ch of s) {
+    const code = ch.codePointAt(0);
+    if (ch === YAML_BACKSLASH) out += YAML_BACKSLASH + YAML_BACKSLASH;
+    else if (ch === '"') out += YAML_QUOTE_ESCAPE;
+    else if (ch === '\n') out += YAML_BACKSLASH + 'n';
+    else if (ch === '\r') out += YAML_BACKSLASH + 'r';
+    else if (ch === '\t') out += YAML_BACKSLASH + 't';
+    else if (code < 0x20 || code === 0x7f) out += YAML_BACKSLASH + 'x' + code.toString(16).padStart(2, '0');
+    else out += ch;
+  }
+  return `"${out}"`;
 }
 
 globalThis.AdhocView = AdhocView;
