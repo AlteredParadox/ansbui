@@ -600,14 +600,20 @@ function renderAdhocAsPlaybook({ target, module, args, become }) {
 // — this tag once poisoned Bootstrap.jsx's ADDR_OCTET regex. Building
 // the backslash from its code point avoids the tagged template and
 // leaves no escaped-backslash string literal for S7780 to flag.
-const YAML_QUOTE_ESCAPE = String.fromCodePoint(92) + '"';
+const YAML_BACKSLASH = String.fromCodePoint(92);
+const YAML_QUOTE_ESCAPE = YAML_BACKSLASH + '"';
 
 function yamlScalar(v) {
   if (v == null) return '""';
   const s = String(v);
   if (/^(true|false|null|yes|no|\d+(\.\d+)?)$/i.test(s)) return `"${s}"`;
   if (/^[\w./@:-]+$/.test(s)) return s;
-  return `"${s.replaceAll('"', YAML_QUOTE_ESCAPE)}"`;
+  // Backslash is the escape char in a YAML double-quoted scalar, so it
+  // must be doubled BEFORE quotes are escaped (quote-escaping itself
+  // emits a backslash). Skipping this corrupts the saved playbook: a
+  // value like `C:\Users` becomes an invalid `\U` escape and a trailing
+  // backslash escapes the closing quote, swallowing the next line.
+  return `"${s.replaceAll(YAML_BACKSLASH, YAML_BACKSLASH + YAML_BACKSLASH).replaceAll('"', YAML_QUOTE_ESCAPE)}"`;
 }
 
 globalThis.AdhocView = AdhocView;
