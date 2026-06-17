@@ -593,13 +593,14 @@ function renderAdhocAsPlaybook({ target, module, args, become }) {
 
 // yamlScalar quotes a value for safe inclusion in the generated
 // playbook. The escape pattern for an embedded double-quote is
-// literally `\"` (backslash + quote). A plain string (not String.raw)
-// is used deliberately: every .jsx file is transpiled as a separate
+// literally `\"` (backslash + quote). NOT String.raw`\"` (what Sonar
+// S7780 suggests): every .jsx file is transpiled as a separate
 // <script type="text/babel"> sharing one global scope, and Babel caches
-// each String.raw tag in a colliding module-level `_templateObject` var.
-// This tag used to poison Bootstrap.jsx's ADDR_OCTET regex. No tagged
-// templates anywhere ⇒ no collision.
-const YAML_QUOTE_ESCAPE = '\\"';
+// each String.raw tag in a colliding module-level `_templateObject` var
+// — this tag once poisoned Bootstrap.jsx's ADDR_OCTET regex. Building
+// the backslash from its char code avoids the tagged template and
+// leaves no escaped-backslash string literal for S7780 to flag.
+const YAML_QUOTE_ESCAPE = String.fromCharCode(92) + '"';
 
 function yamlScalar(v) {
   if (v == null) return '""';

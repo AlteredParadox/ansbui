@@ -36,18 +36,19 @@ const REINSTALL_OS_LIST = Object.keys(REINSTALL_MATRIX);
 // a label-shape gate (RFC1035: 1-63 bytes, no leading/trailing
 // '-', no empty labels) so a typo like `-bad.example.com` is
 // caught inline rather than via a backend 400.
-// NB: do NOT rewrite these as String.raw`...` tagged templates. Every
-// .jsx file is transpiled as a separate <script type="text/babel"> but
-// they execute in one shared global scope, and Babel caches each tagged
-// template in a module-level `_templateObject` var with an `||` guard.
-// Adhoc.jsx (loaded earlier) also has a String.raw tag, so its
-// _templateObject wins the guard and ADDR_OCTET silently resolves to
-// Adhoc's `\"` — turning this regex into ^X\.X\.X\.X$ and rejecting
-// every real IPv4. Plain strings / untagged template literals don't emit
-// _templateObject, so they're immune. Backslashes are escaped for the
-// string literal; the resulting pattern is identical (S5852-safe).
-const ADDR_OCTET = '(25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]\\d|\\d)';
-const ADDR_IPV4_RE = new RegExp(`^${ADDR_OCTET}\\.${ADDR_OCTET}\\.${ADDR_OCTET}\\.${ADDR_OCTET}$`);
+// NB: do NOT rewrite these as String.raw`...` tagged templates (what
+// Sonar S7780 suggests). Every .jsx loads as a separate
+// <script type="text/babel"> but they share one global scope, and Babel
+// caches each tagged template in a module-level `_templateObject` var
+// with an `||` guard — so a String.raw tag in any earlier-loaded file
+// poisons this one's value, corrupting the regex and rejecting every
+// real IPv4. Keeping the backslashes inside regex literals (reading
+// .source) sidesteps both the tagged-template collision and the
+// escaped-backslash string literals S7780 flags. Each octet branch is
+// fixed-width (no backtracking, S5852-safe).
+const ADDR_OCTET = /(25[0-5]|2[0-4]\d|1\d\d|[1-9]\d|\d)/.source;
+const ADDR_DOT = /\./.source;
+const ADDR_IPV4_RE = new RegExp(`^${ADDR_OCTET}${ADDR_DOT}${ADDR_OCTET}${ADDR_DOT}${ADDR_OCTET}${ADDR_DOT}${ADDR_OCTET}$`);
 const ADDR_IPV6_RE = /^(?=.*:.*:)[0-9a-fA-F:]+$/;
 const ADDR_DIGITDOT_RE = /^[0-9.]+$/;
 const ADDR_HOST_RE = /^[a-zA-Z0-9.-]+$/;
