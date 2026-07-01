@@ -2,7 +2,6 @@ package bootstrap
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -52,19 +51,31 @@ var reinstallOSMatrix = map[string][]string{
 // Updating both this SHA and reinstallScriptSHA256 below is a
 // deliberate, reviewable bump.
 //
+// CAVEAT: this pins only the orchestrator we hand to bash. At
+// install time reinstall.sh downloads its own helper scripts
+// (fix-eth-name.sh, initrd-network.sh, trans.sh, ...) from
+// `confhome`, which stays hardcoded to the upstream `main` branch
+// — its commit-pinning path is dead code (`if false && ...`). So
+// the code that actually configures the reinstalled system's
+// networking is NOT pinned and can change run-to-run. Bumping this
+// SHA reduces skew between the orchestrator and those helpers but
+// does not make a run reproducible; a genuinely brittle
+// network-adapter reinstall is most likely an upstream helper
+// issue, not a stale pin here.
+//
 // To roll: pick the new commit upstream, run
 //
 //	curl -fsSL https://raw.githubusercontent.com/bin456789/reinstall/<sha>/reinstall.sh | sha256sum
 //
 // and update both constants in the same commit.
-const reinstallScriptCommit = "190f36d473d7eda5f18c21f738ec0efbbab991e1"
+const reinstallScriptCommit = "52c5a29fba0cef139b1193eee1efe09879205f52"
 
 // reinstallScriptSHA256 is the expected sha256 of reinstall.sh at
 // reinstallScriptCommit. Verified on the target after download
 // before we hand it to bash. A mismatch aborts the run with a
 // clear error so the operator notices a tampered mirror or a
 // stale pin rather than silently running unverified code.
-const reinstallScriptSHA256 = "40c8772610d5d68c2de4e5ab4471141a35699396ce43f9d9b0d6f096035333f2"
+const reinstallScriptSHA256 = "c7931dfa847adc41c58b60eceb3237ef7b2eb676e38e00efeb9b7e29274b70bc"
 
 // reinstallScriptURL fetches by commit SHA so the file content is
 // content-addressed end-to-end. raw.githubusercontent.com serves
@@ -252,10 +263,21 @@ func waitForReinstallTarget(ctx context.Context, host string, port int, privKey 
 	var lastStatus string
 	for {
 		if time.Now().After(deadline) {
+			// The reinstall very likely succeeded — reinstall.sh's
+			// prep phase passed and the box rebooted — but the
+			// freshly-installed system never came back on the
+			// expected port. By far the most common cause is
+			// networking failing to come up in the new install
+			// (wrong NIC name after debian-installer's predictable
+			// renaming, or the auto-detected static config not
+			// matching the new interface), which is invisible over
+			// SSH. Point the operator at the provider console, the
+			// only place that failure is observable.
+			hint := fmt.Sprintf("check the provider's serial/VNC console: the reinstall likely completed but %s isn't reachable on :%d, usually because networking (NIC name / static config) didn't come up in the new install", expectedOS, port)
 			if lastStatus == "" {
-				return nil, errors.New("timeout waiting for SSH after 30 minutes")
+				return nil, fmt.Errorf("timeout after 30 minutes waiting for SSH on :%d — %s", port, hint)
 			}
-			return nil, fmt.Errorf("timeout waiting for target OS after 30 minutes: last status: %s", lastStatus)
+			return nil, fmt.Errorf("timeout after 30 minutes waiting for %s to come up (last status: %s) — %s", expectedOS, lastStatus, hint)
 		}
 		target, status := tryReinstallReady(ctx, host, port, privKey, expectedOS)
 		if target != nil {
