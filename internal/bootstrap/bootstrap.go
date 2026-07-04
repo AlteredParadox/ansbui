@@ -279,8 +279,14 @@ func validateProvider(p string) error {
 	if strings.TrimSpace(p) == "" {
 		return errors.New("provider is required")
 	}
-	if normalizeProviderName(p) == "" {
+	normalized := normalizeProviderName(p)
+	if normalized == "" {
 		return errors.New("provider name has no usable characters after normalization (allowed: letters, digits, underscore, hyphen, space)")
+	}
+	// Also enforced at the inventory-edit layer; rejecting here turns
+	// a mid-run failure into a form error before any side effects.
+	if isReservedGroupName(normalized) {
+		return fmt.Errorf("provider name %q collides with a reserved/umbrella ansible group — pick a different provider label", normalized)
 	}
 	return nil
 }
@@ -702,6 +708,16 @@ func ensureRecord(ctx context.Context, pb *porkbun.Client, recordType, domain, s
 	if subdomain != "" {
 		fqdn = subdomain + "." + domain
 	}
+	// Serialise the find→create window per record set. Two concurrent
+	// bootstraps of the same fqdn with different addresses would both
+	// see zero records and both create — assembling exactly the
+	// round-robin record set the conflict guard below exists to
+	// prevent. targetMu doesn't cover this (it keys on ip:port, and
+	// the racing runs have different IPs). Process-local is enough:
+	// ansbui is the only writer touching these records mid-bootstrap.
+	mu := lockTarget("dns\x00" + recordType + "\x00" + strings.ToLower(fqdn))
+	mu.Lock()
+	defer mu.Unlock()
 	// Canonicalize ip so a mixed-case IPv6 input (`2001:DB8::1`)
 	// round-trips against porkbun's lowercased read-back. Without
 	// this, every retry after a successful create would treat the

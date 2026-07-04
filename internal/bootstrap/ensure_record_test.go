@@ -2,11 +2,14 @@ package bootstrap
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/AlteredParadox/ansbui/internal/porkbun"
 )
@@ -60,5 +63,73 @@ func TestEnsureRecordIPv6CaseInsensitive(t *testing.T) {
 	}
 	if !sawOK {
 		t.Fatalf("expected an 'ok: ... already correct' emit, got %v", emits)
+	}
+}
+
+// TestEnsureRecordConcurrentSameFQDN locks in the TOCTOU fix: two
+// concurrent bootstraps of the same fqdn with different IPs must not
+// both pass the "no records" check and create a round-robin pair —
+// the exact state ensureRecord's conflict guard exists to prevent.
+// The fake porkbun widens the find→create window with a small sleep;
+// without the per-fqdn mutex this test ends with two A records.
+func TestEnsureRecordConcurrentSameFQDN(t *testing.T) {
+	var storeMu sync.Mutex
+	var contents []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/dns/retrieveByNameType/"):
+			storeMu.Lock()
+			rows := make([]string, len(contents))
+			for i, c := range contents {
+				rows[i] = fmt.Sprintf(`{"id":"%d","name":"vps.example.com","type":"A","content":"%s","ttl":"300"}`, i+1, c)
+			}
+			storeMu.Unlock()
+			time.Sleep(30 * time.Millisecond)
+			fmt.Fprintf(w, `{"status":"SUCCESS","records":[%s]}`, strings.Join(rows, ","))
+		case strings.HasPrefix(r.URL.Path, "/dns/create/"):
+			var req struct {
+				Content string `json:"content"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			storeMu.Lock()
+			contents = append(contents, req.Content)
+			storeMu.Unlock()
+			fmt.Fprint(w, `{"status":"SUCCESS","id":"1"}`)
+		default:
+			w.WriteHeader(http.StatusInternalServerError)
+			fmt.Fprint(w, `{"status":"ERROR","message":"unexpected call"}`)
+		}
+	}))
+	defer srv.Close()
+
+	origEndpoint := porkbun.Endpoint
+	porkbun.Endpoint = srv.URL
+	defer func() { porkbun.Endpoint = origEndpoint }()
+	pb := porkbun.New("test-key", "test-secret")
+
+	emit := func(string, string) {}
+	errs := make(chan error, 2)
+	for _, ip := range []string{"203.0.113.1", "203.0.113.2"} {
+		go func(ip string) {
+			errs <- ensureRecord(context.Background(), pb, "A", "example.com", "vps", ip, emit)
+		}(ip)
+	}
+	var failures int
+	for range 2 {
+		if err := <-errs; err != nil {
+			failures++
+			if !strings.Contains(err.Error(), "record(s) exist") {
+				t.Errorf("unexpected error text: %v", err)
+			}
+		}
+	}
+	storeMu.Lock()
+	defer storeMu.Unlock()
+	if len(contents) != 1 {
+		t.Fatalf("record store holds %d records %v — the find→create race created a round-robin set", len(contents), contents)
+	}
+	if failures != 1 {
+		t.Errorf("expected exactly one run to fail with a conflict, got %d failures", failures)
 	}
 }

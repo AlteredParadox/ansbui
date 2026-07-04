@@ -17,6 +17,24 @@ import (
 // a freebsd_servers branch, this is the place to dispatch on distro.
 var inventoryUmbrellaGroups = []string{"vps_servers", "debian_servers"}
 
+// reservedGroupNames are group names a provider must never take:
+// "all" and "ungrouped" are reserved by ansible itself (an inventory
+// that redefines them under children refuses to load, breaking every
+// fleet operation), and nesting an umbrella group inside itself
+// (`debian_servers` under `debian_servers`) is a duplicate-group
+// layout whose behaviour is parser-dependent.
+func isReservedGroupName(name string) bool {
+	if name == "all" || name == "ungrouped" {
+		return true
+	}
+	for _, g := range inventoryUmbrellaGroups {
+		if name == g {
+			return true
+		}
+	}
+	return false
+}
+
 // addHostToInventoryYAML returns a new inventory file content with
 // fqdn registered as a host inside `all.children.vps_servers.
 // children.debian_servers.children.<provider>.hosts`. Any node
@@ -24,56 +42,109 @@ var inventoryUmbrellaGroups = []string{"vps_servers", "debian_servers"}
 // and adjacent keys are preserved because we mutate yaml.Node trees,
 // not flat maps.
 //
-// Idempotent: if the host is already present, the original content
-// is returned unchanged.
+// Idempotent: if the host is already present anywhere under the
+// target provider's subtree, the original content is returned
+// unchanged. A host found under any other group is an error — the
+// same host in two groups is silent fan-out the bootstrap workflow
+// can't undo.
 func addHostToInventoryYAML(content []byte, provider, fqdn string) ([]byte, error) {
 	if provider == "" {
 		return nil, errors.New("provider name is required")
 	}
+	if isReservedGroupName(provider) {
+		return nil, fmt.Errorf("provider name %q collides with a reserved/umbrella ansible group — pick a different provider label", provider)
+	}
 	if fqdn == "" {
 		return nil, errors.New("fqdn is required")
 	}
-	root, top, err := parseInventoryRoot(content)
+	root, top, preamble, err := parseInventoryRoot(content)
 	if err != nil {
 		return nil, err
 	}
 	if err := guardNoLegacyTopLevel(top); err != nil {
 		return nil, err
 	}
-	childrenNode := ensureUmbrellaPath(top)
-	if err := guardNoCrossProviderDup(childrenNode, provider, fqdn); err != nil {
+	// Whole-tree duplicate scan before any mutation: covers hosts
+	// nested in provider subgroups, other umbrella branches, and
+	// top-level groups — not just direct provider siblings.
+	for i := 0; i+1 < len(top.Content); i += 2 {
+		path := hostGroupPath(top.Content[i].Value, top.Content[i+1], fqdn)
+		if path == nil {
+			continue
+		}
+		for _, g := range path {
+			if g == provider {
+				return content, nil // already ours, possibly in a subgroup
+			}
+		}
+		return nil, fmt.Errorf("host %q is already registered under group %q — remove it from there before re-bootstrapping under %q", fqdn, path[len(path)-1], provider)
+	}
+	childrenNode, err := ensureUmbrellaPath(top)
+	if err != nil {
 		return nil, err
 	}
-	providerNode := findOrCreateMapValue(childrenNode, provider)
-	hostsNode := findOrCreateMapValue(providerNode, "hosts")
-	if findMapValue(hostsNode, fqdn) != nil {
-		return content, nil
+	providerNode, err := findOrCreateMapValue(childrenNode, provider)
+	if err != nil {
+		return nil, err
+	}
+	hostsNode, err := findOrCreateMapValue(providerNode, "hosts")
+	if err != nil {
+		return nil, err
 	}
 	appendHostNode(hostsNode, fqdn)
-	return encodeInventory(root, content)
+	return encodeInventory(root, content, preamble)
+}
+
+// hostGroupPath returns the chain of group names (starting at name)
+// leading to the `hosts:` entry containing fqdn inside node's
+// subtree, or nil if the host isn't there.
+func hostGroupPath(name string, node *yaml.Node, fqdn string) []string {
+	if hosts := findMapValue(node, "hosts"); findMapValue(hosts, fqdn) != nil {
+		return []string{name}
+	}
+	children := findMapValue(node, "children")
+	if children == nil || children.Kind != yaml.MappingNode {
+		return nil
+	}
+	for i := 0; i+1 < len(children.Content); i += 2 {
+		if p := hostGroupPath(children.Content[i].Value, children.Content[i+1], fqdn); p != nil {
+			return append([]string{name}, p...)
+		}
+	}
+	return nil
 }
 
 // parseInventoryRoot turns operator-supplied inventory bytes into
-// a yaml.Node tree, returning both the document root (for re-encode)
-// and the top-level mapping (for findOrCreateMapValue walks). An
-// empty/invalid input yields an empty `all: {}` root rather than an
-// error so a fresh-host bootstrap into a never-existed inventory
-// still works.
-func parseInventoryRoot(content []byte) (*yaml.Node, *yaml.Node, error) {
-	var root yaml.Node
+// a yaml.Node tree, returning the document root (for re-encode),
+// the top-level mapping (for findOrCreateMapValue walks), and a
+// preamble to re-prepend at encode time. An empty input yields an
+// empty `all: {}` root rather than an error so a fresh-host
+// bootstrap into a never-existed inventory still works.
+//
+// The preamble covers the comment-only file: it parses to an empty
+// document, so the node tree we build from scratch would silently
+// drop the operator's comments on re-encode. We keep the original
+// text and glue it back on top.
+func parseInventoryRoot(content []byte) (root, top *yaml.Node, preamble string, err error) {
+	var doc yaml.Node
 	if len(bytes.TrimSpace(content)) == 0 {
-		root = emptyInventoryRoot()
-	} else if err := yaml.Unmarshal(content, &root); err != nil {
-		return nil, nil, fmt.Errorf("parse inventory yaml: %w", err)
+		doc = emptyInventoryRoot()
+	} else if err := yaml.Unmarshal(content, &doc); err != nil {
+		return nil, nil, "", fmt.Errorf("parse inventory yaml: %w", err)
 	}
-	if root.Kind != yaml.DocumentNode || len(root.Content) == 0 {
-		root = emptyInventoryRoot()
+	if doc.Kind != yaml.DocumentNode || len(doc.Content) == 0 {
+		// Parsed but produced no document node: comments and/or
+		// whitespace only. Preserve the original text verbatim.
+		if len(bytes.TrimSpace(content)) > 0 {
+			preamble = strings.TrimRight(string(content), "\n") + "\n"
+		}
+		doc = emptyInventoryRoot()
 	}
-	top := root.Content[0]
+	top = doc.Content[0]
 	if top.Kind != yaml.MappingNode {
-		return nil, nil, errors.New("inventory top-level must be a YAML mapping (e.g. `all:`)")
+		return nil, nil, "", errors.New("inventory top-level must be a YAML mapping (e.g. `all:`)")
 	}
-	return &root, top, nil
+	return &doc, top, preamble, nil
 }
 
 // guardNoLegacyTopLevel refuses to bifurcate if any umbrella group
@@ -92,37 +163,24 @@ func guardNoLegacyTopLevel(top *yaml.Node) error {
 
 // ensureUmbrellaPath walks `all.children.<umbrella>...children` in
 // the YAML tree, creating any missing rungs, and returns the leaf
-// `children` map where provider groups live as keys.
-func ensureUmbrellaPath(top *yaml.Node) *yaml.Node {
-	cur := findOrCreateMapValue(top, "all")
+// `children` map where provider groups live as keys. Errors if a
+// node on the path exists but isn't a mapping (e.g. a `children:`
+// holding a sequence or a scalar) — rewriting it would destroy the
+// operator's data.
+func ensureUmbrellaPath(top *yaml.Node) (*yaml.Node, error) {
+	cur, err := findOrCreateMapValue(top, "all")
+	if err != nil {
+		return nil, err
+	}
 	for _, group := range inventoryUmbrellaGroups {
-		cur = findOrCreateMapValue(cur, "children")
-		cur = findOrCreateMapValue(cur, group)
+		if cur, err = findOrCreateMapValue(cur, "children"); err != nil {
+			return nil, err
+		}
+		if cur, err = findOrCreateMapValue(cur, group); err != nil {
+			return nil, err
+		}
 	}
 	return findOrCreateMapValue(cur, "children")
-}
-
-// guardNoCrossProviderDup refuses to register fqdn under provider X
-// if it already lives under provider Y. Otherwise an operator who
-// retries with a different provider after a transient porkbun
-// failure ends up with the host listed in two provider groups, and
-// ansible-inventory reports it as a member of both — silent fan-out
-// the bootstrap workflow can't undo.
-func guardNoCrossProviderDup(childrenNode *yaml.Node, provider, fqdn string) error {
-	if childrenNode.Kind != yaml.MappingNode {
-		return nil
-	}
-	for i := 0; i+1 < len(childrenNode.Content); i += 2 {
-		siblingProvider := childrenNode.Content[i].Value
-		if siblingProvider == provider {
-			continue
-		}
-		siblingHosts := findMapValue(childrenNode.Content[i+1], "hosts")
-		if findMapValue(siblingHosts, fqdn) != nil {
-			return fmt.Errorf("host %q is already registered under provider %q — remove it from there before re-bootstrapping under %q", fqdn, siblingProvider, provider)
-		}
-	}
-	return nil
 }
 
 // appendHostNode adds fqdn as a `<fqdn>:` (bare-key, no value) entry
@@ -139,8 +197,11 @@ func appendHostNode(hostsNode *yaml.Node, fqdn string) {
 // operator's original indent so a re-encode with a hardcoded
 // 2-space indent against a 4-space file doesn't reflow every
 // nested key (churn-heavy diff, breaks downstream tooling).
-func encodeInventory(root *yaml.Node, content []byte) ([]byte, error) {
+// preamble (the original text of a comment-only file, or "") is
+// glued back on top so those comments survive the rewrite.
+func encodeInventory(root *yaml.Node, content []byte, preamble string) ([]byte, error) {
 	var buf bytes.Buffer
+	buf.WriteString(preamble)
 	enc := yaml.NewEncoder(&buf)
 	enc.SetIndent(detectYAMLIndent(content))
 	if err := enc.Encode(root); err != nil {
@@ -157,10 +218,12 @@ func encodeInventory(root *yaml.Node, content []byte) ([]byte, error) {
 // file is empty, has no nested structure yet, or uses tabs (yaml
 // rejects tabs anyway, so a tab-using file is already bad input).
 // Caps at 8 so a freak first-indented-line of `      ` doesn't
-// produce a 6-space-indented re-render.
+// produce a 6-space-indented re-render. Whitespace-only lines are
+// skipped — trailing spaces on a blank line aren't indentation.
 func detectYAMLIndent(content []byte) int {
 	for _, line := range strings.Split(string(content), "\n") {
-		if line == "" || strings.HasPrefix(strings.TrimSpace(line), "#") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
 			continue
 		}
 		var n int
@@ -210,24 +273,30 @@ func findMapValue(m *yaml.Node, key string) *yaml.Node {
 // creating an empty mapping under that key if it didn't exist. The
 // host's value lives at the leaves of the tree (`hosts: { fqdn: }`)
 // — every intermediate level is a mapping.
-func findOrCreateMapValue(m *yaml.Node, key string) *yaml.Node {
+//
+// A key that exists but holds something we can't hang children off —
+// a sequence, a non-empty scalar, an alias — is an error: silently
+// rewriting it to a mapping (the old behaviour) destroyed whatever
+// the operator had there.
+func findOrCreateMapValue(m *yaml.Node, key string) (*yaml.Node, error) {
 	if v := findMapValue(m, key); v != nil {
-		// If the existing slot is a !!null (e.g. `web:` with no body)
-		// we have to upgrade it to a mapping in place so we can hang
-		// children off it.
+		// A !!null scalar (e.g. `web:` with no body) upgrades to a
+		// mapping in place so we can hang children off it.
 		if v.Kind == yaml.ScalarNode && (v.Tag == "!!null" || v.Value == "") {
 			v.Kind = yaml.MappingNode
 			v.Tag = "!!map"
 			v.Value = ""
 		}
-		return v
+		if v.Kind != yaml.MappingNode {
+			return nil, fmt.Errorf("inventory key %q exists but is not a mapping — fix the file by hand before bootstrap (refusing to overwrite it)", key)
+		}
+		return v, nil
 	}
 	if m.Kind != yaml.MappingNode {
-		m.Kind = yaml.MappingNode
-		m.Tag = "!!map"
+		return nil, fmt.Errorf("inventory node holding %q is not a mapping — fix the file by hand before bootstrap (refusing to overwrite it)", key)
 	}
 	keyNode := &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: key}
 	valNode := &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
 	m.Content = append(m.Content, keyNode, valNode)
-	return valNode
+	return valNode, nil
 }
