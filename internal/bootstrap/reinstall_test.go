@@ -18,7 +18,10 @@ func probeOutWithLog(osRelease, sysState, machineID, logLine string) string {
 	return osRelease + reinstallProbeMarker + "\n" + sysState + "\n" + reinstallProbeMarker + "\n" + machineID + "\n" + reinstallProbeMarker + "\n" + logLine + "\n"
 }
 
-const debian13Release = "PRETTY_NAME=\"Debian GNU/Linux 13 (trixie)\"\nID=debian\nVERSION_ID=\"13\"\n"
+const (
+	debian13Release = "PRETTY_NAME=\"Debian GNU/Linux 13 (trixie)\"\nID=debian\nVERSION_ID=\"13\"\n"
+	alpineRelease   = "ID=alpine\n"
+)
 
 func TestEvalReinstallProbe(t *testing.T) {
 	probe := reinstallReadyProbe{
@@ -47,14 +50,14 @@ func TestEvalReinstallProbe(t *testing.T) {
 		},
 		{
 			name:       "installer live env",
-			out:        probeOut("ID=alpine\n", "", "cccc3333"),
+			out:        probeOut(alpineRelease, "", "cccc3333"),
 			probe:      probe,
 			wantReady:  false,
 			wantStatus: "installer",
 		},
 		{
 			name:       "installer env surfaces log tail",
-			out:        probeOutWithLog("ID=alpine\n", "", "cccc3333", "\x1b[32mDownloading cloud image 43%\x1b[0m"),
+			out:        probeOutWithLog(alpineRelease, "", "cccc3333", "\x1b[32mDownloading cloud image 43%\x1b[0m"),
 			probe:      probe,
 			wantReady:  false,
 			wantStatus: "installer log: Downloading cloud image 43%",
@@ -166,7 +169,6 @@ func installerProbeOut(osRelease, holdCount, errCount, logLine string) string {
 }
 
 func TestEvalInstallerProbe(t *testing.T) {
-	const alpineRelease = "ID=alpine\n"
 	cases := []struct {
 		name       string
 		out        string
