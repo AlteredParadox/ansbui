@@ -56,6 +56,13 @@ func NewClient() *Client {
 	}
 }
 
+// transientErrTTL is how long a transient failure (context
+// cancellation, network error, upstream 5xx / rate limit) stays
+// cached. Long enough that a burst of inventory reloads doesn't
+// hammer a struggling upstream, short enough that one aborted
+// browser request can't blank a host's Region column for a day.
+const transientErrTTL = 30 * time.Second
+
 // Lookup returns the cached Result for ip, querying upstream on a
 // miss. A nil Result + error is returned for private / loopback /
 // CGNAT addresses; callers can ignore those errors and move on.
@@ -71,8 +78,26 @@ func (c *Client) Lookup(ctx context.Context, ip string) (Result, error) {
 		return cached.result, cached.err
 	}
 	result, err := c.fetch(ctx, ip)
-	c.set(ip, cacheEntry{result: result, err: err, expiry: time.Now().Add(c.ttl)})
+	c.set(ip, cacheEntry{result: result, err: err, expiry: time.Now().Add(c.entryTTL(err))})
 	return result, err
+}
+
+// entryTTL picks the cache lifetime for a fetch outcome. Successes
+// and permanent verdicts (bogon, 4xx other than timeout/rate-limit)
+// keep the full TTL; everything else — including the context
+// cancellation from a browser aborting the inventory request
+// mid-enrichment — is transient and must not poison the cache.
+func (c *Client) entryTTL(err error) time.Duration {
+	if err == nil || errors.Is(err, errBogon) {
+		return c.ttl
+	}
+	var status statusError
+	if errors.As(err, &status) &&
+		status != http.StatusRequestTimeout && status != http.StatusTooManyRequests &&
+		status < http.StatusInternalServerError {
+		return c.ttl
+	}
+	return transientErrTTL
 }
 
 func (c *Client) get(ip string) (cacheEntry, bool) {
@@ -99,6 +124,14 @@ type ipinfoResponse struct {
 	Bogon   bool   `json:"bogon,omitempty"`
 }
 
+// errBogon and statusError are sentinel / typed errors so entryTTL
+// can tell permanent verdicts apart from transient failures.
+var errBogon = errors.New("ipinfo flagged this address as bogon")
+
+type statusError int
+
+func (s statusError) Error() string { return fmt.Sprintf("ipinfo %d", int(s)) }
+
 func (c *Client) fetch(ctx context.Context, ip string) (Result, error) {
 	url := fmt.Sprintf("%s/%s/json", c.endpoint, ip)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -112,14 +145,14 @@ func (c *Client) fetch(ctx context.Context, ip string) (Result, error) {
 	}
 	defer res.Body.Close()
 	if res.StatusCode >= 400 {
-		return Result{}, fmt.Errorf("ipinfo %d", res.StatusCode)
+		return Result{}, statusError(res.StatusCode)
 	}
 	var body ipinfoResponse
 	if err := json.NewDecoder(res.Body).Decode(&body); err != nil {
 		return Result{}, fmt.Errorf("decode ipinfo: %w", err)
 	}
 	if body.Bogon {
-		return Result{}, errors.New("ipinfo flagged this address as bogon")
+		return Result{}, errBogon
 	}
 	return Result{
 		IP:      body.IP,

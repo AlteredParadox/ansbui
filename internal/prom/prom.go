@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -296,15 +297,21 @@ func (c *Client) fetch(ctx context.Context, q string) (*promResp, error) {
 
 // hostFromLabel extracts the host portion of the configured label,
 // stripping the `:port` suffix commonly seen on node_exporter scrapes.
+// net.SplitHostPort handles bracketed IPv6 ("[2001:db8::1]:9100");
+// the old strip-at-first-colon mangled those to "[2001", colliding
+// every v6 host onto one key so hosts silently overwrote each other.
 func hostFromLabel(labels map[string]string, key string) string {
 	raw := labels[key]
 	if raw == "" {
 		return ""
 	}
-	if idx := strings.IndexByte(raw, ':'); idx > 0 {
-		raw = raw[:idx]
+	if h, _, err := net.SplitHostPort(raw); err == nil {
+		return h
 	}
-	return raw
+	// No parseable port: a bare hostname, a bare IPv6 literal (colons
+	// but no port), or a bracketed literal without a port — return the
+	// address itself, brackets trimmed.
+	return strings.Trim(raw, "[]")
 }
 
 func clampPercent(v float64) int {

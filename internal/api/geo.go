@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"net"
 	"sync"
 	"time"
@@ -102,17 +103,28 @@ func (g *geoResolver) resolvePublic(ctx context.Context, name string) string {
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 	addrs, err := net.DefaultResolver.LookupIPAddr(ctx, name)
+	if err != nil && !isNXDomain(err) {
+		// Transient resolver failure (timeout, SERVFAIL, the browser
+		// aborting the inventory request mid-enrichment): don't cache
+		// an empty answer for 24h — the next reload should retry.
+		return ""
+	}
 	pub := ""
-	if err == nil {
-		for _, a := range addrs {
-			if geoip.IsPublic(a.IP) {
-				pub = a.IP.String()
-				break
-			}
+	for _, a := range addrs {
+		if geoip.IsPublic(a.IP) {
+			pub = a.IP.String()
+			break
 		}
 	}
 	g.dnsMu.Lock()
 	g.dns[name] = dnsCacheEntry2{ip: pub, expiry: time.Now().Add(24 * time.Hour)}
 	g.dnsMu.Unlock()
 	return pub
+}
+
+// isNXDomain reports whether err is an authoritative "name does not
+// exist" — a verdict worth caching, unlike transient lookup failures.
+func isNXDomain(err error) bool {
+	var dnsErr *net.DNSError
+	return errors.As(err, &dnsErr) && dnsErr.IsNotFound
 }
