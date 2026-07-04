@@ -96,6 +96,7 @@ internal/ansible/       # inventory / playbook / adhoc / runs
 internal/prom/          # prometheus query client
 internal/api/           # HTTP + WebSocket handlers
 web/                    # static bundle (embedded)
+.claude/                # Claude Code project config (see CI)
 ```
 
 ## Security posture
@@ -112,6 +113,8 @@ web/                    # static bundle (embedded)
 ## CI
 
 `.gitea/workflows/ci.yml` runs build + vet + test, and kicks off a SonarQube scan using `SONAR_TOKEN` and `SONAR_HOST_URL` from the repo secrets. The Sonar project key is `ansbui`.
+
+The repo also ships a Claude Code hook (`.claude/settings.json` + `.claude/hooks/post-edit-lint.sh`): if you open this project in [Claude Code](https://claude.com/claude-code), every file it edits is linted immediately (`golangci-lint` for Go, `eslint` for JS/JSX) so issues surface before commit. It's a plain, inspectable shell script and a silent no-op when those tools aren't installed — but note it does auto-run on edits, so review it if that's a concern. It has no effect if you use a different editor.
 
 ## SonarQube hotspot notes
 
