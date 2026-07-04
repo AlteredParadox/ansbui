@@ -613,43 +613,58 @@ func osReleaseField(osRelease, key string) string {
 // (carriage-return progress spam), and the result is capped at 160
 // runes so a pathological line can't flood the event stream.
 func sanitizeLogLine(s string) string {
-	const (
-		stText = iota
-		stEsc  // just consumed ESC
-		stCSI  // inside ESC[ ... sequence
-	)
-	var b strings.Builder
-	state := stText
-	for _, r := range strings.TrimSpace(s) {
-		switch state {
-		case stEsc:
-			if r == '[' {
-				state = stCSI // CSI: consume until final byte
-			} else {
-				state = stText // two-char escape: drop and move on
-			}
-		case stCSI:
-			// CSI sequences end on a final byte in @-~ (0x40-0x7e);
-			// parameter/intermediate bytes (0x20-0x3f) continue it.
-			if r >= '@' && r <= '~' {
-				state = stText
-			}
-		default:
-			switch {
-			case r == 0x1b:
-				state = stEsc
-			case r >= 32 || r == '\t':
-				b.WriteRune(r)
-			}
-		}
-	}
-	out := strings.TrimSpace(b.String())
+	out := strings.TrimSpace(stripANSI(s))
 	const maxRunes = 160
-	runes := []rune(out)
-	if len(runes) > maxRunes {
+	if runes := []rune(out); len(runes) > maxRunes {
 		out = string(runes[:maxRunes]) + "…"
 	}
 	return out
+}
+
+// States for stripANSI's escape-sequence scanner.
+const (
+	ansiText = iota
+	ansiEsc  // just consumed ESC
+	ansiCSI  // inside an ESC[ ... sequence
+)
+
+// stripANSI drops ANSI escape sequences and non-printing control
+// characters, keeping tabs and everything from space upward.
+func stripANSI(s string) string {
+	var b strings.Builder
+	state := ansiText
+	for _, r := range s {
+		var keep bool
+		state, keep = ansiStep(state, r)
+		if keep {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+// ansiStep advances the scanner by one rune, returning the next
+// state and whether the rune is printable text to keep.
+func ansiStep(state int, r rune) (int, bool) {
+	switch state {
+	case ansiEsc:
+		if r == '[' {
+			return ansiCSI, false // CSI: consume until final byte
+		}
+		return ansiText, false // two-char escape: drop and move on
+	case ansiCSI:
+		// CSI sequences end on a final byte in @-~ (0x40-0x7e);
+		// parameter/intermediate bytes (0x20-0x3f) continue them.
+		if r >= '@' && r <= '~' {
+			return ansiText, false
+		}
+		return ansiCSI, false
+	default:
+		if r == 0x1b {
+			return ansiEsc, false
+		}
+		return ansiText, r >= 32 || r == '\t'
+	}
 }
 
 // startHeartbeat fires a "still running" emit every 30s until the
