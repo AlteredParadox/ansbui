@@ -7,10 +7,14 @@ import (
 )
 
 func TestLockInventoryKeying(t *testing.T) {
-	a := config.Server{ID: "srv-a", WorkDir: "/opt/ansible", Inventory: "hosts.yml"}
-	sameAsA := config.Server{ID: "srv-a", WorkDir: "/opt/ansible", Inventory: "hosts.yml"}
-	otherServer := config.Server{ID: "srv-b", WorkDir: "/opt/ansible", Inventory: "hosts.yml"}
-	otherFile := config.Server{ID: "srv-a", WorkDir: "/opt/ansible", Inventory: "staging.yml"}
+	const (
+		workDir = "/opt/ansible"
+		mainInv = "hosts.yml"
+	)
+	a := config.Server{ID: "srv-a", WorkDir: workDir, Inventory: mainInv}
+	sameAsA := config.Server{ID: "srv-a", WorkDir: workDir, Inventory: mainInv}
+	otherServer := config.Server{ID: "srv-b", WorkDir: workDir, Inventory: mainInv}
+	otherFile := config.Server{ID: "srv-a", WorkDir: workDir, Inventory: "staging.yml"}
 
 	if lockInventory(a) != lockInventory(sameAsA) {
 		t.Error("same server + inventory must share one mutex")

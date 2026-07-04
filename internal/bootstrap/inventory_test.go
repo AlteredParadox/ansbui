@@ -7,6 +7,11 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+const (
+	existingHost = "web1.example.com"
+	newHost      = "x.example.com"
+)
+
 const inventoryBase = `all:
   children:
     vps_servers:
@@ -42,7 +47,7 @@ func TestAddHostCreatesUmbrellaPath(t *testing.T) {
 }
 
 func TestAddHostIdempotentDirect(t *testing.T) {
-	out, err := addHostToInventoryYAML([]byte(inventoryBase), "hetzner", "web1.example.com")
+	out, err := addHostToInventoryYAML([]byte(inventoryBase), "hetzner", existingHost)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -64,7 +69,7 @@ func TestAddHostIdempotentNestedSubgroup(t *testing.T) {
                   hosts:
                     web1.example.com:
 `
-	out, err := addHostToInventoryYAML([]byte(content), "hetzner", "web1.example.com")
+	out, err := addHostToInventoryYAML([]byte(content), "hetzner", existingHost)
 	if err != nil {
 		t.Fatalf("host nested in own provider subgroup must be idempotent, got: %v", err)
 	}
@@ -74,7 +79,7 @@ func TestAddHostIdempotentNestedSubgroup(t *testing.T) {
 }
 
 func TestAddHostCrossProviderDirect(t *testing.T) {
-	if _, err := addHostToInventoryYAML([]byte(inventoryBase), "ovh", "web1.example.com"); err == nil {
+	if _, err := addHostToInventoryYAML([]byte(inventoryBase), "ovh", existingHost); err == nil {
 		t.Fatal("expected cross-provider duplicate error")
 	}
 }
@@ -92,7 +97,7 @@ func TestAddHostCrossProviderNestedSubgroup(t *testing.T) {
                   hosts:
                     web1.example.com:
 `
-	_, err := addHostToInventoryYAML([]byte(content), "ovh", "web1.example.com")
+	_, err := addHostToInventoryYAML([]byte(content), "ovh", existingHost)
 	if err == nil {
 		t.Fatal("expected duplicate error for host in another provider's nested subgroup (old check missed this)")
 	}
@@ -106,14 +111,14 @@ func TestAddHostDupInOtherTopLevelGroup(t *testing.T) {
   hosts:
     web1.example.com:
 `
-	if _, err := addHostToInventoryYAML([]byte(content), "ovh", "web1.example.com"); err == nil {
+	if _, err := addHostToInventoryYAML([]byte(content), "ovh", existingHost); err == nil {
 		t.Fatal("expected duplicate error for host under all.hosts")
 	}
 }
 
 func TestAddHostReservedProviderNames(t *testing.T) {
 	for _, provider := range []string{"all", "ungrouped", "vps_servers", "debian_servers"} {
-		if _, err := addHostToInventoryYAML([]byte(inventoryBase), provider, "x.example.com"); err == nil {
+		if _, err := addHostToInventoryYAML([]byte(inventoryBase), provider, newHost); err == nil {
 			t.Errorf("provider %q must be rejected as reserved", provider)
 		}
 	}
@@ -126,7 +131,7 @@ func TestAddHostRefusesNonMappingNodes(t *testing.T) {
 		"sequence children": "all:\n  children:\n    - vps_servers\n",
 	}
 	for name, content := range cases {
-		if _, err := addHostToInventoryYAML([]byte(content), "hetzner", "x.example.com"); err == nil {
+		if _, err := addHostToInventoryYAML([]byte(content), "hetzner", newHost); err == nil {
 			t.Errorf("%s: expected error instead of silently rewriting the node\ninput:\n%s", name, content)
 		}
 	}
@@ -134,11 +139,11 @@ func TestAddHostRefusesNonMappingNodes(t *testing.T) {
 
 func TestAddHostPreservesCommentOnlyFile(t *testing.T) {
 	content := "# fleet inventory\n# managed with care\n"
-	out := mustAdd(t, content, "hetzner", "x.example.com")
+	out := mustAdd(t, content, "hetzner", newHost)
 	if !strings.Contains(out, "# fleet inventory") || !strings.Contains(out, "# managed with care") {
 		t.Errorf("comments from a comment-only file were dropped:\n%s", out)
 	}
-	if !strings.Contains(out, "x.example.com") {
+	if !strings.Contains(out, newHost) {
 		t.Errorf("host missing from output:\n%s", out)
 	}
 }
@@ -151,8 +156,8 @@ func TestDetectYAMLIndentSkipsWhitespaceOnlyLines(t *testing.T) {
 }
 
 func TestAddHostUpgradesBareNullKeys(t *testing.T) {
-	out := mustAdd(t, "all:\n", "hetzner", "x.example.com")
-	if !strings.Contains(out, "x.example.com") {
+	out := mustAdd(t, "all:\n", "hetzner", newHost)
+	if !strings.Contains(out, newHost) {
 		t.Errorf("bare `all:` should upgrade to a mapping:\n%s", out)
 	}
 }

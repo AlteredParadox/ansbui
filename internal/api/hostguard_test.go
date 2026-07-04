@@ -6,13 +6,20 @@ import (
 	"testing"
 )
 
+// Shared endpoints for the guard tests: the server's own loopback
+// authority and the attacker's rebindable name.
+const (
+	selfHost = "127.0.0.1:8787"
+	evilHost = "evil.example:8787"
+)
+
 func TestHostAllowed(t *testing.T) {
 	allowed := allowedHostnames("ansbui.internal:8787")
 	cases := []struct {
 		host string
 		want bool
 	}{
-		{"127.0.0.1:8787", true},
+		{selfHost, true},
 		{"127.0.0.1", true},
 		{"[::1]:8787", true},
 		{"::1", true},
@@ -23,7 +30,7 @@ func TestHostAllowed(t *testing.T) {
 		{"ansbui.localhost:8787", true},
 		{"ansbui.internal:8787", true}, // the -addr hostname
 		{"ANSBUI.Internal:8787", true},
-		{"evil.example:8787", false}, // rebindable DNS name
+		{evilHost, false}, // rebindable DNS name
 		{"evil.example", false},
 		{"localhost.evil.example:8787", false},
 		{"", false},
@@ -37,7 +44,7 @@ func TestHostAllowed(t *testing.T) {
 
 func TestAllowedHostnamesEnv(t *testing.T) {
 	t.Setenv(allowedHostsEnv, "Proxy.Example.com, other.example.com ,")
-	allowed := allowedHostnames("127.0.0.1:8787") // IP bound host: not added
+	allowed := allowedHostnames(selfHost) // IP bound host: not added
 	for _, h := range []string{"proxy.example.com:443", "other.example.com"} {
 		if !hostAllowed(h, allowed) {
 			t.Errorf("env-allowed host %q rejected", h)
@@ -54,7 +61,7 @@ func TestAllowedHostnamesEnv(t *testing.T) {
 // stop them.
 func TestOriginGuardDNSRebinding(t *testing.T) {
 	ok := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
-	guard := withOriginGuard(ok, allowedHostnames("127.0.0.1:8787"))
+	guard := withOriginGuard(ok, allowedHostnames(selfHost))
 
 	req := func(method, path, host, origin string) int {
 		r := httptest.NewRequest(method, path, nil)
@@ -68,31 +75,31 @@ func TestOriginGuardDNSRebinding(t *testing.T) {
 	}
 
 	// Rebound POST: browser sends Origin, and it MATCHES Host.
-	if code := req(http.MethodPost, "/api/bootstrap/start", "evil.example:8787", "http://evil.example:8787"); code != http.StatusForbidden {
+	if code := req(http.MethodPost, "/api/bootstrap/start", evilHost, "http://evil.example:8787"); code != http.StatusForbidden {
 		t.Errorf("rebound POST passed with %d", code)
 	}
 	// Rebound same-origin GET: no Origin header at all.
-	if code := req(http.MethodGet, "/api/bootstrap/jobs", "evil.example:8787", ""); code != http.StatusForbidden {
+	if code := req(http.MethodGet, "/api/bootstrap/jobs", evilHost, ""); code != http.StatusForbidden {
 		t.Errorf("rebound GET passed with %d", code)
 	}
 	// Rebound WS upgrade paths are Host-guarded too.
-	if code := req(http.MethodGet, "/api/adhoc/stream", "evil.example:8787", "http://evil.example:8787"); code != http.StatusForbidden {
+	if code := req(http.MethodGet, "/api/adhoc/stream", evilHost, "http://evil.example:8787"); code != http.StatusForbidden {
 		t.Errorf("rebound WS upgrade passed with %d", code)
 	}
 
 	// Legitimate traffic keeps working.
-	if code := req(http.MethodPost, "/api/bootstrap/start", "127.0.0.1:8787", "http://127.0.0.1:8787"); code != http.StatusNoContent {
+	if code := req(http.MethodPost, "/api/bootstrap/start", selfHost, "http://127.0.0.1:8787"); code != http.StatusNoContent {
 		t.Errorf("loopback POST rejected with %d", code)
 	}
 	if code := req(http.MethodPost, "/api/settings", "localhost:8787", ""); code != http.StatusNoContent {
 		t.Errorf("curl-style POST (no Origin) rejected with %d", code)
 	}
 	// Plain cross-origin CSRF still caught by the Origin comparison.
-	if code := req(http.MethodPost, "/api/settings", "127.0.0.1:8787", "http://evil.example"); code != http.StatusForbidden {
+	if code := req(http.MethodPost, "/api/settings", selfHost, "http://evil.example"); code != http.StatusForbidden {
 		t.Errorf("cross-origin POST passed with %d", code)
 	}
 	// Unguarded reads stay open by design, whatever the Host says.
-	if code := req(http.MethodGet, "/api/inventory", "evil.example:8787", ""); code != http.StatusNoContent {
+	if code := req(http.MethodGet, "/api/inventory", evilHost, ""); code != http.StatusNoContent {
 		t.Errorf("unguarded GET rejected with %d", code)
 	}
 }

@@ -132,33 +132,46 @@ func (s *Server) Handler() http.Handler {
 // reason; the upgrader's own CheckOrigin stays as the second layer.
 func withOriginGuard(h http.Handler, allowedHosts map[string]struct{}) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		guarded := false
-		switch r.Method {
-		case http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodPatch:
-			guarded = true
-		case http.MethodGet, http.MethodHead:
-			if strings.HasPrefix(r.URL.Path, "/api/bootstrap/") ||
-				r.URL.Path == "/api/adhoc/stream" ||
-				r.URL.Path == "/api/playbook/stream" {
-				guarded = true
-			}
-		}
-		if guarded {
+		if guardedRequest(r) {
 			if !hostAllowed(r.Host, allowedHosts) {
 				writeError(w, http.StatusForbidden, fmt.Errorf("request Host %q not recognised (DNS-rebinding guard) — if ansbui is behind a reverse proxy, list its public hostname in %s", r.Host, allowedHostsEnv))
 				return
 			}
-			origin := r.Header.Get("Origin")
-			if origin != "" {
-				u, err := url.Parse(origin)
-				if err != nil || u.Host == "" || u.Host != r.Host {
-					writeError(w, http.StatusForbidden, errors.New("cross-origin request rejected"))
-					return
-				}
+			if !originMatchesHost(r) {
+				writeError(w, http.StatusForbidden, errors.New("cross-origin request rejected"))
+				return
 			}
 		}
 		h.ServeHTTP(w, r)
 	})
+}
+
+// guardedRequest reports whether the origin/host guard applies to r —
+// see withOriginGuard's coverage notes for the rationale behind each
+// method / path class.
+func guardedRequest(r *http.Request) bool {
+	switch r.Method {
+	case http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodPatch:
+		return true
+	case http.MethodGet, http.MethodHead:
+		return strings.HasPrefix(r.URL.Path, "/api/bootstrap/") ||
+			r.URL.Path == "/api/adhoc/stream" ||
+			r.URL.Path == "/api/playbook/stream"
+	default:
+		return false
+	}
+}
+
+// originMatchesHost accepts a missing Origin (non-browser clients)
+// and otherwise requires the parsed Origin host:port to equal the
+// request's Host — the same comparison the WS upgrader enforces.
+func originMatchesHost(r *http.Request) bool {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return true
+	}
+	u, err := url.Parse(origin)
+	return err == nil && u.Host != "" && u.Host == r.Host
 }
 
 // Body size caps for POST / PUT handlers. Control-plane payloads

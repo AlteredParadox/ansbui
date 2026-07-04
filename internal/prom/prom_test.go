@@ -10,17 +10,21 @@ import (
 )
 
 func TestHostFromLabel(t *testing.T) {
+	const (
+		fqdnHost = "web1.example.com"
+		v6Host   = "2001:db8::1"
+	)
 	cases := []struct {
 		in   string
 		want string
 	}{
-		{"web1.example.com:9100", "web1.example.com"},
-		{"web1.example.com", "web1.example.com"},
+		{"web1.example.com:9100", fqdnHost},
+		{fqdnHost, fqdnHost},
 		{"203.0.113.7:9100", "203.0.113.7"},
-		{"[2001:db8::1]:9100", "2001:db8::1"},
+		{"[2001:db8::1]:9100", v6Host},
 		{"[2001:db8::2]:9100", "2001:db8::2"}, // must not collide with ::1
-		{"2001:db8::1", "2001:db8::1"},        // bare v6, no port
-		{"[2001:db8::1]", "2001:db8::1"},      // bracketed, no port
+		{v6Host, v6Host},                      // bare v6, no port
+		{"[2001:db8::1]", v6Host},             // bracketed, no port
 		{"", ""},
 	}
 	for _, c := range cases {

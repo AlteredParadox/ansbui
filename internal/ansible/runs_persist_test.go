@@ -6,6 +6,8 @@ import (
 	"time"
 )
 
+const runsFileName = "runs.json"
+
 // TestAppendPersistFailureNoDivergence: when the durable write fails,
 // Append must return the error AND leave the in-memory list unchanged
 // — otherwise List() shows a run that was never saved, and it
@@ -14,7 +16,7 @@ import (
 // the tempfile create fails.
 func TestAppendPersistFailureNoDivergence(t *testing.T) {
 	dir := t.TempDir()
-	rec, err := NewRecorder(filepath.Join(dir, "runs.json"))
+	rec, err := NewRecorder(filepath.Join(dir, runsFileName))
 	if err != nil {
 		t.Fatalf("NewRecorder: %v", err)
 	}
@@ -25,7 +27,7 @@ func TestAppendPersistFailureNoDivergence(t *testing.T) {
 	}
 
 	// Break the write path: a file can't have a child tempfile.
-	rec.path = filepath.Join(dir, "runs.json", "nested", "runs.json")
+	rec.path = filepath.Join(dir, runsFileName, "nested", runsFileName)
 
 	bad := RunRecord{ID: "run-2", Kind: "adhoc", StartedAt: time.Now().UTC()}
 	if err := rec.Append(bad); err == nil {

@@ -61,8 +61,12 @@ func runWrapper(t *testing.T, mode, sudoPW, cmd, stdin string) (string, string, 
 // payload — never the operator's sudo password.
 const innerReadsSecret = `IFS= read -r first; printf 'inner-got:%s' "$first"`
 
+// testPayload is the inner command's own stdin line — what chpasswd
+// would read during a real bootstrap.
+const testPayload = "payload\n"
+
 func TestSudoWrapperColdCache(t *testing.T) {
-	so, se, err := runWrapper(t, "cold", "s3cret!", innerReadsSecret, "payload\n")
+	so, se, err := runWrapper(t, "cold", "s3cret!", innerReadsSecret, testPayload)
 	if err != nil {
 		t.Fatalf("wrapper failed: %v (stderr: %s)", err, se)
 	}
@@ -72,7 +76,7 @@ func TestSudoWrapperColdCache(t *testing.T) {
 }
 
 func TestSudoWrapperWarmCache(t *testing.T) {
-	so, se, err := runWrapper(t, "warm", "s3cret!", innerReadsSecret, "payload\n")
+	so, se, err := runWrapper(t, "warm", "s3cret!", innerReadsSecret, testPayload)
 	if err != nil {
 		t.Fatalf("wrapper failed: %v (stderr: %s)", err, se)
 	}
@@ -82,7 +86,7 @@ func TestSudoWrapperWarmCache(t *testing.T) {
 }
 
 func TestSudoWrapperWrongPassword(t *testing.T) {
-	_, se, err := runWrapper(t, "cold", "not-the-password", innerReadsSecret, "payload\n")
+	_, se, err := runWrapper(t, "cold", "not-the-password", innerReadsSecret, testPayload)
 	if err == nil {
 		t.Fatal("wrapper succeeded with wrong sudo password")
 	}

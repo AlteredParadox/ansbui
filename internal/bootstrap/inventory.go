@@ -64,20 +64,12 @@ func addHostToInventoryYAML(content []byte, provider, fqdn string) ([]byte, erro
 	if err := guardNoLegacyTopLevel(top); err != nil {
 		return nil, err
 	}
-	// Whole-tree duplicate scan before any mutation: covers hosts
-	// nested in provider subgroups, other umbrella branches, and
-	// top-level groups — not just direct provider siblings.
-	for i := 0; i+1 < len(top.Content); i += 2 {
-		path := hostGroupPath(top.Content[i].Value, top.Content[i+1], fqdn)
-		if path == nil {
-			continue
-		}
-		for _, g := range path {
-			if g == provider {
-				return content, nil // already ours, possibly in a subgroup
-			}
-		}
-		return nil, fmt.Errorf("host %q is already registered under group %q — remove it from there before re-bootstrapping under %q", fqdn, path[len(path)-1], provider)
+	alreadyOurs, err := checkExistingHost(top, provider, fqdn)
+	if err != nil {
+		return nil, err
+	}
+	if alreadyOurs {
+		return content, nil
 	}
 	childrenNode, err := ensureUmbrellaPath(top)
 	if err != nil {
@@ -93,6 +85,28 @@ func addHostToInventoryYAML(content []byte, provider, fqdn string) ([]byte, erro
 	}
 	appendHostNode(hostsNode, fqdn)
 	return encodeInventory(root, content, preamble)
+}
+
+// checkExistingHost runs the whole-tree duplicate scan before any
+// mutation: hosts nested in provider subgroups, other umbrella
+// branches, and top-level groups — not just direct provider
+// siblings. Returns alreadyOurs=true when fqdn already lives
+// somewhere under the target provider's subtree (idempotent no-op
+// for the caller) and an error when it lives under any other group.
+func checkExistingHost(top *yaml.Node, provider, fqdn string) (alreadyOurs bool, err error) {
+	for i := 0; i+1 < len(top.Content); i += 2 {
+		path := hostGroupPath(top.Content[i].Value, top.Content[i+1], fqdn)
+		if path == nil {
+			continue
+		}
+		for _, g := range path {
+			if g == provider {
+				return true, nil
+			}
+		}
+		return false, fmt.Errorf("host %q is already registered under group %q — remove it from there before re-bootstrapping under %q", fqdn, path[len(path)-1], provider)
+	}
+	return false, nil
 }
 
 // hostGroupPath returns the chain of group names (starting at name)

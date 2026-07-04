@@ -108,7 +108,7 @@ func TestEnsureRecordConcurrentSameFQDN(t *testing.T) {
 	defer func() { porkbun.Endpoint = origEndpoint }()
 	pb := porkbun.New("test-key", "test-secret")
 
-	emit := func(string, string) {}
+	emit := func(string, string) { /* progress events irrelevant here — only the record store matters */ }
 	errs := make(chan error, 2)
 	for _, ip := range []string{"203.0.113.1", "203.0.113.2"} {
 		go func(ip string) {
