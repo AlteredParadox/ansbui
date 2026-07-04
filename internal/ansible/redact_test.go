@@ -2,6 +2,8 @@ package ansible
 
 import "testing"
 
+const redactedValue = "<REDACTED>"
+
 func TestRedactRunRecordScrubsReplayInputs(t *testing.T) {
 	rec := RunRecord{
 		Args: map[string]string{
@@ -20,17 +22,17 @@ func TestRedactRunRecordScrubsReplayInputs(t *testing.T) {
 	}
 
 	got := RedactRunRecord(rec)
-	if got.Args["db_password"] != "<REDACTED>" {
+	if got.Args["db_password"] != redactedValue {
 		t.Fatalf("db_password not redacted: %#v", got.Args)
 	}
 	if got.Args["cmd"] == rec.Args["cmd"] {
 		t.Fatalf("arg text not redacted: %#v", got.Args)
 	}
-	if got.ExtraVars["api_token"] != "<REDACTED>" {
+	if got.ExtraVars["api_token"] != redactedValue {
 		t.Fatalf("api_token not redacted: %#v", got.ExtraVars)
 	}
 	nested := got.ExtraVars["config"].(map[string]any)
-	if nested["secret_key"] != "<REDACTED>" || nested["region"] != "us-east" {
+	if nested["secret_key"] != redactedValue || nested["region"] != "us-east" {
 		t.Fatalf("nested map redaction wrong: %#v", nested)
 	}
 	notes := got.ExtraVars["notes"].([]any)
