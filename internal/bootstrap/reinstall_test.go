@@ -6,10 +6,15 @@ import (
 )
 
 // probeOut assembles a reinstallProbeScript-shaped output the way
-// the remote shell would produce it: three sections separated by
-// marker lines.
+// the remote shell would produce it: four sections separated by
+// marker lines (os-release, systemd state, machine-id, installer
+// log tail).
 func probeOut(osRelease, sysState, machineID string) string {
-	return osRelease + reinstallProbeMarker + "\n" + sysState + "\n" + reinstallProbeMarker + "\n" + machineID + "\n"
+	return probeOutWithLog(osRelease, sysState, machineID, "")
+}
+
+func probeOutWithLog(osRelease, sysState, machineID, logLine string) string {
+	return osRelease + reinstallProbeMarker + "\n" + sysState + "\n" + reinstallProbeMarker + "\n" + machineID + "\n" + reinstallProbeMarker + "\n" + logLine + "\n"
 }
 
 const debian13Release = "PRETTY_NAME=\"Debian GNU/Linux 13 (trixie)\"\nID=debian\nVERSION_ID=\"13\"\n"
@@ -45,6 +50,13 @@ func TestEvalReinstallProbe(t *testing.T) {
 			probe:      probe,
 			wantReady:  false,
 			wantStatus: "installer",
+		},
+		{
+			name:       "installer env surfaces log tail",
+			out:        probeOutWithLog("ID=alpine\n", "", "cccc3333", "\x1b[32mDownloading cloud image 43%\x1b[0m"),
+			probe:      probe,
+			wantReady:  false,
+			wantStatus: "installer log: Downloading cloud image 43%",
 		},
 		{
 			name:       "old system answered — machine-id unchanged",
@@ -129,6 +141,7 @@ func TestReinstallPrepScriptPinsConfhome(t *testing.T) {
 		"sha256sum -c",
 		"confhome=" + reinstallConfhomeURL,
 		"confhome_cn=" + reinstallConfhomeURL,
+		"--ci",
 	} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("prep script missing %q:\n%s", want, script)
@@ -141,6 +154,25 @@ func TestReinstallPrepScriptPinsConfhome(t *testing.T) {
 	shaIdx := strings.Index(script, "sha256sum -c")
 	if sedIdx < shaIdx {
 		t.Fatalf("confhome rewrite happens before checksum verification")
+	}
+}
+
+func TestSanitizeLogLine(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"plain progress line", "plain progress line"},
+		{"\x1b[1;32mcoloured\x1b[0m text", "coloured text"},
+		{"trailing cr\r", "trailing cr"},
+		{"  padded  ", "padded"},
+		{"", ""},
+	}
+	for _, tc := range cases {
+		if got := sanitizeLogLine(tc.in); got != tc.want {
+			t.Fatalf("sanitizeLogLine(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+	long := strings.Repeat("x", 500)
+	if got := sanitizeLogLine(long); len([]rune(got)) != 161 { // 160 + ellipsis
+		t.Fatalf("long line not truncated: %d runes", len([]rune(got)))
 	}
 }
 

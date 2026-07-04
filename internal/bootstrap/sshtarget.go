@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -17,8 +18,9 @@ import (
 // whole point of bootstrap is the operator's first contact with
 // the machine, before any key is on record.
 type targetSession struct {
-	client       *ssh.Client
-	sudoPassword string
+	client        *ssh.Client
+	sudoPassword  string
+	stopKeepalive func()
 }
 
 // dialPasswordTarget opens an SSH connection to host:port, with
@@ -76,14 +78,81 @@ func dialTargetWithConfig(ctx context.Context, host string, port int, sudoPasswo
 		_ = conn.Close()
 		return nil, fmt.Errorf("ssh handshake %s: %w", addr, err)
 	}
+	client := ssh.NewClient(sshConn, chans, reqs)
 	return &targetSession{
-		client:       ssh.NewClient(sshConn, chans, reqs),
-		sudoPassword: sudoPassword,
+		client:        client,
+		sudoPassword:  sudoPassword,
+		stopKeepalive: startSSHKeepalive(client),
 	}, nil
 }
 
-// Close shuts the underlying SSH client.
+// Keepalive cadence for target sessions. 30s between probes keeps
+// NAT/firewall idle timers from expiring during quiet stretches;
+// 15s is ample for a reply on any connection that's actually alive.
+const (
+	sshKeepaliveInterval     = 30 * time.Second
+	sshKeepaliveReplyTimeout = 15 * time.Second
+)
+
+// startSSHKeepalive pings the SSH connection until the returned
+// stop func is called, and force-closes the client when a ping goes
+// unanswered. Bootstrap sessions block in sess.Wait() for minutes
+// at a time (reinstall.sh prep, apt runs) with no read deadline and
+// no job-level timeout — without this, a NAT-dropped connection
+// left the whole run hung forever while the heartbeat kept
+// printing "still running". Closing the client makes the blocked
+// Wait() return an error the orchestrator reports like any other
+// step failure.
+//
+// The stop func is idempotent and safe to call concurrently.
+func startSSHKeepalive(client *ssh.Client) func() {
+	stop := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(sshKeepaliveInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-ticker.C:
+				if !keepaliveAnswered(client, stop) {
+					_ = client.Close()
+					return
+				}
+			}
+		}
+	}()
+	var once sync.Once
+	return func() { once.Do(func() { close(stop) }) }
+}
+
+// keepaliveAnswered sends one keepalive request and reports whether
+// the peer replied in time. The send runs in its own goroutine
+// because SendRequest on a dead-but-not-closed TCP connection can
+// block until the kernel gives up — far longer than we're willing
+// to wait. A stop signal counts as answered so session close
+// doesn't race a false negative.
+func keepaliveAnswered(client *ssh.Client, stop <-chan struct{}) bool {
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := client.SendRequest("keepalive@openssh.com", true, nil)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		return err == nil
+	case <-time.After(sshKeepaliveReplyTimeout):
+		return false
+	case <-stop:
+		return true
+	}
+}
+
+// Close shuts the underlying SSH client and its keepalive loop.
 func (s *targetSession) Close() error {
+	if s.stopKeepalive != nil {
+		s.stopKeepalive()
+	}
 	if s.client == nil {
 		return nil
 	}

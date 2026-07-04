@@ -2,6 +2,7 @@ package bootstrap
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"strings"
@@ -40,12 +41,19 @@ type ReinstallOpts struct {
 // successful reinstall followed by an apt-install failure on the
 // next step. When the bootstrap is generalised this list grows.
 //
-// Versions match what reinstall.sh's README advertises (Debian
-// 9-13, Ubuntu LTS 18.04-26.04). Listed newest-first because the
-// UI tends to default to the first entry.
+// Versions are limited to releases whose cloud images are still
+// published upstream (verified 2026-07: debian 11-13 nocloud qcow2
+// at cloud.debian.org, ubuntu 20.04-26.04 server cloudimg) — the
+// prep script passes --ci, so a matrix entry without a cloud image
+// would fail every run. Debian 9/10 and Ubuntu 18.04 were dropped:
+// no cloud image (debian) or fully EOL (18.04), which made them
+// dropdown entries that could never succeed. Listed newest-first
+// because the UI tends to default to the first entry.
+//
+// web/views/Bootstrap.jsx's REINSTALL_MATRIX must mirror this map.
 var reinstallOSMatrix = map[string][]string{
-	"debian": {"13", "12", "11", "10", "9"},
-	"ubuntu": {"26.04", "24.04", "22.04", "20.04", "18.04"},
+	"debian": {"13", "12", "11"},
+	"ubuntu": {"26.04", "24.04", "22.04", "20.04"},
 }
 
 // reinstallScriptCommit pins bin456789/reinstall to a specific
@@ -162,9 +170,18 @@ func runReinstall(ctx context.Context, target *targetSession, req Request, pubKe
 
 	heartbeat := startHeartbeat(ctx, "reinstall.sh still running", emit)
 	defer heartbeat() // belt-and-suspenders against future early returns
-	stdout, stderr, err := target.runRoot(ctx, reinstallPrepScript(opts, pubKey), "")
+	// The prep phase gets its own deadline: it normally takes 1-3
+	// minutes, and the only ways past 15 are a stalled mirror or a
+	// dead-but-undetected connection. Without the bound (jobs carry
+	// no global timeout) a stall here idles the run indefinitely.
+	prepCtx, cancelPrep := context.WithTimeout(ctx, reinstallPrepBudget)
+	stdout, stderr, err := target.runRoot(prepCtx, reinstallPrepScript(opts, pubKey), "")
+	cancelPrep()
 	heartbeat()
 	if err != nil {
+		if errors.Is(prepCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
+			return nil, fmt.Errorf("reinstall.sh prep did not finish within %s — a download from the pinned repo or the OS image mirror likely stalled; re-run bootstrap to retry", friendly(reinstallPrepBudget))
+		}
 		return nil, fmt.Errorf("reinstall.sh: %s: %w", strings.TrimSpace(stderr), err)
 	}
 	if tail := tailLines(stdout, 6); tail != "" {
@@ -208,7 +225,7 @@ func runReinstall(ctx context.Context, target *targetSession, req Request, pubKe
 	}
 	emit("ok", "old system went down — reboot confirmed")
 
-	emit("meta", fmt.Sprintf("Waiting for OS install + reboot, then SSH on :%d (key auth as root). Timeout: 30 minutes.", reinstallSSHPort))
+	emit("meta", fmt.Sprintf("Waiting for OS install + reboot, then SSH on :%d (key auth as root). Timeout: %s.", reinstallSSHPort, friendly(reinstallWaitBudget)))
 	emit("meta", fmt.Sprintf("(reinstall.sh exposes SSH on :%d from its installer env so you can screen -r the install — we'll keep probing until os-release, machine-id, and systemd state all say the new system is up.)", reinstallSSHPort))
 	probe := reinstallReadyProbe{
 		expectedOS:      opts.OS,
@@ -223,11 +240,26 @@ func runReinstall(ctx context.Context, target *targetSession, req Request, pubKe
 	return newTarget, nil
 }
 
-// targetDownBudget bounds how long runReinstall waits for the old
-// system to stop answering after the detached reboot is triggered.
-// A healthy reboot drops the port within seconds; five minutes is
-// generous slack for a loaded box flushing to disk.
-const targetDownBudget = 5 * time.Minute
+// Phase budgets for the reinstall workflow.
+//
+//   - reinstallPrepBudget bounds reinstall.sh's prep run (download
+//     script + OS image, write boot entry). Normally 1-3 minutes;
+//     15 tolerates a slow image mirror without letting a stall idle
+//     the run forever.
+//   - targetDownBudget bounds the wait for the old system to stop
+//     answering after the detached reboot fires. A healthy reboot
+//     drops the port within seconds; five minutes is generous slack
+//     for a loaded box flushing to disk.
+//   - reinstallWaitBudget bounds the install + reboot + come-back
+//     wait. Cloud-image installs typically finish in 5-15 minutes,
+//     but a slow provider disk or throttled mirror can stretch
+//     that; 45 keeps a legitimately slow install from being
+//     misreported as a network failure.
+const (
+	reinstallPrepBudget = 15 * time.Minute
+	targetDownBudget    = 5 * time.Minute
+	reinstallWaitBudget = 45 * time.Minute
+)
 
 // waitForTargetDown polls host:port with plain TCP dials until the
 // port stops accepting connections, confirming the detached reboot
@@ -285,7 +317,12 @@ func ensureCurlScript() string {
 		`set -e`,
 		`if command -v curl >/dev/null 2>&1; then exit 0; fi`,
 		`if ! command -v apt-get >/dev/null 2>&1; then echo "curl not found and apt-get not found to install it" >&2; exit 1; fi`,
-		`DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120 update -qq`,
+		// A failed update is tolerated: this is the OLD system,
+		// often an EOL release whose mirrors have moved — its stale
+		// package lists usually still resolve curl, and the box is
+		// about to be wiped anyway. The install line is the real
+		// gate.
+		`DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120 update -qq || echo "apt-get update failed — trying curl install with existing package lists" >&2`,
 		`DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120 install -y -qq curl`,
 		`command -v curl >/dev/null 2>&1`,
 	}, "; ")
@@ -316,7 +353,18 @@ func ensureCurlScript() string {
 // survive the reinstall — the install erases the disk — so anything
 // worth keeping must come out through the emit stream.
 func reinstallPrepScript(opts ReinstallOpts, pubKey string) string {
+	// --ci forces cloud-image mode for both matrix distros. Upstream
+	// already forces it for ubuntu, but debian otherwise defaults to
+	// the full debian-installer netboot: slower (can outlive even
+	// the 45m wait budget), unobservable while it runs (d-i exposes
+	// no SSH and writes no /reinstall.log for the wait loop to
+	// tail), and dependent on netboot mirror paths that disappear
+	// once a release goes EOL. Cloud images for every matrix entry
+	// were verified present upstream; passing the flag explicitly
+	// also keeps an upstream default change from silently flipping
+	// the install mode between runs.
 	runCmd := `bash reinstall.sh ` + shellQuote(opts.OS) + ` ` + shellQuote(opts.Version) +
+		` --ci` +
 		` --ssh-port ` + fmt.Sprintf("%d", reinstallSSHPort) +
 		` --ssh-key ` + shellQuote(pubKey) +
 		` 2>&1 | tee /tmp/reinstall.log`
@@ -361,17 +409,28 @@ type reinstallReadyProbe struct {
 const reinstallProbeMarker = "__ANSBUI_PROBE__"
 
 // reinstallProbeScript gathers everything evalReinstallProbe needs
-// in ONE round trip: os-release, systemd's settle state, and the
-// machine-id. Each fragment tolerates its command missing (the
-// alpine installer env has no systemctl) — classification happens
-// on the Go side where it can be tested. The trailing `true` keeps
-// a missing machine-id from failing the whole probe.
+// in ONE round trip: os-release, systemd's settle state, the
+// machine-id, and the tail of the installer's log. Each fragment
+// tolerates its command or file missing (the alpine installer env
+// has no systemctl; the final OS has no /reinstall.log) —
+// classification happens on the Go side where it can be tested.
+// The trailing `true` keeps a missing fragment from failing the
+// whole probe.
+//
+// The log tail turns the wait loop's "still in installer env"
+// heartbeat into live install progress ("Downloading cloud image
+// 43%" vs "error: no space left") — the difference between a
+// diagnosable timeout and a mystery. The password/token filter
+// mirrors what upstream's own log viewer strips before display;
+// belt-and-suspenders on top of the emit-side redaction.
 var reinstallProbeScript = strings.Join([]string{
 	`cat /etc/os-release 2>/dev/null`,
 	`echo ` + reinstallProbeMarker,
 	`systemctl is-system-running 2>/dev/null | head -n1`,
 	`echo ` + reinstallProbeMarker,
 	`cat /etc/machine-id 2>/dev/null`,
+	`echo ` + reinstallProbeMarker,
+	`tail -n 20 /reinstall.log 2>/dev/null | grep -Fiav -e password -e token | tail -n 1`,
 	`true`,
 }, "; ")
 
@@ -396,9 +455,8 @@ func waitForReinstallTarget(ctx context.Context, host string, port int, privKey 
 		initialWait     = 15 * time.Second
 		retryInterval   = 15 * time.Second
 		heartbeatPeriod = 60 * time.Second
-		totalBudget     = 30 * time.Minute
 	)
-	deadline := time.Now().Add(totalBudget)
+	deadline := time.Now().Add(reinstallWaitBudget)
 	select {
 	case <-time.After(initialWait):
 	case <-ctx.Done():
@@ -421,9 +479,9 @@ func waitForReinstallTarget(ctx context.Context, host string, port int, privKey 
 			// only place that failure is observable.
 			hint := fmt.Sprintf("check the provider's serial/VNC console: the reinstall likely completed but %s isn't reachable on :%d, usually because networking (NIC name / static config) didn't come up in the new install", probe.expectedOS, port)
 			if lastStatus == "" {
-				return nil, fmt.Errorf("timeout after 30 minutes waiting for SSH on :%d — %s", port, hint)
+				return nil, fmt.Errorf("timeout after %s waiting for SSH on :%d — %s", friendly(reinstallWaitBudget), port, hint)
 			}
-			return nil, fmt.Errorf("timeout after 30 minutes waiting for %s to come up (last status: %s) — %s", probe.expectedOS, lastStatus, hint)
+			return nil, fmt.Errorf("timeout after %s waiting for %s to come up (last status: %s) — %s", friendly(reinstallWaitBudget), probe.expectedOS, lastStatus, hint)
 		}
 		target, status := tryReinstallReady(ctx, host, port, privKey, probe)
 		if target != nil {
@@ -482,15 +540,20 @@ func tryReinstallReady(ctx context.Context, host string, port int, privKey []byt
 // systemd, so only the documented early/late states block.
 func evalReinstallProbe(out string, probe reinstallReadyProbe) (bool, string) {
 	parts := strings.Split(out, reinstallProbeMarker)
-	if len(parts) != 3 {
+	if len(parts) != 4 {
 		return false, "unexpected readiness-probe output shape"
 	}
 	osRelease := parts[0]
 	sysState := strings.TrimSpace(parts[1])
 	machineID := strings.TrimSpace(parts[2])
+	logLine := sanitizeLogLine(parts[3])
 
 	if !osMatches(osRelease, probe.expectedOS) {
-		return false, fmt.Sprintf("still in installer env (detected: %s)", detectDistro(osRelease))
+		status := fmt.Sprintf("still in installer env (detected: %s)", detectDistro(osRelease))
+		if logLine != "" {
+			status += " — installer log: " + logLine
+		}
+		return false, status
 	}
 	if got := osReleaseField(osRelease, "VERSION_ID"); got != "" && got != strings.TrimSpace(probe.expectedVersion) {
 		return false, fmt.Sprintf("%s answered but reports version %s (want %s) — wrong system, still waiting", probe.expectedOS, got, probe.expectedVersion)
@@ -542,6 +605,51 @@ func osReleaseField(osRelease, key string) string {
 		}
 	}
 	return ""
+}
+
+// sanitizeLogLine makes one tail'd installer-log line safe for the
+// heartbeat emit: ANSI escape sequences are dropped (trans.sh
+// colours its output), remaining control characters are removed
+// (carriage-return progress spam), and the result is capped at 160
+// runes so a pathological line can't flood the event stream.
+func sanitizeLogLine(s string) string {
+	const (
+		stText = iota
+		stEsc  // just consumed ESC
+		stCSI  // inside ESC[ ... sequence
+	)
+	var b strings.Builder
+	state := stText
+	for _, r := range strings.TrimSpace(s) {
+		switch state {
+		case stEsc:
+			if r == '[' {
+				state = stCSI // CSI: consume until final byte
+			} else {
+				state = stText // two-char escape: drop and move on
+			}
+		case stCSI:
+			// CSI sequences end on a final byte in @-~ (0x40-0x7e);
+			// parameter/intermediate bytes (0x20-0x3f) continue it.
+			if r >= '@' && r <= '~' {
+				state = stText
+			}
+		default:
+			switch {
+			case r == 0x1b:
+				state = stEsc
+			case r >= 32 || r == '\t':
+				b.WriteRune(r)
+			}
+		}
+	}
+	out := strings.TrimSpace(b.String())
+	const maxRunes = 160
+	runes := []rune(out)
+	if len(runes) > maxRunes {
+		out = string(runes[:maxRunes]) + "…"
+	}
+	return out
 }
 
 // startHeartbeat fires a "still running" emit every 30s until the

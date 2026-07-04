@@ -14,12 +14,13 @@ const BOOTSTRAP_JOB_KEY = 'ansbui.bootstrapJobId';
 // internal/bootstrap/reinstall.go — the backend re-validates, so a
 // drift here just means the form rejects something the backend
 // would accept (or vice versa). Versions are listed newest-first
-// because the version dropdown defaults to index 0; the set
-// matches reinstall.sh's README (Debian 9-13, Ubuntu LTS
-// 18.04-26.04).
+// because the version dropdown defaults to index 0; the set is
+// limited to releases whose cloud images are still published
+// upstream (installs run in cloud-image mode — see the backend
+// matrix comment).
 const REINSTALL_MATRIX = {
-  debian: ['13', '12', '11', '10', '9'],
-  ubuntu: ['26.04', '24.04', '22.04', '20.04', '18.04']
+  debian: ['13', '12', '11'],
+  ubuntu: ['26.04', '24.04', '22.04', '20.04']
 };
 const REINSTALL_OS_LIST = Object.keys(REINSTALL_MATRIX);
 
