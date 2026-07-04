@@ -118,7 +118,7 @@ func runStreaming(ctx context.Context, pool *sshpool.Pool, srv config.Server, cm
 	if err != nil {
 		return err
 	}
-	out <- Event{Type: "meta", Text: fmt.Sprintf("$ %s", cmd)}
+	out <- Event{Type: "meta", Text: fmt.Sprintf("$ %s", RedactText(cmd))}
 
 	stdoutR, stdoutW := io.Pipe()
 	stderrR, stderrW := io.Pipe()

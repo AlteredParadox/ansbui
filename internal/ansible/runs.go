@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -106,8 +107,25 @@ func NewRecorder(path string) (*Recorder, error) {
 		}
 	}
 	r.ensureSorted()
+	if r.scrubLoadedRuns() {
+		if err := r.saveRunsLocked(r.runs); err != nil {
+			log.Printf("runs: failed to persist redacted history: %v", err)
+		}
+	}
 	r.rebuildLastPlay()
 	return r, nil
+}
+
+func (r *Recorder) scrubLoadedRuns() bool {
+	changed := false
+	for i, run := range r.runs {
+		redacted := RedactRunRecord(run)
+		if !reflect.DeepEqual(redacted, run) {
+			changed = true
+		}
+		r.runs[i] = redacted
+	}
+	return changed
 }
 
 // Append writes a new record and persists. Records are kept newest
@@ -122,6 +140,7 @@ func NewRecorder(path string) (*Recorder, error) {
 func (r *Recorder) Append(rec RunRecord) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	rec = RedactRunRecord(rec)
 	// Build the prospective list in a local, attempt to persist it,
 	// then commit to memory REGARDLESS of the write outcome. A run that
 	// actually executed should stay visible in History for this process
@@ -231,7 +250,9 @@ func (r *Recorder) List() []RunRecord {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	out := make([]RunRecord, len(r.runs))
-	copy(out, r.runs)
+	for i, run := range r.runs {
+		out[i] = RedactRunRecord(run)
+	}
 	return out
 }
 
@@ -241,7 +262,7 @@ func (r *Recorder) Get(id string) (RunRecord, bool) {
 	defer r.mu.Unlock()
 	for _, run := range r.runs {
 		if run.ID == id {
-			return run, true
+			return RedactRunRecord(run), true
 		}
 	}
 	return RunRecord{}, false

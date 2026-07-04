@@ -87,7 +87,7 @@ func FuzzRedactText(f *testing.F) {
 		// "myapikey") are fine because over-scrub is the safe
 		// direction.
 		lower := strings.ToLower(s)
-		triggers := []string{"password", "passphrase", "apikey", "api_key", "api-key"}
+		triggers := []string{"password", "passphrase", "token", "apikey", "api_key", "api-key"}
 		hasTrigger := false
 		for _, t := range triggers {
 			if strings.Contains(lower, t) {

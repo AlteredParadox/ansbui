@@ -6,7 +6,7 @@
 // written to the remote filesystem (pipes + bash process substitution
 // keep it in memory).
 
-const { useState: useStateV, useEffect: useEffectV, useMemo: useMemoV } = React;
+const { useState: useStateV, useEffect: useEffectV } = React;
 
 function VaultView() {
   const [files, setFiles] = useStateV([]);

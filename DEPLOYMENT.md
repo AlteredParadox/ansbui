@@ -186,5 +186,7 @@ but both are good hygiene for a prod binary.
   runs in CI but a published CVE doesn't update your binary.
 - Regular `npm audit` — also in CI but worth a manual check
   before each release.
-- Reviewing `runs.json` for accidental secrets in playbook
-  output (extra-vars, stdout) — the recorder doesn't redact.
+- Reviewing `runs.json` for accidental secrets in playbook output.
+  ansbui redacts common password/token/key shapes, but arbitrary
+  module output can still contain sensitive material under unusual
+  names.

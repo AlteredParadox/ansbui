@@ -12,15 +12,15 @@ A single-binary web UI for an Ansible control node.
 ```sh
 sudo apt install -y golang-go openssh-client
 go build -o ansbui .
-./ansbui              # default: -addr :8787 (all interfaces)
+./ansbui              # default: -addr 127.0.0.1:8787 (loopback only)
 ```
 
-Open `http://<host>:8787/` in a browser. On first load you'll be prompted to add an ansible server — the SSH coordinates of a remote machine that already has `ansible` installed.
+Open `http://127.0.0.1:8787/` in a browser. On first load you'll be prompted to add an ansible server — the SSH coordinates of a remote machine that already has `ansible` installed.
 
-To restrict to loopback (useful if you're accessing via an SSH tunnel):
+To expose ansbui on another interface, put authentication in front of it first, then bind explicitly:
 
 ```sh
-./ansbui -addr 127.0.0.1:8787
+./ansbui -addr 0.0.0.0:8787
 ```
 
 ## Configuration

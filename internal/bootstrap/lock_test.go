@@ -8,8 +8,9 @@ import (
 
 func TestLockInventoryKeying(t *testing.T) {
 	const (
-		workDir = "/opt/ansible"
-		mainInv = "hosts.yml"
+		workDir     = "/opt/ansible"
+		mainInv     = "hosts.yml"
+		dnsTestFQDN = "host.example.com"
 	)
 	a := config.Server{ID: "srv-a", WorkDir: workDir, Inventory: mainInv}
 	sameAsA := config.Server{ID: "srv-a", WorkDir: workDir, Inventory: mainInv}
@@ -34,11 +35,11 @@ func TestLockInventoryKeying(t *testing.T) {
 	if lockDNSRecord("A", "srv-a") == lockTarget("A\x00srv-a") {
 		t.Error("dns key collided with a target key")
 	}
-	if lockDNSRecord("A", "host.example.com") == lockDNSRecord("AAAA", "host.example.com") {
+	if lockDNSRecord("A", dnsTestFQDN) == lockDNSRecord("AAAA", dnsTestFQDN) {
 		t.Error("different record types must not share a mutex")
 	}
 	// DNS fqdn is lower-cased, so case variants share one lock.
-	if lockDNSRecord("A", "Host.Example.com") != lockDNSRecord("A", "host.example.com") {
+	if lockDNSRecord("A", "Host.Example.com") != lockDNSRecord("A", dnsTestFQDN) {
 		t.Error("dns fqdn case variants must share one mutex")
 	}
 }

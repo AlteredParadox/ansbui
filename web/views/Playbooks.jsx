@@ -462,7 +462,7 @@ function PlaybooksView({ initialId, runnerPrefill }) {
         onClose={() => { setRunnerOpen(false); setRunnerSeed(null); }}
       />
       <PlaybookHistoryDialog open={historyOpen} pb={pb} onClose={() => setHistoryOpen(false)}/>
-      <PlaybookImportDialog open={importOpen} onClose={() => setImportOpen(false)} onImported={(newPath) => {
+      <PlaybookImportDialog open={importOpen} onClose={() => setImportOpen(false)} onImported={() => {
         setImportOpen(false);
         globalThis.AnsbuiAPI?.refreshData().catch(() => {});
       }}/>

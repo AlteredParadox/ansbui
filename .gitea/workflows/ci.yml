@@ -19,13 +19,19 @@ jobs:
           go-version: "1.25.11"
 
       - name: Go build
-        run: go build ./...
+        run: |
+          packages=$(go list ./... | grep -v '/node_modules/')
+          go build $packages
 
       - name: Go vet
-        run: go vet ./...
+        run: |
+          packages=$(go list ./... | grep -v '/node_modules/')
+          go vet $packages
 
       - name: Go test with coverage
-        run: go test -race -covermode=atomic -coverprofile=coverage.out ./...
+        run: |
+          packages=$(go list ./... | grep -v '/node_modules/')
+          go test -race -covermode=atomic -coverprofile=coverage.out $packages
 
       - name: SonarQube scan
         uses: sonarsource/sonarqube-scan-action@v4

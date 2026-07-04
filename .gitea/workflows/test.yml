@@ -21,7 +21,9 @@ jobs:
         run: go test -race ./internal/...
 
       - name: Build check
-        run: go build ./...
+        run: |
+          packages=$(go list ./... | grep -v '/node_modules/')
+          go build $packages
 
       # Short fuzz pass — finds every Fuzz* function in *_test.go
       # and runs each for 20s. No-ops cleanly when there are none.

@@ -6,7 +6,7 @@
 // target origin ('*') is a genuine vulnerability (Sonar S2819), so the
 // panel is intentionally not rendered here.
 
-const { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo } = React;
+const { useEffect, useLayoutEffect, useRef } = React;
 
 // useDialog binds a <dialog> element to a controlled `open` boolean.
 // - open true  → el.showModal() (adds to the top layer + backdrop)
@@ -27,7 +27,7 @@ const { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo } = R
 // so slip past this guard.
 function useDialog(open, onClose, opts) {
   const ref = useRef(null);
-  const guardClose = opts && opts.guardClose;
+  const guardClose = opts?.guardClose;
   // useLayoutEffect so showModal / close runs before paint.
   useLayoutEffect(() => {
     const el = ref.current;

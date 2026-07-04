@@ -1,6 +1,8 @@
 package ansible
 
 import (
+	"encoding/json"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -46,6 +48,44 @@ func TestAppendPersistFailureKeepsRunInMemory(t *testing.T) {
 	list := rec.List()
 	if len(list) != 2 {
 		t.Fatalf("both runs should be in memory, got %d: %v", len(list), list)
+	}
+}
+
+func TestNewRecorderScrubsLoadedRuns(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, runsFileName)
+	raw := []RunRecord{{
+		ID:        "run-secret",
+		Kind:      "playbook",
+		StartedAt: time.Now().UTC(),
+		ExtraVars: map[string]any{"db_password": "hunter2"},
+		Log:       []Event{{Type: "line", Text: "token=abc123"}},
+	}}
+	data, err := json.Marshal(raw)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	rec, err := NewRecorder(path)
+	if err != nil {
+		t.Fatalf("NewRecorder: %v", err)
+	}
+	run, ok := rec.Get("run-secret")
+	if !ok {
+		t.Fatal("loaded run missing")
+	}
+	if run.ExtraVars["db_password"] != "<REDACTED>" {
+		t.Fatalf("memory extraVars not redacted: %#v", run.ExtraVars)
+	}
+	onDisk, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if strings.Contains(string(onDisk), "hunter2") || strings.Contains(string(onDisk), "abc123") {
+		t.Fatalf("runs file still contains secret material: %s", onDisk)
 	}
 }
 

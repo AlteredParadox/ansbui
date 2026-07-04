@@ -91,6 +91,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/bootstrap/jobs/{id}/cancel", limitBody(emptyBody, s.httpBootstrapCancel))
 	mux.HandleFunc("GET /api/bootstrap/jobs/{id}/stream", s.wsBootstrapStream)
 
+	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {
+		writeError(w, http.StatusNotFound, fmt.Errorf("unknown API route %s %s", r.Method, r.URL.Path))
+	})
 	mux.Handle("/", s.staticHandler())
 
 	return withLogging(withOriginGuard(mux, allowedHostnames(s.Addr)))
