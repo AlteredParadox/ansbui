@@ -255,6 +255,13 @@ func consumeAndPersist(conn *websocket.Conn, events <-chan ansible.Event, run *a
 	run.Status = finalStatus(run)
 	if err := rec.Append(*run); err != nil {
 		log.Printf("persist run: %v", err)
+		// The run is still in memory (Append commits regardless), so it
+		// shows in History until restart — but the operator needs to
+		// know it wasn't durably saved. Surface it in the live log
+		// rather than swallowing it into the server log alone.
+		if clientAlive {
+			_ = wsWriteJSON(conn, map[string]any{"type": "meta", "text": "⚠ run finished but could not be saved to history (visible until restart) — check server logs / disk"})
+		}
 	}
 	if clientAlive {
 		_ = wsWriteJSON(conn, map[string]any{"type": "run-complete", "id": run.ID, "status": run.Status})

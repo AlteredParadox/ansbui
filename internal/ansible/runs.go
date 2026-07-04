@@ -122,28 +122,30 @@ func NewRecorder(path string) (*Recorder, error) {
 func (r *Recorder) Append(rec RunRecord) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	// Build the new record list in a local without touching r.runs,
-	// then persist it, and only commit to memory once the write
-	// succeeded. Mutating memory first (the old order) meant a disk
-	// failure left List() showing a run that was never saved — gone
-	// on the next restart, and the caller's error looked like the run
-	// hadn't recorded at all when it partly had.
+	// Build the prospective list in a local, attempt to persist it,
+	// then commit to memory REGARDLESS of the write outcome. A run that
+	// actually executed should stay visible in History for this process
+	// even when the disk write fails (read-only FS, disk full) — losing
+	// it entirely is worse than a memory/disk divergence, and the
+	// returned error lets the caller surface the "not persisted"
+	// condition. On success there is no divergence; on failure the
+	// operator can still read the run's output until restart.
 	newRuns := insertRun(r.runs, rec)
 	evicted := false
 	if len(newRuns) > r.limit {
 		newRuns = newRuns[:r.limit]
 		evicted = true
 	}
-	if err := r.saveRunsLocked(newRuns); err != nil {
-		return err
-	}
+	saveErr := r.saveRunsLocked(newRuns)
 	r.runs = newRuns
-	// lastPlay is an in-memory index (never persisted), so updating it
-	// after the durable write can't cause divergence.
+	// lastPlay is an in-memory index (never persisted).
 	if evicted {
 		r.rebuildLastPlay()
 	} else {
 		r.applyRunToLastPlay(rec)
+	}
+	if saveErr != nil {
+		return fmt.Errorf("run recorded in memory but not persisted (will be lost on restart): %w", saveErr)
 	}
 	return nil
 }

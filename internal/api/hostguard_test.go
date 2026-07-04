@@ -98,8 +98,34 @@ func TestOriginGuardDNSRebinding(t *testing.T) {
 	if code := req(http.MethodPost, "/api/settings", selfHost, "http://evil.example"); code != http.StatusForbidden {
 		t.Errorf("cross-origin POST passed with %d", code)
 	}
-	// Unguarded reads stay open by design, whatever the Host says.
-	if code := req(http.MethodGet, "/api/inventory", evilHost, ""); code != http.StatusNoContent {
-		t.Errorf("unguarded GET rejected with %d", code)
+	// API reads are Host-guarded too: a rebound page can same-origin-GET
+	// /api/inventory (fleet map), /api/vault, /api/settings — so an
+	// unrecognised Host must be rejected on reads, not just writes.
+	if code := req(http.MethodGet, "/api/inventory", evilHost, ""); code != http.StatusForbidden {
+		t.Errorf("rebound API read passed with %d", code)
+	}
+	// Legit read from the real host still works.
+	if code := req(http.MethodGet, "/api/inventory", selfHost, ""); code != http.StatusNoContent {
+		t.Errorf("loopback API read rejected with %d", code)
+	}
+	// The static SPA shell stays public — the page must load even via an
+	// unrecognised Host; only /api/ carries operator data.
+	if code := req(http.MethodGet, "/", evilHost, ""); code != http.StatusNoContent {
+		t.Errorf("static shell GET blocked with %d", code)
+	}
+}
+
+// TestAllowedHostsWithPortMatches locks in the port-stripping fix: an
+// operator who copies the rejected Host verbatim (host:port, exactly
+// what the 403 message echoes) into ANSBUI_ALLOWED_HOSTS must then be
+// accepted, even though the request Host also carries the port.
+func TestAllowedHostsWithPortMatches(t *testing.T) {
+	t.Setenv(allowedHostsEnv, "proxy.example.com:8443")
+	allowed := allowedHostnames("0.0.0.0:8443") // IP bind contributes nothing
+	if !hostAllowed("proxy.example.com:8443", allowed) {
+		t.Error("host:port entry did not match host:port request Host")
+	}
+	if !hostAllowed("proxy.example.com", allowed) {
+		t.Error("host:port entry did not match bare-host request Host")
 	}
 }

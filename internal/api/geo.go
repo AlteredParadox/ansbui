@@ -103,11 +103,17 @@ func (g *geoResolver) resolvePublic(ctx context.Context, name string) string {
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 	addrs, err := net.DefaultResolver.LookupIPAddr(ctx, name)
+	// TTL selection: an authoritative NXDOMAIN and a successful lookup
+	// are durable verdicts worth the full 24h. A transient failure
+	// (timeout, SERVFAIL, the browser aborting the inventory request
+	// mid-enrichment) gets a short negative TTL instead — long enough
+	// that a struggling resolver isn't hammered with a fresh 2s lookup
+	// on every host on every inventory render, short enough that the
+	// column recovers quickly once DNS is healthy again. Not caching
+	// at all would reinstate the N×2s-per-render stall.
+	ttl := 24 * time.Hour
 	if err != nil && !isNXDomain(err) {
-		// Transient resolver failure (timeout, SERVFAIL, the browser
-		// aborting the inventory request mid-enrichment): don't cache
-		// an empty answer for 24h — the next reload should retry.
-		return ""
+		ttl = transientDNSTTL
 	}
 	pub := ""
 	for _, a := range addrs {
@@ -117,10 +123,14 @@ func (g *geoResolver) resolvePublic(ctx context.Context, name string) string {
 		}
 	}
 	g.dnsMu.Lock()
-	g.dns[name] = dnsCacheEntry2{ip: pub, expiry: time.Now().Add(24 * time.Hour)}
+	g.dns[name] = dnsCacheEntry2{ip: pub, expiry: time.Now().Add(ttl)}
 	g.dnsMu.Unlock()
 	return pub
 }
+
+// transientDNSTTL bounds how long a transient resolver failure is
+// negatively cached. Mirrors geoip.transientErrTTL's intent.
+const transientDNSTTL = 30 * time.Second
 
 // isNXDomain reports whether err is an authoritative "name does not
 // exist" — a verdict worth caching, unlike transient lookup failures.

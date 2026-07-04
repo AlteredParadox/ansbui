@@ -2,19 +2,21 @@ package ansible
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
 
 const runsFileName = "runs.json"
 
-// TestAppendPersistFailureNoDivergence: when the durable write fails,
-// Append must return the error AND leave the in-memory list unchanged
-// — otherwise List() shows a run that was never saved, and it
-// vanishes on the next restart. We force the failure by pointing the
-// recorder's path at a location whose parent is a regular file, so
-// the tempfile create fails.
-func TestAppendPersistFailureNoDivergence(t *testing.T) {
+// TestAppendPersistFailureKeepsRunInMemory: when the durable write
+// fails, Append must return a descriptive error BUT keep the executed
+// run visible in memory — losing a completed run's output entirely
+// (the alternative) is worse than a memory/disk divergence the error
+// already surfaces. We force the failure by pointing the recorder's
+// path at a location whose parent is a regular file, so the tempfile
+// create fails.
+func TestAppendPersistFailureKeepsRunInMemory(t *testing.T) {
 	dir := t.TempDir()
 	rec, err := NewRecorder(filepath.Join(dir, runsFileName))
 	if err != nil {
@@ -30,16 +32,20 @@ func TestAppendPersistFailureNoDivergence(t *testing.T) {
 	rec.path = filepath.Join(dir, runsFileName, "nested", runsFileName)
 
 	bad := RunRecord{ID: "run-2", Kind: "adhoc", StartedAt: time.Now().UTC()}
-	if err := rec.Append(bad); err == nil {
-		t.Fatal("expected Append to fail when the write path is broken")
+	err = rec.Append(bad)
+	if err == nil {
+		t.Fatal("expected Append to report the persist failure")
 	}
-
+	if !strings.Contains(err.Error(), "not persisted") {
+		t.Errorf("error should flag the non-persisted state, got: %v", err)
+	}
+	// The executed run must still be visible in this process.
+	if _, ok := rec.Get("run-2"); !ok {
+		t.Error("run-2 must stay retrievable in memory after its persist failed")
+	}
 	list := rec.List()
-	if len(list) != 1 || list[0].ID != "run-1" {
-		t.Fatalf("in-memory state diverged from disk: got %d records %v, want only run-1", len(list), list)
-	}
-	if _, ok := rec.Get("run-2"); ok {
-		t.Error("run-2 should not be retrievable after its persist failed")
+	if len(list) != 2 {
+		t.Fatalf("both runs should be in memory, got %d: %v", len(list), list)
 	}
 }
 

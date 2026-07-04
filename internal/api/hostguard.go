@@ -28,8 +28,11 @@ const allowedHostsEnv = "ANSBUI_ALLOWED_HOSTS"
 func allowedHostnames(boundAddr string) map[string]struct{} {
 	allowed := make(map[string]struct{})
 	add := func(h string) {
-		h = strings.ToLower(strings.TrimSpace(h))
-		if h != "" {
+		// Normalise to the same host-only form hostAllowed compares
+		// against, so an operator who copies the rejected Host verbatim
+		// (e.g. "proxy.example.com:8443", exactly what the 403 message
+		// echoes) still matches — the port is stripped on both sides.
+		if h = hostOnly(h); h != "" {
 			allowed[h] = struct{}{}
 		}
 	}
@@ -42,17 +45,24 @@ func allowedHostnames(boundAddr string) map[string]struct{} {
 	return allowed
 }
 
+// hostOnly reduces a Host / host:port / [ipv6]:port string to the
+// bare, lowercased host with any surrounding brackets removed.
+// Returns "" for empty input.
+func hostOnly(hostport string) string {
+	h := strings.TrimSpace(hostport)
+	if only, _, err := net.SplitHostPort(h); err == nil {
+		h = only
+	}
+	return strings.ToLower(strings.Trim(h, "[]"))
+}
+
 // hostAllowed reports whether the request's Host header names this
 // server. IP literals can't be DNS-rebound (the browser would show
 // the IP as the page origin, and cross-origin requests to it are
 // caught by the Origin comparison), localhost / *.localhost resolve
 // to loopback by spec, and anything else must be explicitly allowed.
 func hostAllowed(hostport string, allowed map[string]struct{}) bool {
-	h := hostport
-	if only, _, err := net.SplitHostPort(hostport); err == nil {
-		h = only
-	}
-	h = strings.ToLower(strings.Trim(strings.TrimSpace(h), "[]"))
+	h := hostOnly(hostport)
 	if h == "" {
 		return false
 	}

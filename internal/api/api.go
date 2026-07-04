@@ -14,7 +14,6 @@ import (
 	"log"
 	"net"
 	"net/http"
-	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -108,48 +107,50 @@ func (s *Server) Handler() http.Handler {
 // This guard mirrors the same-origin check the WebSocket upgrader
 // enforces.
 //
-// Coverage:
-//   - All state-mutating verbs (POST/PUT/DELETE/PATCH) on every
-//     route, since they all change durable state.
-//   - GETs on /api/bootstrap/* because the job summaries leak
-//     recent bootstrap targets (IPs, hostnames, providers) to
-//     anyone able to elicit a same-cookie-scope read from the
-//     operator's browser. Other GETs are intentionally not
-//     guarded — inventory/runs/etc. are designed to be readable.
+// Two layers, applied independently:
 //
-// Browsers don't carry Origin on every GET, and curl/CLI clients
-// don't set it at all — we only reject when the header is present
-// and wrong, so non-browser callers (the deployment-time admin
-// path) keep working.
+//   - Host allowlist (DNS-rebinding defence) on EVERY /api/ request,
+//     read or write. Rebinding is primarily a read primitive: after
+//     the rebind the attacker's page is same-origin and can GET
+//     /api/inventory, /api/vault, /api/settings, /api/servers, etc.,
+//     so a write-only Host check would leave the whole read surface
+//     exfiltrating. The only tell is the Host header, which still
+//     names the attacker's domain (see hostguard.go). Static assets
+//     (the SPA shell under "/") are public and stay unguarded so the
+//     page still loads; everything sensitive lives under /api/.
 //
-// The Origin == Host comparison alone is defeated by DNS rebinding
-// (see hostguard.go): after the rebind every request the attacker's
-// page makes is same-origin from the browser's point of view, so
-// guarded requests additionally require a recognised Host header —
-// regardless of whether Origin is present, because same-origin GETs
-// (the bootstrap read endpoints, WS upgrades) don't carry one. The
-// WebSocket routes are included in the guarded set for exactly that
-// reason; the upgrader's own CheckOrigin stays as the second layer.
+//   - Origin == Host (CSRF defence) on state-mutating verbs and the
+//     run-stream WS upgrades. Browsers omit Origin on same-origin
+//     GETs and curl/CLI clients omit it entirely, so we only reject a
+//     present-and-wrong Origin — non-browser admin callers keep
+//     working. This mirrors the WS upgrader's own CheckOrigin
+//     (sameOriginCheck), reused here so the two never drift.
 func withOriginGuard(h http.Handler, allowedHosts map[string]struct{}) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if guardedRequest(r) {
-			if !hostAllowed(r.Host, allowedHosts) {
-				writeError(w, http.StatusForbidden, fmt.Errorf("request Host %q not recognised (DNS-rebinding guard) — if ansbui is behind a reverse proxy, list its public hostname in %s", r.Host, allowedHostsEnv))
-				return
-			}
-			if !originMatchesHost(r) {
-				writeError(w, http.StatusForbidden, errors.New("cross-origin request rejected"))
-				return
-			}
+		if hostGuardedRequest(r) && !hostAllowed(r.Host, allowedHosts) {
+			writeError(w, http.StatusForbidden, fmt.Errorf("request Host %q not recognised (DNS-rebinding guard) — if ansbui is behind a reverse proxy, list its public hostname in %s", r.Host, allowedHostsEnv))
+			return
+		}
+		if originGuardedRequest(r) && !sameOriginCheck(r) {
+			writeError(w, http.StatusForbidden, errors.New("cross-origin request rejected"))
+			return
 		}
 		h.ServeHTTP(w, r)
 	})
 }
 
-// guardedRequest reports whether the origin/host guard applies to r —
-// see withOriginGuard's coverage notes for the rationale behind each
-// method / path class.
-func guardedRequest(r *http.Request) bool {
+// hostGuardedRequest reports whether the DNS-rebinding Host check
+// applies: every /api/ request (reads included), regardless of
+// method. The static SPA shell served from "/" is deliberately
+// excluded — it carries no operator data.
+func hostGuardedRequest(r *http.Request) bool {
+	return strings.HasPrefix(r.URL.Path, "/api/")
+}
+
+// originGuardedRequest reports whether the Origin==Host CSRF check
+// applies: all state-mutating verbs plus the run-stream WS upgrades
+// (which a rebound page could otherwise open with a matching Origin).
+func originGuardedRequest(r *http.Request) bool {
 	switch r.Method {
 	case http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodPatch:
 		return true
@@ -160,18 +161,6 @@ func guardedRequest(r *http.Request) bool {
 	default:
 		return false
 	}
-}
-
-// originMatchesHost accepts a missing Origin (non-browser clients)
-// and otherwise requires the parsed Origin host:port to equal the
-// request's Host — the same comparison the WS upgrader enforces.
-func originMatchesHost(r *http.Request) bool {
-	origin := r.Header.Get("Origin")
-	if origin == "" {
-		return true
-	}
-	u, err := url.Parse(origin)
-	return err == nil && u.Host != "" && u.Host == r.Host
 }
 
 // Body size caps for POST / PUT handlers. Control-plane payloads
