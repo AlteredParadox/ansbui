@@ -149,14 +149,15 @@ func (c *Client) Metrics(ctx context.Context) (MetricsResult, error) {
 		},
 		{
 			name: "up",
-			// A host usually exposes several scrape targets (node,
-			// blackbox, cadvisor…) that all collapse onto one key
-			// once the port is stripped. Bare `up` returned one row
-			// per target and last-write-won, so a host's status
-			// flapped with row order whenever any one exporter was
-			// down. max-aggregating makes it deterministic: up if
-			// any target on the host answers.
-			query: `max by (` + c.label + `) (up)`,
+			// A host often exposes several scrape targets (node,
+			// blackbox, cadvisor…) whose instance labels differ only by
+			// port, so they stay distinct series and collapse onto one
+			// host key only AFTER hostFromLabel strips the port — a
+			// server-side `max by (instance)` wouldn't merge them
+			// because the port is part of instance. instantQuery does
+			// the host-level collapse with a max, so a host reads "up"
+			// if any of its targets answers, independent of row order.
+			query: `up`,
 			apply: func(_ string, v float64, m *HostMetric) { m.Up = v > 0 },
 		},
 	}
@@ -273,7 +274,17 @@ func (c *Client) instantQuery(ctx context.Context, q string) (map[string]float64
 		if math.IsNaN(v) || math.IsInf(v, 0) {
 			continue
 		}
-		out[host] = v
+		// Multiple scrape targets can map to the same host once
+		// hostFromLabel strips the port (node_exporter :9100 and
+		// blackbox :9115 both key to "web1"). Take the max so the
+		// collapse is deterministic instead of last-write-wins on
+		// Prometheus's row order — for `up` that means "up if any
+		// target answers", which is the intent; for the single-target
+		// metrics (cpu/mem/load/uptime) a collision is anomalous and
+		// max is as good as any while staying order-independent.
+		if prev, ok := out[host]; !ok || v > prev {
+			out[host] = v
+		}
 	}
 	return out, nil
 }

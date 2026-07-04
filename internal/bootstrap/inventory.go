@@ -87,45 +87,64 @@ func addHostToInventoryYAML(content []byte, provider, fqdn string) ([]byte, erro
 	return encodeInventory(root, content, preamble)
 }
 
-// checkExistingHost runs the whole-tree duplicate scan before any
-// mutation: hosts nested in provider subgroups, other umbrella
-// branches, and top-level groups — not just direct provider
-// siblings. Returns alreadyOurs=true when fqdn already lives
-// somewhere under the target provider's subtree (idempotent no-op
-// for the caller) and an error when it lives under any other group.
+// checkExistingHost scans only the provider groups under the umbrella
+// path (all.children.vps_servers.children.debian_servers.children.*)
+// and each of their subtrees. Returns alreadyOurs=true when fqdn is
+// already anywhere under the target provider (idempotent no-op) and an
+// error when it's under a *different* provider (the cross-provider
+// fan-out we refuse to create).
+//
+// It deliberately ignores the host appearing elsewhere — under
+// all.hosts (the common "connection vars here, group membership over
+// there" layout), or in a hand-maintained group like `monitoring`.
+// Those are legitimate and orthogonal to the provider grouping; an
+// earlier whole-tree scan wrongly failed idempotent re-bootstraps for
+// them.
 func checkExistingHost(top *yaml.Node, provider, fqdn string) (alreadyOurs bool, err error) {
-	for i := 0; i+1 < len(top.Content); i += 2 {
-		path := hostGroupPath(top.Content[i].Value, top.Content[i+1], fqdn)
-		if path == nil {
+	children := umbrellaChildren(top)
+	if children == nil {
+		return false, nil
+	}
+	for i := 0; i+1 < len(children.Content); i += 2 {
+		providerName := children.Content[i].Value
+		if !hostInSubtree(children.Content[i+1], fqdn) {
 			continue
 		}
-		for _, g := range path {
-			if g == provider {
-				return true, nil
-			}
+		if providerName == provider {
+			return true, nil
 		}
-		return false, fmt.Errorf("host %q is already registered under group %q — remove it from there before re-bootstrapping under %q", fqdn, path[len(path)-1], provider)
+		return false, fmt.Errorf("host %q is already registered under provider %q — remove it from there before re-bootstrapping under %q", fqdn, providerName, provider)
 	}
 	return false, nil
 }
 
-// hostGroupPath returns the chain of group names (starting at name)
-// leading to the `hosts:` entry containing fqdn inside node's
-// subtree, or nil if the host isn't there.
-func hostGroupPath(name string, node *yaml.Node, fqdn string) []string {
+// umbrellaChildren navigates read-only to the provider-groups map at
+// all.children.<umbrella...>.children, or nil if any rung is absent
+// (no providers registered yet → no possible duplicate).
+func umbrellaChildren(top *yaml.Node) *yaml.Node {
+	cur := findMapValue(top, "all")
+	for _, group := range inventoryUmbrellaGroups {
+		cur = findMapValue(findMapValue(cur, "children"), group)
+	}
+	return findMapValue(cur, "children")
+}
+
+// hostInSubtree reports whether fqdn appears in node's own `hosts:` or
+// in any nested group under node's `children:`.
+func hostInSubtree(node *yaml.Node, fqdn string) bool {
 	if hosts := findMapValue(node, "hosts"); findMapValue(hosts, fqdn) != nil {
-		return []string{name}
+		return true
 	}
 	children := findMapValue(node, "children")
 	if children == nil || children.Kind != yaml.MappingNode {
-		return nil
+		return false
 	}
 	for i := 0; i+1 < len(children.Content); i += 2 {
-		if p := hostGroupPath(children.Content[i].Value, children.Content[i+1], fqdn); p != nil {
-			return append([]string{name}, p...)
+		if hostInSubtree(children.Content[i+1], fqdn) {
+			return true
 		}
 	}
-	return nil
+	return false
 }
 
 // parseInventoryRoot turns operator-supplied inventory bytes into

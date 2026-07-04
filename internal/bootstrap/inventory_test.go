@@ -101,18 +101,54 @@ func TestAddHostCrossProviderNestedSubgroup(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected duplicate error for host in another provider's nested subgroup (old check missed this)")
 	}
-	if !strings.Contains(err.Error(), "hetzner_fsn") {
-		t.Errorf("error should name the group holding the host, got: %v", err)
+	if !strings.Contains(err.Error(), "hetzner") {
+		t.Errorf("error should name the provider that owns the host, got: %v", err)
 	}
 }
 
-func TestAddHostDupInOtherTopLevelGroup(t *testing.T) {
+func TestAddHostVarsUnderAllHostsIsNotADuplicate(t *testing.T) {
+	// Idiomatic layout: connection vars on all.hosts, group membership
+	// via the provider group. Bootstrapping the same host must add it
+	// to the provider (not error, and not treat all.hosts as "already
+	// registered under group all").
 	content := `all:
   hosts:
     web1.example.com:
+      ansible_host: 203.0.113.9
+  children:
+    vps_servers:
+      children:
+        debian_servers:
+          children: {}
 `
-	if _, err := addHostToInventoryYAML([]byte(content), "ovh", existingHost); err == nil {
-		t.Fatal("expected duplicate error for host under all.hosts")
+	out, err := addHostToInventoryYAML([]byte(content), "hetzner", existingHost)
+	if err != nil {
+		t.Fatalf("host with vars under all.hosts must not be a duplicate error, got: %v", err)
+	}
+	if !strings.Contains(string(out), "hetzner") {
+		t.Errorf("host was not added under the hetzner provider:\n%s", out)
+	}
+	// The all.hosts vars entry must survive.
+	if !strings.Contains(string(out), "ansible_host: 203.0.113.9") {
+		t.Errorf("all.hosts vars entry was dropped:\n%s", out)
+	}
+}
+
+func TestAddHostInUnrelatedGroupIsNotADuplicate(t *testing.T) {
+	// A hand-maintained group orthogonal to provider grouping must not
+	// block registration under the provider.
+	content := `all:
+  children:
+    monitoring:
+      hosts:
+        web1.example.com:
+    vps_servers:
+      children:
+        debian_servers:
+          children: {}
+`
+	if _, err := addHostToInventoryYAML([]byte(content), "hetzner", existingHost); err != nil {
+		t.Fatalf("host in an unrelated group must not be a duplicate error, got: %v", err)
 	}
 }
 

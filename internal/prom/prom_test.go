@@ -41,6 +41,39 @@ func TestClampPercentNaN(t *testing.T) {
 	}
 }
 
+// TestInstantQueryCollapsesMultiTargetHost: a host scraped by several
+// exporters yields one `up` row per port; after the port is stripped
+// they share a host key and must collapse deterministically to "up if
+// any target is up" — not last-write-wins on Prometheus row order.
+func TestInstantQueryCollapsesMultiTargetHost(t *testing.T) {
+	t.Setenv("ANSBUI_PROM_ALLOWED_HOSTS", "")
+	// Same two targets, both orderings — the result must not depend on
+	// which row Prometheus lists first.
+	bodies := []string{
+		`[{"metric":{"instance":"web1:9100"},"value":[0,"1"]},{"metric":{"instance":"web1:9115"},"value":[0,"0"]}]`,
+		`[{"metric":{"instance":"web1:9115"},"value":[0,"0"]},{"metric":{"instance":"web1:9100"},"value":[0,"1"]}]`,
+	}
+	for _, rows := range bodies {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintf(w, `{"status":"success","data":{"resultType":"vector","result":%s}}`, rows)
+		}))
+		c, err := NewClient(srv.URL, "instance")
+		if err != nil {
+			srv.Close()
+			t.Fatalf("NewClient: %v", err)
+		}
+		out, err := c.instantQuery(context.Background(), "up")
+		srv.Close()
+		if err != nil {
+			t.Fatalf("instantQuery: %v", err)
+		}
+		if out["web1"] != 1 {
+			t.Errorf("web1 up collapsed to %v, want 1 (up if any target up); rows=%s", out["web1"], rows)
+		}
+	}
+}
+
 // TestInstantQuerySkipsNaNAndInf: MemTotal=0 turns the mem expression
 // into NaN, which Prometheus serialises verbatim — those samples must
 // be dropped, not converted to garbage integers.

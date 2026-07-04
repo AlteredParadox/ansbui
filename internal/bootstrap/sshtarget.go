@@ -202,6 +202,16 @@ func sudoWrapper(cmd string) string {
 	q := shellQuote(cmd)
 	return `set -e; IFS= read -r SUDO_PW; ` +
 		`if sudo -n true 2>/dev/null; then unset SUDO_PW; exec sudo -n bash -c ` + q + `; fi; ` +
+		// Validate the password against an ISOLATED pipe first — only
+		// the password, then EOF. On a wrong password sudo makes exactly
+		// one PAM attempt and hits EOF; it cannot read into the payload
+		// (the inner command's stdin, e.g. the generated ansible-user
+		// password) as retry attempts. `set -e` aborts here on failure,
+		// so the run below only executes once the password is known-good
+		// — meaning sudo authenticates on its first attempt, consumes
+		// exactly the password line, and the rest of stdin flows to the
+		// inner command intact.
+		`printf '%s\n' "$SUDO_PW" | sudo -k -S -p '' -v; ` +
 		`{ printf '%s\n' "$SUDO_PW"; unset SUDO_PW; cat; } | sudo -k -S -p '' bash -c ` + q
 }
 

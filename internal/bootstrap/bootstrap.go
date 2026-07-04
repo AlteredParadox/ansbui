@@ -1010,7 +1010,12 @@ func ansibleUserSetupScript(pubKey string) string {
 //   - sshd_config has no Port line → append one
 //   - /etc/ssh/sshd_config.d/*.conf overrides → rewrite in place
 //
-// If the active port is already target the script no-ops.
+// The no-op fast path is gated on the actual LISTENER, not the config
+// file: a box half-flipped by an earlier run (sshd_config already says
+// Port TARGET but ssh.socket still holds :22) must fall through to
+// remediation instead of trusting the config and exiting 0. Only when
+// ss is unavailable (minimal alpine) do we fall back to the config
+// check, since there's no way to observe the listener.
 //
 // Socket-activated sshd (Ubuntu 22.10+, incl. 24.04) needs special
 // handling: when ssh.socket owns the listener, the Port directive is
@@ -1028,22 +1033,25 @@ func sshdPortScript(target int) string {
 	return strings.Join([]string{
 		`set -e`,
 		`TARGET=` + t,
-		`CURRENT=$(grep -hE '^[[:space:]]*Port[[:space:]]+' /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*.conf 2>/dev/null | awk '{print $2}' | tail -1)`,
-		`if [ "$CURRENT" = "$TARGET" ]; then echo "sshd already on port $TARGET"; exit 0; fi`,
+		`listening() { ss -tln 2>/dev/null | grep -qE "[:.]$1([[:space:]]|$)"; }`,
+		`if command -v ss >/dev/null 2>&1; then HAVE_SS=1; else HAVE_SS=; fi`,
+		// Ground-truth no-op: only trust the config when we can't see
+		// the listener.
+		`if [ -n "$HAVE_SS" ]; then if listening "$TARGET"; then echo "sshd already listening on port $TARGET"; exit 0; fi; else CURRENT=$(grep -hE '^[[:space:]]*Port[[:space:]]+' /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*.conf 2>/dev/null | awk '{print $2}' | tail -1); if [ "$CURRENT" = "$TARGET" ]; then echo "sshd config already on port $TARGET (no ss to verify listener)"; exit 0; fi; fi`,
 		`if grep -qE '^[[:space:]]*Port[[:space:]]+' /etc/ssh/sshd_config; then sed -i -E "s/^[[:space:]]*Port[[:space:]]+.*/Port $TARGET/" /etc/ssh/sshd_config; else printf 'Port %s\n' "$TARGET" >> /etc/ssh/sshd_config; fi`,
 		`for f in /etc/ssh/sshd_config.d/*.conf; do [ -f "$f" ] || continue; if grep -qE '^[[:space:]]*Port[[:space:]]+' "$f"; then sed -i -E "s/^[[:space:]]*Port[[:space:]]+.*/Port $TARGET/" "$f"; fi; done`,
 		`sshd -t`,
 		`SOCK=`,
 		`for s in ssh.socket sshd.socket; do if systemctl is-active --quiet "$s" 2>/dev/null; then SOCK=$s; break; fi; done`,
-		`if [ -n "$SOCK" ]; then systemctl disable --now "$SOCK" >/dev/null 2>&1 || true; systemctl enable ssh >/dev/null 2>&1 || systemctl enable sshd >/dev/null 2>&1 || true; systemctl restart ssh 2>/dev/null || systemctl restart sshd; echo "sshd restarted on port $TARGET ($SOCK was holding the listener; socket activation disabled)"; else systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || service ssh reload; echo "sshd reloaded on port $TARGET"; fi`,
+		`if [ -n "$SOCK" ]; then systemctl disable --now "$SOCK" >/dev/null 2>&1 || true; systemctl enable ssh >/dev/null 2>&1 || systemctl enable sshd >/dev/null 2>&1 || echo "warning: could not enable ssh service for boot — box may revert to socket activation after reboot" >&2; systemctl restart ssh 2>/dev/null || systemctl restart sshd; echo "sshd restarted on port $TARGET ($SOCK was holding the listener; socket activation disabled)"; else systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || service ssh reload; echo "sshd reloaded on port $TARGET"; fi`,
 		// Trust nothing above: reload/restart exiting 0 doesn't prove the
 		// listener moved (a leftover socket unit, a second override file,
 		// a distro quirk). Poll the actual sockets so "success on port
 		// 4242 while still bound to 22" can't be reported again. Boxes
 		// without ss (minimal alpine) skip the check rather than fail.
-		`command -v ss >/dev/null 2>&1 || exit 0`,
+		`[ -n "$HAVE_SS" ] || exit 0`,
 		`i=0`,
-		`while [ "$i" -lt 10 ]; do if ss -tln 2>/dev/null | grep -qE "[:.]$TARGET([[:space:]]|$)"; then exit 0; fi; i=$((i+1)); sleep 1; done`,
+		`while [ "$i" -lt 10 ]; do if listening "$TARGET"; then exit 0; fi; i=$((i+1)); sleep 1; done`,
 		`echo "sshd reported success but nothing is listening on port $TARGET — socket activation or a config override may still hold the old port" >&2`,
 		`exit 1`,
 	}, "; ")
