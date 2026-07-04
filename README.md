@@ -40,7 +40,51 @@ ansbui writes to `~/.config/ansbui/config.json` (and `runs.json`). The UI is the
 
 ### Prometheus
 
-Paste your Prometheus URL (e.g. `http://prom.example.com:9090`) in **Settings**. The host label defaults to `instance` — change if your node_exporter scrapes use a different label. Matching strips any `:port` suffix.
+Paste your Prometheus URL (e.g. `http://prom.example.com:9090`) in **Settings**. The host label defaults to `instance` — change if your node_exporter scrapes use a different label. Matching strips any `:port` suffix (bracketed IPv6 instance labels are handled).
+
+The Prometheus URL is fetched **server-side with no auth in front of it**, so it's constrained by an SSRF allowlist. By default only loopback hosts (`127.0.0.1`, `::1`, `localhost`) are accepted, and cloud-metadata addresses (169.254.0.0/16, `metadata.google.internal`, …) are always rejected. To point at a Prometheus on another host, list it in `ANSBUI_PROM_ALLOWED_HOSTS` (see below). This is enforced both when you save the URL and on every metrics fetch, so a hand-edited `config.json` can't bypass it.
+
+### Environment variables
+
+All optional. The security-relevant ones (`ANSBUI_ALLOWED_HOSTS`, `ANSBUI_PROM_ALLOWED_HOSTS`) matter mainly for non-loopback / reverse-proxy deployments.
+
+| Variable | Purpose | Default |
+|----------|---------|---------|
+| `ANSBUI_ALLOWED_HOSTS` | Comma-separated `host` or `host:port` values the DNS-rebinding guard accepts in the request `Host` header. **Required when behind a reverse proxy that forwards a public hostname** (see below). The port is optional — it's stripped on both sides before matching. | Only loopback (`localhost`, `*.localhost`, IP literals) and the hostname from `-addr` are accepted. |
+| `ANSBUI_PROM_ALLOWED_HOSTS` | Comma-separated `host` or `host:port` allowed as the Prometheus scrape target (SSRF guard). | Loopback only. |
+| `ANSBUI_INSECURE_SSH` | `1` or `true` disables SSH **host-key** verification for connections ansbui itself makes (the bootstrap flow's first contact with a fresh box). Lab-only; MITM is undetectable in this mode and it logs a warning on startup. | Off — host keys are verified against `~/.ssh/known_hosts` (TOFU on first sight, hard fail on mismatch). |
+| `ANSBUI_CONFIG` | Path to `config.json`. | `$XDG_CONFIG_HOME/ansbui/config.json` (i.e. `~/.config/ansbui/config.json`). |
+| `ANSBUI_RUNS` | Path to `runs.json` (run history). | Alongside the config file. |
+| `SSH_AUTH_SOCK` | Standard. If set, ansbui uses the running `ssh-agent` for controller auth when no key path is configured. | — |
+
+`RELAY_CONFIG` / `RELAY_RUNS` are accepted as back-compat aliases for the `ANSBUI_*` path variables.
+
+### Remote access & the DNS-rebinding guard
+
+ansbui binds to loopback by default. Any exposure to another interface should go **through a reverse proxy that terminates TLS and adds auth** — ansbui has none of its own.
+
+Because there's no app-level auth, ansbui defends its API against DNS rebinding (a malicious page that re-resolves its own domain to `127.0.0.1` and then drives the local API from the victim's browser). The guard rejects any `/api/` request whose `Host` header isn't a recognised name. A reverse proxy forwards the browser's original `Host` (e.g. `ansbui.example.com`), which ansbui doesn't know about by default — so **you must list the proxy's public hostname in `ANSBUI_ALLOWED_HOSTS`**, or every API call returns `403` and the UI loads but does nothing. (The static page under `/` stays public so it still loads; only `/api/` is guarded.)
+
+Example — Caddy in front, ansbui on loopback, run under systemd:
+
+```
+# Caddyfile — forwards the public Host header unchanged
+ansbui.example.com {
+    reverse_proxy 127.0.0.1:8787
+}
+```
+
+```ini
+# /etc/systemd/system/ansbui.service.d/allowed-hosts.conf
+[Service]
+Environment=ANSBUI_ALLOWED_HOSTS=ansbui.example.com
+```
+
+```sh
+sudo systemctl daemon-reload && sudo systemctl restart ansbui
+```
+
+List multiple names comma-separated (`ANSBUI_ALLOWED_HOSTS=ansbui.example.com,ansbui.internal`). If the `403` error names a `Host` with a port, copying that value verbatim works too — the port is ignored when matching.
 
 ## Repo layout
 
@@ -57,8 +101,10 @@ web/                    # static bundle (embedded)
 ## Security posture
 
 - **ansbui has no built-in authentication.** Anyone who can reach the listen port can drive `ansible-playbook` as the configured SSH user. When bound to a non-loopback address, the binary logs a warning on startup. Put it behind an SSH tunnel (`ssh -L 8787:localhost:8787 host`), a VPN, or a reverse proxy (Caddy / Nginx) with auth before exposing to untrusted networks.
-- SSH auth to the ansible controller is key-based only (agent or on-disk key) — no password prompt.
-- The websocket upgrader enforces same-origin.
+- SSH auth to the ansible controller is key-based only (agent or on-disk key) — no password prompt. Host keys are verified (see `ANSBUI_INSECURE_SSH` to opt out in a lab).
+- **DNS-rebinding guard:** every `/api/` request must carry a recognised `Host` header (loopback, the `-addr` hostname, or an `ANSBUI_ALLOWED_HOSTS` entry). Reverse-proxy deployments must set `ANSBUI_ALLOWED_HOSTS` — see [Remote access](#remote-access--the-dns-rebinding-guard).
+- **CSRF guard:** state-mutating requests and the run-stream WebSocket upgrades additionally require `Origin` to match `Host`; the WebSocket upgrader enforces the same same-origin check.
+- **SSRF guard:** the server-side Prometheus fetch is constrained to loopback / `ANSBUI_PROM_ALLOWED_HOSTS`, with cloud-metadata addresses always denied — enforced at both save time and fetch time.
 - Playbook paths are validated against `^[A-Za-z0-9._-]+$` per segment, blocking `..` traversal.
 - Ansible argument keys are validated; values are shell-quoted.
 - The binary writes config with mode `0600` in `~/.config/ansbui/`.
