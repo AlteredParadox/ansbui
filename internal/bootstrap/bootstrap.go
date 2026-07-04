@@ -95,6 +95,18 @@ func lockTarget(key string) *sync.Mutex {
 	return m
 }
 
+// lockInventory returns a mutex specific to one inventory file on one
+// control server. targetMu only serialises runs against the *same*
+// target; two concurrent bootstraps of different servers still share
+// srv.Inventory, and their read-modify-write cycles would interleave —
+// the second write silently erases the first run's host even though
+// both runs report success. Keyed through the same registry as
+// lockTarget with a NUL-separated namespace so an ip:port target key
+// can never collide with it.
+func lockInventory(srv config.Server) *sync.Mutex {
+	return lockTarget("inventory\x00" + srv.ID + "\x00" + path.Join(srv.WorkDir, srv.Inventory))
+}
+
 // Run executes the full bootstrap workflow, invoking emit for
 // every progress event. ctx cancels the workflow; emit must be
 // safe to call concurrently with itself only if the caller says so
@@ -860,6 +872,13 @@ func updateInventoryFile(ctx context.Context, pool *sshpool.Pool, srv config.Ser
 	if srv.Inventory == "" {
 		return errors.New("server has no inventory path configured — set it before bootstrap so the new host can be registered")
 	}
+	// Serialise the whole read-modify-write against concurrent
+	// bootstraps of *other* targets on the same control server —
+	// targetMu doesn't cover that, and the atomic write only makes
+	// each write safe, not the cycle.
+	mu := lockInventory(srv)
+	mu.Lock()
+	defer mu.Unlock()
 	cli, err := pool.Client(ctx, srv)
 	if err != nil {
 		return err

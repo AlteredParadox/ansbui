@@ -139,12 +139,31 @@ func runStreaming(ctx context.Context, pool *sshpool.Pool, srv config.Server, cm
 	go func() { defer wg.Done(); scanLines(ctx, stdoutR, "stdout", out) }()
 	go func() { defer wg.Done(); scanLines(ctx, stderrR, "stderr", out) }()
 
+	// On cancel the scanners stop reading, but the ssh session's
+	// io.Copy may still be blocked mid-Write into one of these
+	// unbuffered pipes. sess.Close() only unblocks channel reads,
+	// not pipe writes, so Session.Wait() — and therefore Stream and
+	// this function — would park forever: the run never persists and
+	// the whole pipeline (goroutines + ssh session) leaks per event.
+	// Failing the read ends makes those blocked writes return an
+	// error so the session can unwind.
+	watchDone := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = stdoutR.CloseWithError(ctx.Err())
+			_ = stderrR.CloseWithError(ctx.Err())
+		case <-watchDone:
+		}
+	}()
+
 	start := time.Now()
 	runErr := <-done
 	// Drain both pipe scanners before we send any further events —
 	// otherwise close(out) in our caller can race with an in-flight
 	// scanLines send and panic on "send on closed channel".
 	wg.Wait()
+	close(watchDone)
 	out <- Event{Type: "done", Text: fmt.Sprintf("completed in %.1fs", time.Since(start).Seconds())}
 	if runErr != nil && !errors.Is(runErr, context.Canceled) {
 		return runErr

@@ -108,19 +108,29 @@ func annotateVaultFiles(ctx context.Context, pool *sshpool.Pool, srv config.Serv
 	if err != nil {
 		return
 	}
-	var b strings.Builder
-	fmt.Fprintf(&b, "cd %s && ", shellQuote(srv.WorkDir))
-	for _, f := range files {
-		// stat doesn't interpret \t in -c format strings, so use a
-		// space separator — unambiguous for "size mtime".
-		fmt.Fprintf(&b, "printf '>>%s\\n'; stat -c '%%s %%Y' %s 2>/dev/null; head -n1 %s 2>/dev/null; ",
-			f.Path, shellQuote(f.Path), shellQuote(f.Path))
-	}
-	stdout, _, err := sshpool.Run(cli, b.String())
+	stdout, _, err := sshpool.Run(cli, vaultAnnotateCmd(srv.WorkDir, files))
 	if err != nil {
 		return
 	}
 	parseVaultAnnotations(stdout, files)
+}
+
+// vaultAnnotateCmd builds the batch stat + head command. Every path is
+// shell-quoted — including inside the `>>path` marker, where it goes
+// through printf's own %s as a quoted *argument*, never spliced into
+// the format string. A quote in a filename would otherwise break out
+// of the marker and execute as the SSH user.
+func vaultAnnotateCmd(workDir string, files []VaultFile) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "cd %s && ", shellQuote(workDir))
+	for _, f := range files {
+		// stat doesn't interpret \t in -c format strings, so use a
+		// space separator — unambiguous for "size mtime".
+		q := shellQuote(f.Path)
+		fmt.Fprintf(&b, "printf '>>%%s\\n' %s; stat -c '%%s %%Y' %s 2>/dev/null; head -n1 %s 2>/dev/null; ",
+			q, q, q)
+	}
+	return b.String()
 }
 
 func parseVaultAnnotations(stdout string, files []VaultFile) {
