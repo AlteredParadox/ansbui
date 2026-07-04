@@ -143,6 +143,7 @@ func TestReinstallPrepScriptPinsConfhome(t *testing.T) {
 		"confhome=" + reinstallConfhomeURL,
 		"confhome_cn=" + reinstallConfhomeURL,
 		"--ci",
+		"--hold 2",
 	} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("prep script missing %q:\n%s", want, script)
@@ -155,6 +156,90 @@ func TestReinstallPrepScriptPinsConfhome(t *testing.T) {
 	shaIdx := strings.Index(script, "sha256sum -c")
 	if sedIdx < shaIdx {
 		t.Fatalf("confhome rewrite happens before checksum verification")
+	}
+}
+
+// installerProbeOut assembles an installerProbeScript-shaped output:
+// os-release, hold-marker count, error-marker count, last log line.
+func installerProbeOut(osRelease, holdCount, errCount, logLine string) string {
+	return osRelease + reinstallProbeMarker + "\n" + holdCount + "\n" + reinstallProbeMarker + "\n" + errCount + "\n" + reinstallProbeMarker + "\n" + logLine + "\n"
+}
+
+func TestEvalInstallerProbe(t *testing.T) {
+	const alpineRelease = "ID=alpine\n"
+	cases := []struct {
+		name       string
+		out        string
+		wantstate  int
+		wantDetail string // substring the detail must contain ("" = don't care)
+	}{
+		{
+			name:       "still installing with progress line",
+			out:        installerProbeOut(alpineRelease, "0", "0", "Downloading cloud image 43%"),
+			wantstate:  installerInstalling,
+			wantDetail: "Downloading cloud image 43%",
+		},
+		{
+			name:      "missing log counts as installing",
+			out:       installerProbeOut(alpineRelease, "", "", ""),
+			wantstate: installerInstalling,
+		},
+		{
+			name:      "hold marker present",
+			out:       installerProbeOut(alpineRelease, "1", "0", "***** HOLD 2 *****"),
+			wantstate: installerHoldDone,
+		},
+		{
+			name:       "error marker present",
+			out:        installerProbeOut(alpineRelease, "0", "1", "Error: no space left on device"),
+			wantstate:  installerErrored,
+			wantDetail: "no space left",
+		},
+		{
+			name:      "hold wins over error",
+			out:       installerProbeOut(alpineRelease, "1", "1", ""),
+			wantstate: installerHoldDone,
+		},
+		{
+			name:      "final OS answered",
+			out:       installerProbeOut(debian13Release, "", "", ""),
+			wantstate: installerFinalOS,
+		},
+		{
+			name:       "malformed output keeps waiting",
+			out:        "garbage",
+			wantstate:  installerInstalling,
+			wantDetail: "probe output",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			verdict, detail := evalInstallerProbe(tc.out, "debian")
+			if verdict != tc.wantstate {
+				t.Fatalf("verdict = %d, want %d (detail: %q)", verdict, tc.wantstate, detail)
+			}
+			if tc.wantDetail != "" && !strings.Contains(detail, tc.wantDetail) {
+				t.Fatalf("detail %q does not contain %q", detail, tc.wantDetail)
+			}
+		})
+	}
+}
+
+func TestInstalledNetVerifyScript(t *testing.T) {
+	script := installedNetVerifyScript([]net.IP{net.ParseIP(testIPv4), net.ParseIP(testIPv6)})
+	for _, want := range []string{
+		"'" + testIPv4 + "'",
+		"'" + testIPv6 + "'",
+		"/os/etc/netplan",
+		"/os/etc/cloud",
+		"NO_CONFIG_DIRS",
+		"FOUND_IP",
+		"FOUND_DHCP",
+		"NOT_FOUND",
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("verify script missing %q:\n%s", want, script)
+		}
 	}
 }
 
@@ -177,30 +262,37 @@ func TestSanitizeLogLine(t *testing.T) {
 	}
 }
 
+// Canonical detected/target addresses used across the netconf
+// tests (RFC5737/RFC3849 documentation ranges).
+const (
+	testIPv4 = "203.0.113.5"
+	testIPv6 = "2001:db8::5"
+)
+
 // prepNetworkInfo mimics the plain-echo block collect_netconf
 // writes into the prep output (values as reinstall.sh formats them,
 // surrounded by unrelated prep noise).
 const prepNetworkInfo = `Downloading cloud image...
 ***** NETWORK INFO *****
 IPv4 MAC: aa:bb:cc:dd:ee:ff
-IPv4 Address: 203.0.113.5/24
+IPv4 Address: ` + testIPv4 + `/24
 IPv4 Gateway: 203.0.113.1
 ---
 IPv6 MAC: aa:bb:cc:dd:ee:ff
-IPv6 Address: 2001:db8::5/64
+IPv6 Address: ` + testIPv6 + `/64
 IPv6 Gateway: 2001:db8::1
 Building initrd...`
 
 func TestParseReinstallNetInfo(t *testing.T) {
 	nc := parseReinstallNetInfo(prepNetworkInfo)
-	if nc.ipv4Addr != "203.0.113.5/24" || nc.ipv4Gateway != "203.0.113.1" {
+	if nc.ipv4Addr != testIPv4+"/24" || nc.ipv4Gateway != "203.0.113.1" {
 		t.Fatalf("ipv4 = %q via %q", nc.ipv4Addr, nc.ipv4Gateway)
 	}
-	if nc.ipv6Addr != "2001:db8::5/64" || nc.ipv6Gateway != "2001:db8::1" {
+	if nc.ipv6Addr != testIPv6+"/64" || nc.ipv6Gateway != "2001:db8::1" {
 		t.Fatalf("ipv6 = %q via %q", nc.ipv6Addr, nc.ipv6Gateway)
 	}
 	ips := nc.ips()
-	if len(ips) != 2 || ips[0].String() != "203.0.113.5" || ips[1].String() != "2001:db8::5" {
+	if len(ips) != 2 || ips[0].String() != testIPv4 || ips[1].String() != testIPv6 {
 		t.Fatalf("ips() = %v", ips)
 	}
 
@@ -211,7 +303,7 @@ func TestParseReinstallNetInfo(t *testing.T) {
 	}
 
 	// Empty fields (v6-less box) stay empty and don't produce IPs.
-	v4only := "IPv4 Address: 203.0.113.5/24\nIPv4 Gateway: 203.0.113.1\nIPv6 Address:\nIPv6 Gateway:\n"
+	v4only := "IPv4 Address: " + testIPv4 + "/24\nIPv4 Gateway: 203.0.113.1\nIPv6 Address:\nIPv6 Gateway:\n"
 	nc = parseReinstallNetInfo(v4only)
 	if nc.ipv6Addr != "" || len(nc.ips()) != 1 {
 		t.Fatalf("v4-only parse: ipv6Addr=%q ips=%v", nc.ipv6Addr, nc.ips())
@@ -230,14 +322,14 @@ func TestClassifyDetectedNetconf(t *testing.T) {
 		targets  []net.IP
 		want     int
 	}{
-		{"match v4", []net.IP{ip("203.0.113.5")}, []net.IP{ip("203.0.113.5")}, netconfMatch},
-		{"match v6 among many", []net.IP{ip("203.0.113.5"), ip("2001:db8::5")}, []net.IP{ip("2001:db8::5")}, netconfMatch},
-		{"no data", nil, []net.IP{ip("203.0.113.5")}, netconfNoData},
-		{"nat private v4", []net.IP{ip("10.0.0.7")}, []net.IP{ip("203.0.113.5")}, netconfNATLikely},
-		{"nat cgnat", []net.IP{ip("100.64.1.2")}, []net.IP{ip("203.0.113.5")}, netconfNATLikely},
-		{"public mismatch", []net.IP{ip("198.51.100.9")}, []net.IP{ip("203.0.113.5")}, netconfMismatch},
-		{"dual public mismatch", []net.IP{ip("198.51.100.9"), ip("2001:db8::9")}, []net.IP{ip("203.0.113.5")}, netconfMismatch},
-		{"private plus public no match", []net.IP{ip("10.0.0.7"), ip("2001:db8::9")}, []net.IP{ip("203.0.113.5")}, netconfNATLikely},
+		{"match v4", []net.IP{ip(testIPv4)}, []net.IP{ip(testIPv4)}, netconfMatch},
+		{"match v6 among many", []net.IP{ip(testIPv4), ip(testIPv6)}, []net.IP{ip(testIPv6)}, netconfMatch},
+		{"no data", nil, []net.IP{ip(testIPv4)}, netconfNoData},
+		{"nat private v4", []net.IP{ip("10.0.0.7")}, []net.IP{ip(testIPv4)}, netconfNATLikely},
+		{"nat cgnat", []net.IP{ip("100.64.1.2")}, []net.IP{ip(testIPv4)}, netconfNATLikely},
+		{"public mismatch", []net.IP{ip("198.51.100.9")}, []net.IP{ip(testIPv4)}, netconfMismatch},
+		{"dual public mismatch", []net.IP{ip("198.51.100.9"), ip("2001:db8::9")}, []net.IP{ip(testIPv4)}, netconfMismatch},
+		{"private plus public no match", []net.IP{ip("10.0.0.7"), ip("2001:db8::9")}, []net.IP{ip(testIPv4)}, netconfNATLikely},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -16,14 +16,20 @@ import (
 //
 //  1. download reinstall.sh (sha256-verified against the pinned
 //     commit) and repoint its helper downloads at the same commit
-//  2. run reinstall.sh <os> <version> --ssh-port 4242 --ssh-key <pub>
+//  2. run reinstall.sh <os> <version> --ssh-port 4242 --ssh-key
+//     <pub> --hold 2 (hold = don't auto-reboot out of the installer)
 //  3. cross-check the network config reinstall.sh detected against
 //     the bootstrap target address — abort BEFORE the reboot if the
 //     new system would come up on the wrong address
 //  4. capture the old system's /etc/machine-id, trigger a reboot in
 //     a detached session, and confirm the old system actually drops
 //     off its SSH port
-//  5. poll-dial :4242 with key auth until the freshly-installed
+//  5. wait for the installer env to finish writing the new OS
+//     (--hold 2 parks it instead of rebooting), then verify the
+//     rendered network config under /os mentions the detected
+//     address, persist the install log into the new system, and
+//     trigger the final reboot ourselves
+//  6. poll-dial :4242 with key auth until the freshly-installed
 //     system answers with the right os-release, a changed
 //     machine-id, and a settled systemd
 //
@@ -203,7 +209,8 @@ func runReinstall(ctx context.Context, target *targetSession, req Request, pubKe
 	// wrong address: a guaranteed 45-minute timeout and possibly a
 	// console-rescue job. Abort now instead, while the old system
 	// is still alive and untouched.
-	if err := verifyReinstallNetconf(ctx, parseReinstallNetInfo(stdout), req.IP, emit); err != nil {
+	netInfo := parseReinstallNetInfo(stdout)
+	if err := verifyReinstallNetconf(ctx, netInfo, req.IP, emit); err != nil {
 		return nil, err
 	}
 
@@ -220,22 +227,7 @@ func runReinstall(ctx context.Context, target *targetSession, req Request, pubKe
 	}
 
 	emit("meta", "Triggering reboot (detached) — SSH session will drop in ~2s...")
-	// Fire-and-forget, hardened against session teardown: setsid
-	// detaches the subshell from the SSH session so neither sshd's
-	// process-group cleanup nor systemd-logind (KillUserProcesses)
-	// can reap it before the sleep elapses — with a bare `&` the
-	// reboot was occasionally lost that way. `reboot -f` is the
-	// fallback for non-systemd targets. A fast reboot or half-closed
-	// SSH channel can still surface an error from runRoot — the
-	// side-effect has already been scheduled, so treat any error as
-	// a warning; waitForTargetDown below catches the case where the
-	// reboot genuinely never fires.
-	rebootCmd := `nohup setsid bash -c 'sleep 2; systemctl reboot || reboot -f' >/dev/null 2>&1 &`
-	if _, _, err := target.runRoot(ctx, rebootCmd, ""); err != nil {
-		emit("meta", fmt.Sprintf("reboot scheduling returned %v — proceeding (the reboot itself is detached)", err))
-	} else {
-		emit("ok", "reboot scheduled")
-	}
+	scheduleDetachedReboot(ctx, target, emit)
 
 	emit("meta", fmt.Sprintf("Confirming the old system drops off :%d (up to %s)...", req.Port, friendly(targetDownBudget)))
 	if err := waitForTargetDown(ctx, req.IP, req.Port); err != nil {
@@ -243,19 +235,47 @@ func runReinstall(ctx context.Context, target *targetSession, req Request, pubKe
 	}
 	emit("ok", "old system went down — reboot confirmed")
 
-	emit("meta", fmt.Sprintf("Waiting for OS install + reboot, then SSH on :%d (key auth as root). Timeout: %s.", reinstallSSHPort, friendly(reinstallWaitBudget)))
-	emit("meta", fmt.Sprintf("(reinstall.sh exposes SSH on :%d from its installer env so you can screen -r the install — we'll keep probing until os-release, machine-id, and systemd state all say the new system is up.)", reinstallSSHPort))
+	emit("meta", fmt.Sprintf("Waiting for the installer on :%d to finish writing %s %s to disk (--hold 2 parks it there for verification; timeout %s)...", reinstallSSHPort, opts.OS, opts.Version, friendly(reinstallWaitBudget)))
+	if err := runInstallerHoldStage(ctx, req.IP, privKey, netInfo, opts.OS, emit); err != nil {
+		return nil, err
+	}
+
+	emit("meta", fmt.Sprintf("Waiting for the first boot of %s %s on :%d (timeout %s)...", opts.OS, opts.Version, reinstallSSHPort, friendly(reinstallBootBudget)))
 	probe := reinstallReadyProbe{
 		expectedOS:      opts.OS,
 		expectedVersion: opts.Version,
 		oldMachineID:    oldMachineID,
 	}
-	newTarget, err := waitForReinstallTarget(ctx, req.IP, reinstallSSHPort, privKey, probe, emit)
+	newTarget, err := waitForReinstallTarget(ctx, req.IP, reinstallSSHPort, privKey, probe, reinstallBootBudget, emit)
 	if err != nil {
 		return nil, err
 	}
 	emit("ok", fmt.Sprintf("connected to freshly-installed %s %s on :%d", opts.OS, opts.Version, reinstallSSHPort))
 	return newTarget, nil
+}
+
+// detachedRebootCmd triggers a reboot that survives its SSH session
+// ending: setsid detaches the subshell so neither sshd's
+// process-group cleanup nor systemd-logind (KillUserProcesses) can
+// reap it before the sleep elapses — with a bare `&` the reboot was
+// occasionally lost that way. The fallback chain covers every box
+// this runs on: systemctl (debian-family old system / new system),
+// plain reboot (openrc in the alpine installer env), reboot -f
+// (last resort; the callers sync beforehand where it matters).
+const detachedRebootCmd = `nohup setsid sh -c 'sleep 2; systemctl reboot || reboot || reboot -f' >/dev/null 2>&1 &`
+
+// scheduleDetachedReboot fires detachedRebootCmd and treats any
+// error as a warning: a fast reboot or half-closed SSH channel can
+// surface an error from runRoot even though the side-effect is
+// already scheduled. The caller's follow-up wait (waitForTargetDown
+// or the installer/boot probes) catches the case where the reboot
+// genuinely never fires.
+func scheduleDetachedReboot(ctx context.Context, target *targetSession, emit func(typ, text string)) {
+	if _, _, err := target.runRoot(ctx, detachedRebootCmd, ""); err != nil {
+		emit("meta", fmt.Sprintf("reboot scheduling returned %v — proceeding (the reboot itself is detached)", err))
+	} else {
+		emit("ok", "reboot scheduled")
+	}
 }
 
 // reinstallNetInfo is the network config reinstall.sh reports
@@ -432,15 +452,21 @@ func verifyReinstallNetconf(ctx context.Context, nc reinstallNetInfo, targetAddr
 //     answering after the detached reboot fires. A healthy reboot
 //     drops the port within seconds; five minutes is generous slack
 //     for a loaded box flushing to disk.
-//   - reinstallWaitBudget bounds the install + reboot + come-back
-//     wait. Cloud-image installs typically finish in 5-15 minutes,
-//     but a slow provider disk or throttled mirror can stretch
-//     that; 45 keeps a legitimately slow install from being
-//     misreported as a network failure.
+//   - reinstallWaitBudget bounds the installer stage: reboot into
+//     the live env plus writing the new OS to disk (--hold 2 parks
+//     it there when done). Cloud-image installs typically finish in
+//     5-15 minutes, but a slow provider disk or throttled mirror
+//     can stretch that; 45 keeps a legitimately slow install from
+//     being misreported as a network failure.
+//   - reinstallBootBudget bounds the final stage: rebooting out of
+//     the installer env into the new OS's first boot (fs resize,
+//     cloud-init, sshd up). The big variable — install time — has
+//     already elapsed by then, so this is deliberately tighter.
 const (
 	reinstallPrepBudget = 15 * time.Minute
 	targetDownBudget    = 5 * time.Minute
 	reinstallWaitBudget = 45 * time.Minute
+	reinstallBootBudget = 15 * time.Minute
 )
 
 // waitForTargetDown polls host:port with plain TCP dials until the
@@ -545,8 +571,14 @@ func reinstallPrepScript(opts ReinstallOpts, pubKey string) string {
 	// were verified present upstream; passing the flag explicitly
 	// also keeps an upstream default change from silently flipping
 	// the install mode between runs.
+	// --hold 2 stops trans.sh from rebooting out of the installer
+	// env once the new OS is written to disk: the env stays up
+	// (SSH on the same port/key) so runReinstall can verify the
+	// rendered system and persist the install log before triggering
+	// the final reboot itself. See waitForInstallerDone.
 	runCmd := `bash reinstall.sh ` + shellQuote(opts.OS) + ` ` + shellQuote(opts.Version) +
 		` --ci` +
+		` --hold 2` +
 		` --ssh-port ` + fmt.Sprintf("%d", reinstallSSHPort) +
 		` --ssh-key ` + shellQuote(pubKey) +
 		` 2>&1 | tee /tmp/reinstall.log`
@@ -564,6 +596,265 @@ func reinstallPrepScript(opts ReinstallOpts, pubKey string) string {
 		`chmod +x reinstall.sh`,
 		`bash -o pipefail -c ` + shellQuote(runCmd),
 	}, "; ")
+}
+
+// Markers trans.sh writes into /reinstall.log inside the installer
+// env. Both are contiguous literals in the pinned trans.sh (ANSI
+// colour codes wrap them but don't interrupt them), so grep -F
+// finds them reliably. HOLD 2 appears exactly once, when the
+// install has finished and --hold 2 stopped the auto-reboot; ERROR
+// comes from trans.sh's error()/ERR-trap paths.
+const (
+	installerHoldDoneMarker = "***** HOLD 2 *****"
+	installerErrorMarker    = "***** ERROR *****"
+)
+
+// Verdicts for evalInstallerProbe.
+const (
+	installerInstalling = iota // keep waiting (detail = status/log line)
+	installerHoldDone          // install finished, env held for verification
+	installerErrored           // trans.sh reported an error — fail fast
+	installerFinalOS           // box already answers as the target OS
+)
+
+// installerProbeScript gathers the installer stage's state in one
+// round trip: os-release (is this even still the live env?), the
+// hold-done and error marker counts, and the last useful log line.
+// Every fragment tolerates its file/command missing; the counts
+// come back empty when /reinstall.log doesn't exist and are treated
+// as zero on the Go side.
+var installerProbeScript = strings.Join([]string{
+	`cat /etc/os-release 2>/dev/null`,
+	`echo ` + reinstallProbeMarker,
+	`grep -aFc ` + shellQuote(installerHoldDoneMarker) + ` /reinstall.log 2>/dev/null`,
+	`echo ` + reinstallProbeMarker,
+	`grep -aFc ` + shellQuote(installerErrorMarker) + ` /reinstall.log 2>/dev/null`,
+	`echo ` + reinstallProbeMarker,
+	`tail -n 40 /reinstall.log 2>/dev/null | tr '\r' '\n' | grep -Fiav -e password -e token | tail -n 1`,
+	`true`,
+}, "; ")
+
+// evalInstallerProbe classifies one installerProbeScript output.
+// The final-OS check runs first so a box that was already rebooted
+// (manually, or by an upstream behaviour change) short-circuits to
+// the boot probe instead of waiting for a hold marker that will
+// never appear; the stricter machine-id/version checks there still
+// decide whether it really is the new system. Pure function so the
+// classification is unit-testable.
+func evalInstallerProbe(out, expectedOS string) (int, string) {
+	parts := strings.Split(out, reinstallProbeMarker)
+	if len(parts) != 4 {
+		return installerInstalling, "unexpected installer-probe output shape"
+	}
+	osRelease := parts[0]
+	holdCount := strings.TrimSpace(parts[1])
+	errCount := strings.TrimSpace(parts[2])
+	logLine := sanitizeLogLine(parts[3])
+
+	if osMatches(osRelease, expectedOS) {
+		return installerFinalOS, ""
+	}
+	if holdCount != "" && holdCount != "0" {
+		return installerHoldDone, logLine
+	}
+	if errCount != "" && errCount != "0" {
+		if logLine == "" {
+			logLine = "(no log line captured)"
+		}
+		return installerErrored, logLine
+	}
+	status := fmt.Sprintf("in installer env (%s)", detectDistro(osRelease))
+	if logLine != "" {
+		status += " — " + logLine
+	}
+	return installerInstalling, status
+}
+
+// runInstallerHoldStage drives the --hold 2 window: wait for the
+// installer to finish writing the new OS, then — with the box
+// parked in the live env and the new system mounted at /os —
+// persist the install log, verify the rendered network config, and
+// trigger the reboot into the new system. Failing here leaves the
+// box HELD and reachable for inspection instead of rebooting it
+// into a possibly-unreachable first boot.
+func runInstallerHoldStage(ctx context.Context, host string, privKey []byte, netInfo reinstallNetInfo, expectedOS string, emit func(typ, text string)) error {
+	holdTarget, alreadyFinal, err := waitForInstallerDone(ctx, host, reinstallSSHPort, privKey, expectedOS, emit)
+	if err != nil {
+		return err
+	}
+	if alreadyFinal {
+		emit("meta", "target already answers as the final OS — skipping installer-env verification (rebooted out-of-band?)")
+		return nil
+	}
+	defer func() { _ = holdTarget.Close() }()
+	emit("ok", "installer finished writing the new system — verifying before first boot...")
+	if err := verifyInstalledSystem(ctx, holdTarget, host, netInfo, emit); err != nil {
+		return err
+	}
+	emit("meta", "triggering reboot into the freshly-installed system...")
+	scheduleDetachedReboot(ctx, holdTarget, emit)
+	return nil
+}
+
+// waitForInstallerDone polls the installer env on (host:port) until
+// trans.sh reports the install finished (hold marker), errored, or
+// the box already answers as the final OS. Returns the OPEN session
+// on hold-done — the caller runs the verification over it — and
+// (nil, true, nil) when the final OS answered. Timeout means the
+// installer env never finished or never came up at all; its own
+// network setup is the usual culprit for the latter, observable
+// only on the provider console.
+func waitForInstallerDone(ctx context.Context, host string, port int, privKey []byte, expectedOS string, emit func(typ, text string)) (*targetSession, bool, error) {
+	const (
+		initialWait     = 15 * time.Second
+		retryInterval   = 15 * time.Second
+		heartbeatPeriod = 60 * time.Second
+	)
+	deadline := time.Now().Add(reinstallWaitBudget)
+	if err := sleepCtx(ctx, initialWait); err != nil {
+		return nil, false, err
+	}
+	startedAt := time.Now()
+	lastBeat := time.Now()
+	lastStatus := ""
+	for {
+		if time.Now().After(deadline) {
+			hint := "check the provider's serial/VNC console — if the installer env never came up, its network setup is the usual culprit"
+			if lastStatus != "" {
+				hint = fmt.Sprintf("last status: %s — %s", lastStatus, hint)
+			}
+			return nil, false, fmt.Errorf("timeout after %s waiting for the installer to finish writing %s: %s", friendly(reinstallWaitBudget), expectedOS, hint)
+		}
+		target, verdict, detail := tryInstallerDone(ctx, host, port, privKey, expectedOS)
+		switch verdict {
+		case installerHoldDone:
+			return target, false, nil
+		case installerFinalOS:
+			return nil, true, nil
+		case installerErrored:
+			return nil, false, fmt.Errorf("the installer reported an error and is holding the box in its live env — ssh root@%s -p %d (bootstrap key) to inspect /reinstall.log and /os, then re-run bootstrap. Last log: %s", host, port, detail)
+		}
+		lastStatus = detail
+		if time.Since(lastBeat) >= heartbeatPeriod {
+			emit("meta", fmt.Sprintf("installer still writing %s (%s elapsed) — %s", expectedOS, friendly(time.Since(startedAt)), detail))
+			lastBeat = time.Now()
+		}
+		if err := sleepCtx(ctx, retryInterval); err != nil {
+			return nil, false, err
+		}
+	}
+}
+
+// tryInstallerDone performs one dial + installer probe. The session
+// is returned open ONLY on the hold-done verdict; every other path
+// closes it.
+func tryInstallerDone(ctx context.Context, host string, port int, privKey []byte, expectedOS string) (*targetSession, int, string) {
+	target, err := dialKeyTarget(ctx, host, port, privKey)
+	if err != nil {
+		return nil, installerInstalling, "dial: " + err.Error()
+	}
+	out, _, err := target.runRoot(ctx, installerProbeScript, "")
+	if err != nil {
+		_ = target.Close()
+		return nil, installerInstalling, "installer probe: " + err.Error()
+	}
+	verdict, detail := evalInstallerProbe(out, expectedOS)
+	if verdict == installerHoldDone {
+		return target, verdict, detail
+	}
+	_ = target.Close()
+	return nil, verdict, detail
+}
+
+// persistInstallLogScript copies the installer's full log into the
+// installed system (mounted at /os during the hold) so it survives
+// the reboot — /reinstall.log itself lives in the live env's tmpfs
+// and is destroyed the moment the box reboots. sync matters: the
+// next step is a reboot we don't control the timing of.
+const persistInstallLogScript = `[ -d /os ] || exit 1; mkdir -p /os/var/log && cp /reinstall.log /os/var/log/reinstall-install.log && sync`
+
+// installLogTailScript extracts the last useful lines of the
+// install log for the event stream: \r progress spam flattened,
+// password/token lines dropped (mirrors upstream's own log-viewer
+// filter; emit-side redaction still applies on top).
+const installLogTailScript = `tail -n 400 /reinstall.log 2>/dev/null | tr '\r' '\n' | grep -Fiav -e password -e token | tail -n 12`
+
+// installedNetVerifyScript checks the network config rendered into
+// the installed system for one of the detected addresses, or for
+// DHCP. Directory set covers every renderer trans.sh uses across
+// the matrix (netplan, systemd-networkd, ifupdown, cloud-init;
+// sysconfig kept for a future redhat-family matrix). Prints exactly
+// one token; missing dirs fail open as NO_CONFIG_DIRS rather than
+// misreporting an absent address.
+func installedNetVerifyScript(ips []net.IP) string {
+	quoted := make([]string, 0, len(ips))
+	for _, ip := range ips {
+		quoted = append(quoted, shellQuote(ip.String()))
+	}
+	return strings.Join([]string{
+		`dirs=""`,
+		`for d in /os/etc/netplan /os/etc/systemd/network /os/etc/network /os/etc/cloud /os/etc/sysconfig/network-scripts; do [ -d "$d" ] && dirs="$dirs $d"; done`,
+		`[ -n "$dirs" ] || { echo NO_CONFIG_DIRS; exit 0; }`,
+		`for ip in ` + strings.Join(quoted, " ") + `; do if grep -raqF -- "$ip" $dirs 2>/dev/null; then echo FOUND_IP; exit 0; fi; done`,
+		`if grep -raqi -- dhcp $dirs 2>/dev/null; then echo FOUND_DHCP; exit 0; fi`,
+		`echo NOT_FOUND`,
+	}, "; ")
+}
+
+// verifyInstalledSystem runs over the held installer session:
+// persist the log, surface its tail, and gate the reboot on the
+// rendered network config mentioning a detected address (or DHCP).
+// Only the NOT_FOUND verdict blocks — it means the new system would
+// likely boot unreachable, and holding the box beats losing it.
+// Everything else fails open: at this point the disk is already
+// written, so an inconclusive check must not strand a good install.
+func verifyInstalledSystem(ctx context.Context, target *targetSession, host string, netInfo reinstallNetInfo, emit func(typ, text string)) error {
+	if _, _, err := target.runRoot(ctx, persistInstallLogScript, ""); err != nil {
+		emit("meta", fmt.Sprintf("couldn't persist the install log into the new system (%v) — continuing", err))
+	} else {
+		emit("ok", "install log saved to /var/log/reinstall-install.log on the new system")
+	}
+
+	if out, _, err := target.runRoot(ctx, installLogTailScript, ""); err == nil {
+		if tail := strings.TrimSpace(stripANSI(out)); tail != "" {
+			emit("meta", "installer log tail:\n"+tail)
+		}
+	}
+
+	ips := netInfo.ips()
+	if len(ips) == 0 {
+		emit("meta", "no detected addresses available — skipping the rendered-config check")
+		return nil
+	}
+	out, _, err := target.runRoot(ctx, installedNetVerifyScript(ips), "")
+	if err != nil {
+		emit("meta", fmt.Sprintf("rendered-config check failed to run (%v) — continuing", err))
+		return nil
+	}
+	switch strings.TrimSpace(out) {
+	case "FOUND_IP":
+		emit("ok", "rendered network config contains the detected address")
+	case "FOUND_DHCP":
+		emit("ok", "rendered network config uses DHCP")
+	case "NO_CONFIG_DIRS":
+		emit("meta", "no known network-config dirs under /os — can't verify the render; continuing")
+	case "NOT_FOUND":
+		return fmt.Errorf("aborting before first boot: the installed system's network config mentions neither the detected address(es) %s nor DHCP — it would likely boot unreachable. The box is HELD in the installer env: ssh root@%s -p %d (bootstrap key), inspect/fix the config under /os/etc, run `reboot`, then re-run bootstrap without the reinstall step", netInfo.summary(), host, reinstallSSHPort)
+	default:
+		emit("meta", "rendered-config check returned an unexpected verdict — continuing")
+	}
+	return nil
+}
+
+// sleepCtx waits d or until ctx is cancelled, whichever comes
+// first. Shared by the reinstall wait loops.
+func sleepCtx(ctx context.Context, d time.Duration) error {
+	select {
+	case <-time.After(d):
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // reinstallReadyProbe carries the evidence thresholds a dialed
@@ -618,52 +909,49 @@ var reinstallProbeScript = strings.Join([]string{
 
 // waitForReinstallTarget polls the target on (host:port) until SSH
 // answers with key auth AND evalReinstallProbe's checks all pass,
-// or until ctx is cancelled / the 30-minute budget elapses. The
-// probe is what distinguishes the reinstaller's live environment
-// (where reinstall.sh exposes SSH on :4242 with the same key for
+// or until ctx is cancelled / budget elapses. The probe is what
+// distinguishes the reinstaller's live environment (where
+// reinstall.sh exposes SSH on :4242 with the same key for
 // `screen -r` monitoring) — and a box that wrongly booted back
 // into its old system — from the freshly-installed target OS.
 // Without it we'd attach to the live env mid-install and run
 // `apt install` against an alpine initramfs.
 //
 // The first 15 seconds are an unconditional sleep — the caller has
-// already confirmed the old system went down, so this only skips
-// the shutdown/BIOS window where dialing is pure noise. Subsequent
-// retries are 15s apart; with dialKeyTarget's 15s dial timeout the
-// worst-case loop iteration is 30s. A heartbeat fires every 60s so
-// the operator sees progress.
-func waitForReinstallTarget(ctx context.Context, host string, port int, privKey []byte, probe reinstallReadyProbe, emit func(typ, text string)) (*targetSession, error) {
+// already confirmed the previous stage's system went down or was
+// told to reboot, so this only skips the shutdown/BIOS window where
+// dialing is pure noise. Subsequent retries are 15s apart; with
+// dialKeyTarget's 15s dial timeout the worst-case loop iteration is
+// 30s. A heartbeat fires every 60s so the operator sees progress.
+func waitForReinstallTarget(ctx context.Context, host string, port int, privKey []byte, probe reinstallReadyProbe, budget time.Duration, emit func(typ, text string)) (*targetSession, error) {
 	const (
 		initialWait     = 15 * time.Second
 		retryInterval   = 15 * time.Second
 		heartbeatPeriod = 60 * time.Second
 	)
-	deadline := time.Now().Add(reinstallWaitBudget)
-	select {
-	case <-time.After(initialWait):
-	case <-ctx.Done():
-		return nil, ctx.Err()
+	deadline := time.Now().Add(budget)
+	if err := sleepCtx(ctx, initialWait); err != nil {
+		return nil, err
 	}
 	startedAt := time.Now()
 	lastBeat := time.Now()
 	var lastStatus string
 	for {
 		if time.Now().After(deadline) {
-			// The reinstall very likely succeeded — reinstall.sh's
-			// prep phase passed and the box rebooted — but the
-			// freshly-installed system never came back on the
-			// expected port. By far the most common cause is
+			// The install itself already finished (the hold stage
+			// verified it) but the new system never came back on
+			// the expected port. By far the most common cause is
 			// networking failing to come up in the new install
-			// (wrong NIC name after debian-installer's predictable
-			// renaming, or the auto-detected static config not
+			// (NIC rename machinery, or the static config not
 			// matching the new interface), which is invisible over
 			// SSH. Point the operator at the provider console, the
-			// only place that failure is observable.
-			hint := fmt.Sprintf("check the provider's serial/VNC console: the reinstall likely completed but %s isn't reachable on :%d, usually because networking (NIC name / static config) didn't come up in the new install", probe.expectedOS, port)
+			// only place that failure is observable — and at the
+			// install log the hold stage persisted onto the box.
+			hint := fmt.Sprintf("check the provider's serial/VNC console: the install completed but %s isn't reachable on :%d, usually because networking (NIC rename / static config) didn't come up on first boot. The full install log is at /var/log/reinstall-install.log on the box", probe.expectedOS, port)
 			if lastStatus == "" {
-				return nil, fmt.Errorf("timeout after %s waiting for SSH on :%d — %s", friendly(reinstallWaitBudget), port, hint)
+				return nil, fmt.Errorf("timeout after %s waiting for SSH on :%d — %s", friendly(budget), port, hint)
 			}
-			return nil, fmt.Errorf("timeout after %s waiting for %s to come up (last status: %s) — %s", friendly(reinstallWaitBudget), probe.expectedOS, lastStatus, hint)
+			return nil, fmt.Errorf("timeout after %s waiting for %s to come up (last status: %s) — %s", friendly(budget), probe.expectedOS, lastStatus, hint)
 		}
 		target, status := tryReinstallReady(ctx, host, port, privKey, probe)
 		if target != nil {
@@ -674,10 +962,8 @@ func waitForReinstallTarget(ctx context.Context, host string, port int, privKey 
 			emit("meta", fmt.Sprintf("waiting for %s on :%d (%s elapsed) — %s", probe.expectedOS, port, friendly(time.Since(startedAt)), status))
 			lastBeat = time.Now()
 		}
-		select {
-		case <-time.After(retryInterval):
-		case <-ctx.Done():
-			return nil, ctx.Err()
+		if err := sleepCtx(ctx, retryInterval); err != nil {
+			return nil, err
 		}
 	}
 }
