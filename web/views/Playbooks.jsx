@@ -556,6 +556,16 @@ function PlaybookRunner({ open, pb, seed, onClose }) {
 
   useEffectP(() => () => { if (streamRef.current) streamRef.current.close(); }, []);
 
+  // Closing this dialog (Escape, backdrop, ✕) drops the WebSocket and
+  // the backend kills the remote ansible-playbook when the peer goes
+  // away — so while a run streams, every close path asks first. The
+  // same guard warns on navigation / tab close.
+  globalThis.useRunGuard(running, 'A playbook run');
+  const requestClose = () => {
+    if (running && !globalThis.confirm('A playbook run is still streaming — closing this dialog aborts it on the remote. Close anyway?')) return;
+    onClose();
+  };
+
   useEffectP(() => {
     outRef.current?.scrollTo({ top: outRef.current.scrollHeight });
   }, [output]);
@@ -612,7 +622,15 @@ function PlaybookRunner({ open, pb, seed, onClose }) {
       ref={dialogRef}
       className="ansbui-dialog ansbui-dialog-runner"
       aria-label={`Run ${pb.name}`}
-      {...globalThis.dialogBackdropHandlers(dialogRef, onClose)}
+      // Escape fires the native cancel event; preventDefault stops the
+      // dialog from closing itself so requestClose alone decides
+      // (confirm-while-running). Escape is handled ONLY here — a
+      // keydown handler for it too would make one keypress ask twice.
+      // The no-op keydown keeps the clickable backdrop paired with a
+      // keyboard listener (Sonar S1082), like dialogBackdropHandlers.
+      onCancel={(e) => { e.preventDefault(); requestClose(); }}
+      onClick={(e) => { if (e.target === dialogRef.current) requestClose(); }}
+      onKeyDown={() => { /* Escape handled via onCancel */ }}
     >
       <div className="pb-runner card">
         <div className="pb-runner-head">
@@ -623,7 +641,7 @@ function PlaybookRunner({ open, pb, seed, onClose }) {
               hosts: <span className="mono">{pb.targets || 'all'}</span>
             </div>
           </div>
-          <button type="button" className="btn ghost small" onClick={onClose}><Icon name="x" size={14}/></button>
+          <button type="button" className="btn ghost small" onClick={requestClose}><Icon name="x" size={14}/></button>
         </div>
 
         <div className="pb-runner-form">

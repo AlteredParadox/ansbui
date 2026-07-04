@@ -80,6 +80,11 @@ function BootstrapView() {
   const [error, setError] = useStateBoot('');
   const [activeSummary, setActiveSummary] = useStateBoot(null);
   const streamRef = useRefBoot(null);
+  // jobIdRef is the job THIS component started or re-attached to.
+  // Cancel must use it, never localStorage: the storage key is shared
+  // across tabs, so reading it at cancel time can grab a job some
+  // other tab started later — tab A's Cancel then killed tab B's run.
+  const jobIdRef = useRefBoot(null);
   const outRef = useRefBoot(null);
   // mountedRef gates side-effects in WS callbacks so the unmount
   // cleanup that closes the socket doesn't race a setState on a
@@ -110,22 +115,32 @@ function BootstrapView() {
 
   // On mount: if we left a run going in a previous tab/session,
   // re-attach instead of starting fresh. The backend job survives
-  // closed tabs by design — see internal/jobs.
+  // closed tabs by design — see internal/jobs. Finished jobs are
+  // re-attached too: the stream replays the full backlog including
+  // the terminal event, so a tab reopened after completion shows the
+  // outcome (finish() then clears the stored id) instead of silently
+  // discarding the result.
   useEffectBoot(() => {
     const id = globalThis.localStorage?.getItem(BOOTSTRAP_JOB_KEY);
     if (!id || !globalThis.AnsbuiAPI) return;
     let cancelled = false;
     globalThis.AnsbuiAPI.getBootstrapJob(id).then(snap => {
       if (cancelled) return;
-      if (snap?.status !== 'running') {
+      jobIdRef.current = id;
+      setActiveSummary(snap?.summary || {});
+      if (snap?.status === 'running') setRunning(true);
+      attachStream(id);
+    }).catch((e) => {
+      if (cancelled) return;
+      if (e?.status === 404) {
+        // The job is genuinely gone (backend restart) — forget it.
         globalThis.localStorage?.removeItem(BOOTSTRAP_JOB_KEY);
         return;
       }
-      setActiveSummary(snap.summary || {});
-      setRunning(true);
-      attachStream(id);
-    }).catch(() => {
-      globalThis.localStorage?.removeItem(BOOTSTRAP_JOB_KEY);
+      // Transient error (backend blip, network): keep the stored id
+      // so the next mount can still find the run instead of orphaning
+      // a 30-minute reinstall.
+      append({ t: 'meta', text: 'could not check on a previous bootstrap job — refresh to retry re-attaching' });
     });
     return () => { cancelled = true; };
   }, []);
@@ -136,7 +151,12 @@ function BootstrapView() {
     append({ t: ok ? 'done' : 'fail', text });
     setRunning(false);
     setActiveSummary(null);
-    globalThis.localStorage?.removeItem(BOOTSTRAP_JOB_KEY);
+    // Only clear the shared storage key if it still points at OUR
+    // job — another tab may have started a newer run since.
+    if (globalThis.localStorage?.getItem(BOOTSTRAP_JOB_KEY) === jobIdRef.current) {
+      globalThis.localStorage.removeItem(BOOTSTRAP_JOB_KEY);
+    }
+    jobIdRef.current = null;
     // Drop the secrets out of React state once the run is over.
     // The form is the only path that holds three operator-supplied
     // passwords simultaneously; clearing on every terminal event
@@ -263,6 +283,7 @@ function BootstrapView() {
         setError('Backend did not return a job ID.');
         return;
       }
+      jobIdRef.current = jobId;
       globalThis.localStorage?.setItem(BOOTSTRAP_JOB_KEY, jobId);
       attachStream(jobId);
     } catch (e) {
@@ -274,9 +295,11 @@ function BootstrapView() {
   // Cancel signals the backend job. We don't close the WS here —
   // the orchestrator is expected to honour ctx-cancel and emit its
   // own terminal event, which routes through the normal finish()
-  // path.
+  // path. Cancels the job THIS tab is streaming (jobIdRef) — the
+  // localStorage key is shared across tabs and may point at a newer
+  // run some other tab started.
   const cancel = async () => {
-    const id = globalThis.localStorage?.getItem(BOOTSTRAP_JOB_KEY);
+    const id = jobIdRef.current;
     if (!id) return;
     try {
       await globalThis.AnsbuiAPI.cancelBootstrapJob(id);

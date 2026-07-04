@@ -42,6 +42,25 @@ function useDialog(open, onClose) {
   return ref;
 }
 
+// useRunGuard registers a global marker while a streamed run is in
+// flight. Two consumers: App's navigation wrapper confirms before
+// switching views (unmounting the view closes its WebSocket, and the
+// backend kills the remote ansible process when the peer drops), and
+// a beforeunload handler makes the browser ask before a tab close /
+// refresh silently does the same.
+function useRunGuard(running, label) {
+  useEffect(() => {
+    if (!running) return undefined;
+    globalThis.AnsbuiActiveRun = { label };
+    const onBeforeUnload = (e) => { e.preventDefault(); e.returnValue = ''; };
+    window.addEventListener('beforeunload', onBeforeUnload);
+    return () => {
+      globalThis.AnsbuiActiveRun = null;
+      window.removeEventListener('beforeunload', onBeforeUnload);
+    };
+  }, [running, label]);
+}
+
 const NAV_BASE = [
   { id: 'dashboard', label: 'Dashboard', icon: 'dashboard', hint: 'g d' },
   { id: 'inventory', label: 'Inventory', icon: 'inventory', hint: 'g i', countKey: 'HOSTS' },
@@ -230,5 +249,6 @@ globalThis.TopNav = TopNav;
 globalThis.TopLayoutNav = TopLayoutNav;
 globalThis.TWEAK_DEFAULTS = TWEAK_DEFAULTS;
 globalThis.useDialog = useDialog;
+globalThis.useRunGuard = useRunGuard;
 globalThis.dialogBackdropHandlers = dialogBackdropHandlers;
 globalThis.AnsbuiCenterDialog = AnsbuiCenterDialog;

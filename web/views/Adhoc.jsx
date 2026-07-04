@@ -105,14 +105,31 @@ function AdhocView({ prefill }) {
     if (prefill.timeout) setTimeoutState(prefill.timeout);
   }, [prefill]);
 
+  // resolvedHosts approximates what ansible will expand `target` to.
+  // Derived from `target` alone — the payload sends exactly `target`,
+  // so this count can never disagree with the real blast radius.
+  // (A stale prefill selection used to short-circuit here: the header
+  // said "2 hosts" while the payload said 'all', and a retry-failed
+  // host list showed 0.) Tokens split on ansible's ':' / ',' pattern
+  // separators and resolve as host name, group id (with descendants),
+  // or 'all'; negation/intersection tokens aren't modelled.
   const resolvedHosts = useMemoA(() => {
-    if (prefill?.selectedHosts) return prefill.selectedHosts;
-    if (target === 'all') return HOSTS;
-    const groupId = target.split(':')[0];
-    const set = descendants[groupId];
-    if (!set) return HOSTS.filter(h => (h.groups || []).includes(groupId));
-    return HOSTS.filter(h => (h.groups || []).some(g => set.has(g)));
-  }, [target, HOSTS, prefill, descendants]);
+    const byName = new Map(HOSTS.map(h => [h.name, h]));
+    const out = [];
+    const seen = new Set();
+    const add = (h) => { if (!seen.has(h.id)) { seen.add(h.id); out.push(h); } };
+    for (const tok of target.split(/[,:]/).map(t => t.trim()).filter(Boolean)) {
+      if (tok === 'all') { HOSTS.forEach(add); continue; }
+      const host = byName.get(tok);
+      if (host) { add(host); continue; }
+      const set = descendants[tok];
+      const matches = set
+        ? HOSTS.filter(h => (h.groups || []).some(g => set.has(g)))
+        : HOSTS.filter(h => (h.groups || []).includes(tok));
+      matches.forEach(add);
+    }
+    return out;
+  }, [target, HOSTS, descendants]);
 
   const mod = MODULES.find(m => m.name === moduleName)
     || { id: moduleName.split('.').pop() || 'custom', name: moduleName, desc: '', args: [] };
@@ -168,6 +185,10 @@ function AdhocView({ prefill }) {
   useEffectA(() => () => {
     if (streamRef.current) streamRef.current.close();
   }, []);
+
+  // Closing the WebSocket kills the remote ansible process, so warn
+  // before navigation / tab close can do it silently mid-run.
+  globalThis.useRunGuard(running, 'An ad-hoc run');
 
   useEffectA(() => {
     outRef.current?.scrollTo({ top: outRef.current.scrollHeight });

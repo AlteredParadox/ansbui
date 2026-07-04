@@ -26,6 +26,19 @@ function HistoryView({ onOpenPlaybook, onRunPlaybook, onOpenAdhoc }) {
   const [filter, setFilter] = useStateH('all');
   const [detail, setDetail] = useStateH(null);
   const [error, setError] = useStateH('');
+  // AnsibleData is a snapshot from boot (or the last explicit
+  // refresh), so runs executed since — already persisted by the
+  // backend — wouldn't show up here until a full page reload.
+  // Re-sync on mount; the state bump re-renders with the fresh
+  // globals refreshData just wrote.
+  const [, setRunsVersion] = useStateH(0);
+  useEffectH(() => {
+    let alive = true;
+    globalThis.AnsbuiAPI?.refreshData()
+      .then(() => { if (alive) setRunsVersion(v => v + 1); })
+      .catch(() => {});
+    return () => { alive = false; };
+  }, []);
 
   useEffectH(() => {
     if (!selectedId || !globalThis.AnsbuiAPI) { setDetail(null); return; }
@@ -58,7 +71,7 @@ function HistoryView({ onOpenPlaybook, onRunPlaybook, onOpenAdhoc }) {
       <div className="view-head">
         <div>
           <h1 className="view-title">Run history</h1>
-          <div className="view-sub mute">{RUNS.length} recent runs · live runs appear at the top</div>
+          <div className="view-sub mute">{RUNS.length} recent runs · newest first</div>
         </div>
         <div className="view-actions">
           <div className="seg">

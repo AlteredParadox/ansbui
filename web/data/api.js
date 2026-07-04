@@ -6,6 +6,17 @@
 (function () {
   const api = {};
 
+  // errorMessage unwraps the backend's {"error":"..."} envelope so
+  // banners show the message itself, not raw JSON. Non-JSON bodies
+  // pass through unchanged.
+  const errorMessage = (text) => {
+    try {
+      const parsed = JSON.parse(text);
+      if (parsed && typeof parsed.error === 'string') return parsed.error;
+    } catch { /* not JSON — use the body as-is */ }
+    return text;
+  };
+
   const json = async (path, opts) => {
     const options = opts || {};
     const headers = options.headers || {};
@@ -15,7 +26,11 @@
     });
     if (!res.ok) {
       const text = await res.text();
-      throw new Error(text || `${res.status} ${res.statusText}`);
+      const err = new Error(errorMessage(text) || `${res.status} ${res.statusText}`);
+      // Callers that need to distinguish "gone" from "backend blip"
+      // (e.g. the bootstrap re-attach probe) read this.
+      err.status = res.status;
+      throw err;
     }
     if (res.status === 204) return null;
     return res.json();
@@ -286,6 +301,7 @@
       load: typeof h.load === 'number' ? h.load : 0,
       uptime: h.uptime || 0,
       lastPlaybook: h.lastPlaybook || '',
+      lastPlaybookAt: h.lastPlaybookAt || '',
       lastRun: h.lastRun || '',
       tags: h.tags || []
     }));

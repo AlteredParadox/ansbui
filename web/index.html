@@ -33,7 +33,7 @@
   <script type="text/babel" src="views/Vault.jsx"></script>
 
   <script type="text/babel">
-    const { useState, useEffect, useCallback } = React;
+    const { useState, useEffect, useCallback, useRef } = React;
 
     function Boot() {
       const [phase, setPhase] = useState('loading');
@@ -140,7 +140,7 @@
     }
 
     function App({ activeId, servers, onReload }) {
-      const [view, setView] = useState(() => {
+      const [view, setViewRaw] = useState(() => {
         // Coerce the legacy 'provision' value so an operator who had
         // the Bootstrap view active when this rename shipped lands on
         // it again instead of a blank screen.
@@ -148,6 +148,23 @@
         if (raw === 'provision') return 'bootstrap';
         return raw || 'dashboard';
       });
+      // setView confirms before leaving a view whose streamed run is
+      // still live: navigating away unmounts the view, which drops its
+      // WebSocket, and the backend kills the remote ansible process on
+      // peer disconnect. AnsbuiActiveRun is set by useRunGuard while a
+      // run streams. Switching to the same view is always allowed.
+      // (viewRef, not a functional updater — confirm() must not run
+      // inside the updater, which React may invoke more than once.)
+      const viewRef = useRef(null);
+      viewRef.current = view;
+      const setView = useCallback((next) => {
+        const active = globalThis.AnsbuiActiveRun;
+        if (next !== viewRef.current && active &&
+            !window.confirm(`${active.label} is still streaming — leaving this page aborts it on the remote. Leave anyway?`)) {
+          return;
+        }
+        setViewRaw(next);
+      }, []);
       const [paletteOpen, setPaletteOpen] = useState(false);
       const [adhocPrefill, setAdhocPrefill] = useState(null);
       const [playbookId, setPlaybookId] = useState(null);
