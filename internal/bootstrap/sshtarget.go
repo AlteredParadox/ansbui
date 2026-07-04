@@ -161,35 +161,48 @@ func (s *targetSession) Close() error {
 
 // runRoot runs cmd with root privileges and returns stdout +
 // trimmed stderr. If the session is non-root and a sudo password
-// was supplied, the sudo handshake is decoupled from the inner
-// command's stdin so a warm sudo cache can't desync the password
-// stream:
-//
-//   - the operator's sudo password is the first line of stdin,
-//     read by the wrapper into a shell variable
-//   - if the cache is warm or the user is NOPASSWD, `sudo -n -v`
-//     succeeds without touching stdin and we skip the password
-//     feed entirely. Otherwise the password is piped into a
-//     fresh `sudo -S -v` invocation
-//   - the wrapper then `exec sudo bash -c '<cmd>'`, replacing
-//     itself with sudo. The remaining stdin (everything after
-//     line 1) flows through unmolested into the inner command,
-//     which can `read -r` its own secrets without contention
-//
-// Without that decoupling, a warm sudo cache would skip the
-// password prompt, leaving `<sudo-pw>\n` in stdin — the inner
-// command's `read -r` would then consume the operator's sudo
-// password, e.g. as the new ansible user's password. That landed
-// the operator's sudo password in /etc/shadow on every target
-// box; this rewrite eliminates that path. The `-n -v` short-
-// circuit additionally keeps printf from racing a closed pipe
-// when we ever turn on `pipefail` for hardening.
+// was supplied, cmd is wrapped by sudoWrapper — see there for the
+// authentication scheme and the two failure modes it defends
+// against.
 func (s *targetSession) runRoot(ctx context.Context, cmd, stdin string) (stdout, stderr string, err error) {
 	if s.sudoPassword == "" {
 		return s.run(ctx, cmd, stdin)
 	}
-	wrapper := `set -e; IFS= read -r SUDO_PW; if sudo -n -v 2>/dev/null; then :; else printf '%s\n' "$SUDO_PW" | sudo -S -p '' -v; fi; unset SUDO_PW; exec sudo bash -c ` + shellQuote(cmd)
-	return s.run(ctx, wrapper, s.sudoPassword+"\n"+stdin)
+	return s.run(ctx, sudoWrapper(cmd), s.sudoPassword+"\n"+stdin)
+}
+
+// sudoWrapper wraps cmd so a non-root session can run it as root,
+// with the operator's sudo password arriving as the first line of
+// stdin. Two constraints shape it:
+//
+//   - The sudo that authenticates must BE the sudo that runs the
+//     command. On default sudoers with no TTY (our ssh exec
+//     channel), credential tickets are keyed on the calling
+//     process's ppid — an earlier design validated with
+//     `sudo -S -v` inside a pipeline and then `exec sudo bash -c`,
+//     two invocations with different ppids, so the exec'd sudo
+//     never found the cached ticket and died "a terminal is
+//     required". The cold path below is a single `sudo -k -S`
+//     that reads the password and runs the command itself; ticket
+//     keying can't matter.
+//
+//   - The inner command's stdin must never see the sudo password.
+//     The wrapper always consumes line 1 into a variable first. On
+//     the cold path it is re-fed to sudo -S through the pipe ahead
+//     of the remaining stdin (`-k` guarantees sudo reads exactly
+//     that line — without it, a cache warmed between check and run
+//     would leave the password line for the inner command, which
+//     once landed operators' sudo passwords in /etc/shadow via
+//     chpasswd). On the warm/NOPASSWD path (`sudo -n true`
+//     succeeds) sudo touches nothing and the remaining stdin flows
+//     to the inner command directly; `-n` on the exec'd sudo makes
+//     a ticket-keying surprise fail fast instead of hanging on a
+//     prompt that can never be answered.
+func sudoWrapper(cmd string) string {
+	q := shellQuote(cmd)
+	return `set -e; IFS= read -r SUDO_PW; ` +
+		`if sudo -n true 2>/dev/null; then unset SUDO_PW; exec sudo -n bash -c ` + q + `; fi; ` +
+		`{ printf '%s\n' "$SUDO_PW"; unset SUDO_PW; cat; } | sudo -k -S -p '' bash -c ` + q
 }
 
 // requireSudo probes the target to confirm `sudo` is on PATH for

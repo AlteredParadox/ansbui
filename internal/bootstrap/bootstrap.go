@@ -995,6 +995,18 @@ func ansibleUserSetupScript(pubKey string) string {
 //   - /etc/ssh/sshd_config.d/*.conf overrides → rewrite in place
 //
 // If the active port is already target the script no-ops.
+//
+// Socket-activated sshd (Ubuntu 22.10+, incl. 24.04) needs special
+// handling: when ssh.socket owns the listener, the Port directive is
+// ignored and `systemctl reload ssh` happily reloads a daemon that
+// keeps listening on 22 — the flip silently no-ops and every later
+// ansible connection to the new port fails. In that case we revert
+// to standalone service operation (the recipe Ubuntu documents):
+// disable the socket, enable the service so sshd still comes up
+// after reboot, and restart it so it binds the new port itself.
+// Established connections — including the one this script arrives
+// on — are served by per-session sshd children and survive both the
+// socket stop and the listener restart.
 func sshdPortScript(target int) string {
 	t := fmt.Sprintf("%d", target)
 	return strings.Join([]string{
@@ -1005,7 +1017,18 @@ func sshdPortScript(target int) string {
 		`if grep -qE '^[[:space:]]*Port[[:space:]]+' /etc/ssh/sshd_config; then sed -i -E "s/^[[:space:]]*Port[[:space:]]+.*/Port $TARGET/" /etc/ssh/sshd_config; else printf 'Port %s\n' "$TARGET" >> /etc/ssh/sshd_config; fi`,
 		`for f in /etc/ssh/sshd_config.d/*.conf; do [ -f "$f" ] || continue; if grep -qE '^[[:space:]]*Port[[:space:]]+' "$f"; then sed -i -E "s/^[[:space:]]*Port[[:space:]]+.*/Port $TARGET/" "$f"; fi; done`,
 		`sshd -t`,
-		`systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || service ssh reload`,
-		`echo "sshd reloaded on port $TARGET"`,
+		`SOCK=`,
+		`for s in ssh.socket sshd.socket; do if systemctl is-active --quiet "$s" 2>/dev/null; then SOCK=$s; break; fi; done`,
+		`if [ -n "$SOCK" ]; then systemctl disable --now "$SOCK" >/dev/null 2>&1 || true; systemctl enable ssh >/dev/null 2>&1 || systemctl enable sshd >/dev/null 2>&1 || true; systemctl restart ssh 2>/dev/null || systemctl restart sshd; echo "sshd restarted on port $TARGET ($SOCK was holding the listener; socket activation disabled)"; else systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || service ssh reload; echo "sshd reloaded on port $TARGET"; fi`,
+		// Trust nothing above: reload/restart exiting 0 doesn't prove the
+		// listener moved (a leftover socket unit, a second override file,
+		// a distro quirk). Poll the actual sockets so "success on port
+		// 4242 while still bound to 22" can't be reported again. Boxes
+		// without ss (minimal alpine) skip the check rather than fail.
+		`command -v ss >/dev/null 2>&1 || exit 0`,
+		`i=0`,
+		`while [ "$i" -lt 10 ]; do if ss -tln 2>/dev/null | grep -qE "[:.]$TARGET([[:space:]]|$)"; then exit 0; fi; i=$((i+1)); sleep 1; done`,
+		`echo "sshd reported success but nothing is listening on port $TARGET — socket activation or a config override may still hold the old port" >&2`,
+		`exit 1`,
 	}, "; ")
 }
