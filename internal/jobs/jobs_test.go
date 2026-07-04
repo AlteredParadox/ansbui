@@ -266,3 +266,57 @@ func TestManagerSubscribeRace(t *testing.T) {
 	wg.Wait()
 	<-job.Done()
 }
+
+// TestFinishSuccessBeatsLateCancel: a job whose orchestrator returned
+// nil must end Succeeded even if Cancel() raced in just before the
+// return — the work actually completed, and mislabeling a
+// bootstrapped box as "cancelled" misleads the operator.
+func TestFinishSuccessBeatsLateCancel(t *testing.T) {
+	m := New()
+	release := make(chan struct{})
+	job, err := m.Start("test", nil, func(ctx context.Context, _ func(string, string)) error {
+		<-release // hold until we've cancelled, then succeed anyway
+		return nil
+	})
+	if err != nil {
+		t.Fatalf(startErr, err)
+	}
+	job.Cancel()   // ctx is now cancelled
+	close(release) // fn returns nil despite the cancel
+	<-job.Done()
+	if got := job.Snapshot().Status; got != StatusSucceeded {
+		t.Fatalf(statusMismatch, got, StatusSucceeded)
+	}
+}
+
+// TestShutdownRefusesNewJobs: once Shutdown has latched, Start must
+// refuse — otherwise a job born after Shutdown's snapshot runs on an
+// uncancelled background context and outlives the process.
+func TestShutdownRefusesNewJobs(t *testing.T) {
+	m := New()
+	m.Shutdown(context.Background()) // no running jobs; latches the flag
+	_, err := m.Start("test", nil, func(context.Context, func(string, string)) error { return nil })
+	if !errors.Is(err, ErrShuttingDown) {
+		t.Fatalf("Start after Shutdown = %v, want ErrShuttingDown", err)
+	}
+}
+
+// TestShutdownCancelsInFlight: a running job is cancelled and awaited
+// by Shutdown.
+func TestShutdownCancelsInFlight(t *testing.T) {
+	m := New()
+	started := make(chan struct{})
+	job, err := m.Start("test", nil, func(ctx context.Context, _ func(string, string)) error {
+		close(started)
+		<-ctx.Done()
+		return ctx.Err()
+	})
+	if err != nil {
+		t.Fatalf(startErr, err)
+	}
+	<-started
+	m.Shutdown(context.Background())
+	if got := job.Snapshot().Status; got != StatusCancelled {
+		t.Fatalf(statusMismatch, got, StatusCancelled)
+	}
+}

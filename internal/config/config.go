@@ -363,7 +363,7 @@ func normalisePromURL(raw string) (string, error) {
 	if u.Host == "" {
 		return "", errors.New("prometheus URL is missing a host")
 	}
-	if err := checkPromHost(u.Hostname(), u.Host); err != nil {
+	if err := CheckPromHost(u.Hostname(), u.Host); err != nil {
 		return "", err
 	}
 	return s, nil
@@ -382,7 +382,12 @@ var promMetadataDeny = map[string]struct{}{
 	"169.254.169.254.nip.io":   {}, // common SSRF bypass
 }
 
-func checkPromHost(host, hostport string) error {
+// CheckPromHost enforces the SSRF allowlist described on
+// normalisePromURL. Exported so prom.NewClient can re-check at fetch
+// time: a config.json edited by hand (or written by an older binary)
+// bypasses the settings endpoint entirely, and write-time-only
+// validation would let such a URL reach cloud metadata server-side.
+func CheckPromHost(host, hostport string) error {
 	hostLower := strings.ToLower(host)
 	if _, blocked := promMetadataDeny[hostLower]; blocked {
 		return fmt.Errorf("prometheus host %q is on the cloud-metadata denylist", host)

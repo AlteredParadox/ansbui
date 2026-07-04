@@ -216,11 +216,19 @@ func dial(ctx context.Context, srv config.Server) (*ssh.Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("dial %s: %w", addr, err)
 	}
+	// cfg.Timeout bounds the TCP connect but NOT the SSH handshake:
+	// ssh.NewClientConn on an already-open conn ignores it, so a peer
+	// that accepts the socket and then stalls the banner/kex exchange
+	// (a wedged or malicious control node) would block here forever.
+	// A raw-conn deadline caps the whole handshake; we clear it after
+	// so it doesn't leak onto the live session's reads/writes.
+	_ = conn.SetDeadline(time.Now().Add(cfg.Timeout))
 	sshConn, chans, reqs, err := ssh.NewClientConn(conn, addr, cfg)
 	if err != nil {
 		_ = conn.Close()
 		return nil, fmt.Errorf("ssh handshake %s: %w", addr, err)
 	}
+	_ = conn.SetDeadline(time.Time{})
 	return ssh.NewClient(sshConn, chans, reqs), nil
 }
 
@@ -347,12 +355,31 @@ func insecureSSHEnabled() bool {
 	return true
 }
 
+// pingHealthTimeout bounds a liveness probe. cached() runs pingClient
+// while holding the per-server dial mutex, so an unbounded probe on a
+// dead-but-open TCP connection (SendRequest blocks until the kernel
+// gives up, ~15 min) would stall every other caller for that server
+// behind the mutex. A few seconds is ample on a healthy link.
+const pingHealthTimeout = 5 * time.Second
+
 func pingClient(c *ssh.Client) bool {
 	if c == nil {
 		return false
 	}
-	_, _, err := c.SendRequest("keepalive@ansbui", true, nil)
-	return err == nil
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := c.SendRequest("keepalive@ansbui", true, nil)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		return err == nil
+	case <-time.After(pingHealthTimeout):
+		// Treat a hung probe as dead: the caller drops the cached
+		// client and dials fresh. The stuck goroutine drains into the
+		// buffered channel and exits when the conn eventually errors.
+		return false
+	}
 }
 
 func sameAuth(a, b config.Server) bool {

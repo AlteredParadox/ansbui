@@ -122,33 +122,57 @@ func NewRecorder(path string) (*Recorder, error) {
 func (r *Recorder) Append(rec RunRecord) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	// Fast path: new record is at least as recent as the head — prepend.
-	if len(r.runs) == 0 || !rec.StartedAt.Before(r.runs[0].StartedAt) {
-		r.runs = append([]RunRecord{rec}, r.runs...)
-	} else {
-		// Out-of-order (clock skew / resumed run) — binary insert.
-		idx := sort.Search(len(r.runs), func(i int) bool {
-			return !r.runs[i].StartedAt.After(rec.StartedAt)
-		})
-		r.runs = append(r.runs, RunRecord{})
-		copy(r.runs[idx+1:], r.runs[idx:])
-		r.runs[idx] = rec
-	}
+	// Build the new record list in a local without touching r.runs,
+	// then persist it, and only commit to memory once the write
+	// succeeded. Mutating memory first (the old order) meant a disk
+	// failure left List() showing a run that was never saved — gone
+	// on the next restart, and the caller's error looked like the run
+	// hadn't recorded at all when it partly had.
+	newRuns := insertRun(r.runs, rec)
 	evicted := false
-	if len(r.runs) > r.limit {
-		r.runs = r.runs[:r.limit]
+	if len(newRuns) > r.limit {
+		newRuns = newRuns[:r.limit]
 		evicted = true
 	}
+	if err := r.saveRunsLocked(newRuns); err != nil {
+		return err
+	}
+	r.runs = newRuns
+	// lastPlay is an in-memory index (never persisted), so updating it
+	// after the durable write can't cause divergence.
 	if evicted {
 		r.rebuildLastPlay()
 	} else {
 		r.applyRunToLastPlay(rec)
 	}
-	return r.saveLocked()
+	return nil
 }
 
-func (r *Recorder) saveLocked() error {
-	data, err := json.MarshalIndent(r.runs, "", "  ")
+// insertRun returns runs with rec inserted in newest-first order,
+// without mutating the input slice — the caller commits it to
+// r.runs only after a successful persist. The common case (rec at
+// least as recent as the head) is a cheap prepend; an out-of-order
+// record (clock skew / resumed run) is placed by binary search.
+func insertRun(runs []RunRecord, rec RunRecord) []RunRecord {
+	out := make([]RunRecord, 0, len(runs)+1)
+	if len(runs) == 0 || !rec.StartedAt.Before(runs[0].StartedAt) {
+		out = append(out, rec)
+		return append(out, runs...)
+	}
+	idx := sort.Search(len(runs), func(i int) bool {
+		return !runs[i].StartedAt.After(rec.StartedAt)
+	})
+	out = append(out, runs[:idx]...)
+	out = append(out, rec)
+	return append(out, runs[idx:]...)
+}
+
+// saveRunsLocked atomically persists the given record slice. It takes
+// the slice as a parameter (rather than reading r.runs) so Append can
+// write the prospective new state before committing it to memory,
+// keeping disk and memory from diverging on a write failure.
+func (r *Recorder) saveRunsLocked(runs []RunRecord) error {
+	data, err := json.MarshalIndent(runs, "", "  ")
 	if err != nil {
 		return fmt.Errorf("encode runs: %w", err)
 	}

@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -22,6 +23,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/AlteredParadox/ansbui/internal/config"
 )
 
 // HostMetric is the merged sample for a single host.
@@ -66,6 +69,13 @@ func NewClient(baseURL, hostLabel string) (*Client, error) {
 	}
 	if u.Host == "" {
 		return nil, errors.New("prometheus URL is missing a host")
+	}
+	// Re-run the settings-layer SSRF allowlist at fetch time: a
+	// config.json edited by hand never went through the settings
+	// endpoint, and this client fetches server-side with no auth in
+	// front of it.
+	if err := config.CheckPromHost(u.Hostname(), u.Host); err != nil {
+		return nil, err
 	}
 	if hostLabel == "" {
 		hostLabel = "instance"
@@ -138,8 +148,15 @@ func (c *Client) Metrics(ctx context.Context) (MetricsResult, error) {
 			apply: func(_ string, v float64, m *HostMetric) { m.Uptime = int(v) },
 		},
 		{
-			name:  "up",
-			query: `up`,
+			name: "up",
+			// A host usually exposes several scrape targets (node,
+			// blackbox, cadvisor…) that all collapse onto one key
+			// once the port is stripped. Bare `up` returned one row
+			// per target and last-write-won, so a host's status
+			// flapped with row order whenever any one exporter was
+			// down. max-aggregating makes it deterministic: up if
+			// any target on the host answers.
+			query: `max by (` + c.label + `) (up)`,
 			apply: func(_ string, v float64, m *HostMetric) { m.Up = v > 0 },
 		},
 	}
@@ -248,6 +265,14 @@ func (c *Client) instantQuery(ctx context.Context, q string) (map[string]float64
 		if err != nil {
 			continue
 		}
+		// Prometheus serialises NaN/±Inf verbatim (MemTotal=0 turns
+		// the mem expression into NaN) and ParseFloat accepts them;
+		// int(NaN) downstream is platform-defined garbage. Skip the
+		// sample — an absent value renders as "—", a lie renders as
+		// -9223372036854775808%.
+		if math.IsNaN(v) || math.IsInf(v, 0) {
+			continue
+		}
 		out[host] = v
 	}
 	return out, nil
@@ -315,6 +340,11 @@ func hostFromLabel(labels map[string]string, key string) string {
 }
 
 func clampPercent(v float64) int {
+	// Belt to instantQuery's NaN/Inf skip: int(NaN) is
+	// platform-defined garbage, never let it out.
+	if math.IsNaN(v) {
+		return 0
+	}
 	if v < 0 {
 		return 0
 	}

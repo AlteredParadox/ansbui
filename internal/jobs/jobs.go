@@ -234,10 +234,16 @@ func (j *Job) emit(typ, text string) {
 }
 
 // finish records the terminal state and closes every waiter
-// channel. ctxErr is what causes the cancellation branch — when
-// the orchestrator returns because ctx was cancelled, we want the
-// job marked Cancelled regardless of which error the orchestrator
-// chose to return.
+// channel. ctxErr disambiguates a cancelled run from a failed one:
+// when the orchestrator returns an error *because* ctx was
+// cancelled, we mark Cancelled rather than Failed.
+//
+// Success wins over a late cancel. If the orchestrator returned nil,
+// the work actually completed — a Cancel() that raced in a hair
+// before fn returned (so ctx.Err() is non-nil though fn ignored it
+// and finished) must not relabel a genuinely-bootstrapped box as
+// "cancelled". Only an error return combined with a cancelled ctx is
+// a real cancellation.
 func (j *Job) finish(err error, ctxErr error) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
@@ -245,13 +251,13 @@ func (j *Job) finish(err error, ctxErr error) {
 		return
 	}
 	switch {
+	case err == nil:
+		j.status = StatusSucceeded
 	case ctxErr != nil:
 		j.status = StatusCancelled
-	case err != nil:
+	default:
 		j.status = StatusFailed
 		j.err = err.Error()
-	default:
-		j.status = StatusSucceeded
 	}
 	j.endedAt = time.Now().UTC()
 	for _, w := range j.waiters {
@@ -270,7 +276,13 @@ type Manager struct {
 	runningCount int
 	maxRetained  int
 	maxRunning   int
+	shuttingDown bool
 }
+
+// ErrShuttingDown is returned by Start once Shutdown has begun, so a
+// job can't slip in past Shutdown's snapshot and outlive the process
+// on a background context nobody cancels.
+var ErrShuttingDown = errors.New("server is shutting down — not accepting new jobs")
 
 // New returns an empty Manager with default caps. Adjust
 // MaxRetained / MaxRunning before handing out the manager if a
@@ -297,6 +309,10 @@ func New() *Manager {
 // 503 to the operator who retries.
 func (m *Manager) Start(kind string, summary map[string]string, fn Func) (*Job, error) {
 	m.mu.Lock()
+	if m.shuttingDown {
+		m.mu.Unlock()
+		return nil, ErrShuttingDown
+	}
 	if m.runningCount >= m.maxRunning {
 		m.mu.Unlock()
 		return nil, ErrTooManyRunning
@@ -399,6 +415,12 @@ func (m *Manager) List() []Snapshot {
 // process exits.
 func (m *Manager) Shutdown(ctx context.Context) {
 	m.mu.Lock()
+	// Latch the flag under the same lock Start takes, then snapshot.
+	// Any Start that ran before this is already in m.jobs (added
+	// under the lock) and thus in the snapshot; any Start after is
+	// refused with ErrShuttingDown — no job can be born into the gap
+	// and run on uncancelled.
+	m.shuttingDown = true
 	jobs := make([]*Job, 0, len(m.jobs))
 	for _, j := range m.jobs {
 		jobs = append(jobs, j)
