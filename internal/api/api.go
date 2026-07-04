@@ -33,6 +33,11 @@ type Server struct {
 	Jobs    *jobs.Manager
 	WebRoot fs.FS
 
+	// Addr is the -addr flag value the HTTP server binds to. The
+	// origin guard uses its hostname part (when it is a DNS name)
+	// as an allowed Host header value.
+	Addr string
+
 	// geo is constructed lazily on first use so apps that never turn
 	// on geoip enrichment don't pay the dns-cache + http client cost.
 	geoOnce sync.Once
@@ -89,7 +94,7 @@ func (s *Server) Handler() http.Handler {
 
 	mux.Handle("/", s.staticHandler())
 
-	return withLogging(withOriginGuard(mux))
+	return withLogging(withOriginGuard(mux, allowedHostnames(s.Addr)))
 }
 
 // withOriginGuard rejects HTTP requests whose Origin header is set
@@ -116,18 +121,33 @@ func (s *Server) Handler() http.Handler {
 // don't set it at all — we only reject when the header is present
 // and wrong, so non-browser callers (the deployment-time admin
 // path) keep working.
-func withOriginGuard(h http.Handler) http.Handler {
+//
+// The Origin == Host comparison alone is defeated by DNS rebinding
+// (see hostguard.go): after the rebind every request the attacker's
+// page makes is same-origin from the browser's point of view, so
+// guarded requests additionally require a recognised Host header —
+// regardless of whether Origin is present, because same-origin GETs
+// (the bootstrap read endpoints, WS upgrades) don't carry one. The
+// WebSocket routes are included in the guarded set for exactly that
+// reason; the upgrader's own CheckOrigin stays as the second layer.
+func withOriginGuard(h http.Handler, allowedHosts map[string]struct{}) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		guarded := false
 		switch r.Method {
 		case http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodPatch:
 			guarded = true
 		case http.MethodGet, http.MethodHead:
-			if strings.HasPrefix(r.URL.Path, "/api/bootstrap/") {
+			if strings.HasPrefix(r.URL.Path, "/api/bootstrap/") ||
+				r.URL.Path == "/api/adhoc/stream" ||
+				r.URL.Path == "/api/playbook/stream" {
 				guarded = true
 			}
 		}
 		if guarded {
+			if !hostAllowed(r.Host, allowedHosts) {
+				writeError(w, http.StatusForbidden, fmt.Errorf("request Host %q not recognised (DNS-rebinding guard) — if ansbui is behind a reverse proxy, list its public hostname in %s", r.Host, allowedHostsEnv))
+				return
+			}
 			origin := r.Header.Get("Origin")
 			if origin != "" {
 				u, err := url.Parse(origin)

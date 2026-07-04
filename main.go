@@ -70,6 +70,7 @@ func main() {
 		Runs:    runs,
 		Jobs:    jobMgr,
 		WebRoot: webSub,
+		Addr:    *addr,
 	}
 
 	httpSrv := &http.Server{
