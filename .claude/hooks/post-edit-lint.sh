@@ -10,14 +10,26 @@
 # them as a blocking signal and can fix immediately. Clean runs
 # exit 0 silently (no transcript noise on every edit).
 #
-# Lives in the repo so other operators get the same hook by checking
-# out and copying .claude/settings.json into their own .claude/.
+# Lives in the repo so a fresh checkout gets the same linting
+# automatically — .claude/settings.json registers this hook.
+#
+# No absolute paths: the repo root is derived from this script's own
+# location (it lives at <repo>/.claude/hooks/), and the linters are
+# resolved from PATH with the usual per-toolchain fallbacks. Any tool
+# that isn't installed makes its branch a silent no-op, so the hook
+# never blocks a machine that lacks it.
 
 set -u
 
-REPO=/home/user/ansbui
-GOLANGCI=/home/user/go/bin/golangci-lint
+REPO=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
+
+GOLANGCI=$(command -v golangci-lint 2>/dev/null)
+if [ -z "$GOLANGCI" ] && command -v go >/dev/null 2>&1; then
+  GOLANGCI="$(go env GOPATH)/bin/golangci-lint"
+fi
+
 ESLINT="$REPO/node_modules/.bin/eslint"
+[ -x "$ESLINT" ] || ESLINT=$(command -v eslint 2>/dev/null)
 
 INPUT=$(cat)
 FILE=$(printf '%s' "$INPUT" | jq -r '.tool_input.file_path // empty')
