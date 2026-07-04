@@ -3,6 +3,7 @@ package bootstrap
 import (
 	"context"
 	"fmt"
+	"net"
 	"strings"
 	"sync"
 	"time"
@@ -12,12 +13,15 @@ import (
 // orchestrator drives bin456789/reinstall against the target
 // before running the ansible-user-setup steps:
 //
-//  1. download reinstall.sh
+//  1. download reinstall.sh (sha256-verified against the pinned
+//     commit) and repoint its helper downloads at the same commit
 //  2. run reinstall.sh <os> <version> --ssh-port 4242 --ssh-key <pub>
-//  3. trigger reboot in a detached process so our SSH session can
-//     close cleanly
+//  3. capture the old system's /etc/machine-id, trigger a reboot in
+//     a detached session, and confirm the old system actually drops
+//     off its SSH port
 //  4. poll-dial :4242 with key auth until the freshly-installed
-//     system answers
+//     system answers with the right os-release, a changed
+//     machine-id, and a settled systemd
 //
 // On success, bootstrap.Run swaps the original password-auth target
 // for the new key-auth target and continues the rest of the
@@ -51,17 +55,18 @@ var reinstallOSMatrix = map[string][]string{
 // Updating both this SHA and reinstallScriptSHA256 below is a
 // deliberate, reviewable bump.
 //
-// CAVEAT: this pins only the orchestrator we hand to bash. At
-// install time reinstall.sh downloads its own helper scripts
-// (fix-eth-name.sh, initrd-network.sh, trans.sh, ...) from
-// `confhome`, which stays hardcoded to the upstream `main` branch
-// — its commit-pinning path is dead code (`if false && ...`). So
-// the code that actually configures the reinstalled system's
-// networking is NOT pinned and can change run-to-run. Bumping this
-// SHA reduces skew between the orchestrator and those helpers but
-// does not make a run reproducible; a genuinely brittle
-// network-adapter reinstall is most likely an upstream helper
-// issue, not a stale pin here.
+// The script ships with `confhome` hardcoded to the upstream
+// `main` branch — at install time it downloads its helper scripts
+// (trans.sh, debian.cfg, fix-eth-name.sh, initrd-network.sh, ...)
+// from there, and its own commit-pinning path is dead code
+// (`if false && ...`). Left alone, that makes every run depend on
+// whatever is on `main` that day: silent behaviour drift in the
+// helpers that configure the new system's disk and networking, and
+// hard failures whenever upstream bumps SCRIPT_VERSION past the
+// pinned orchestrator. reinstallPrepScript therefore rewrites the
+// confhome assignments to this commit after the sha256 check, so
+// the orchestrator and every helper come from the same pinned
+// commit and a run is reproducible end-to-end.
 //
 // To roll: pick the new commit upstream, run
 //
@@ -77,12 +82,19 @@ const reinstallScriptCommit = "52c5a29fba0cef139b1193eee1efe09879205f52"
 // stale pin rather than silently running unverified code.
 const reinstallScriptSHA256 = "c7931dfa847adc41c58b60eceb3237ef7b2eb676e38e00efeb9b7e29274b70bc"
 
-// reinstallScriptURL fetches by commit SHA so the file content is
-// content-addressed end-to-end. raw.githubusercontent.com serves
-// the exact file at the requested commit; combined with the local
-// sha256 check below, an MITM or upstream compromise would have to
-// produce a sha256 collision to slip past.
-var reinstallScriptURL = fmt.Sprintf("https://raw.githubusercontent.com/bin456789/reinstall/%s/reinstall.sh", reinstallScriptCommit)
+// reinstallConfhomeURL is the commit-pinned base URL for upstream
+// files. reinstallScriptURL fetches reinstall.sh from it, and
+// reinstallPrepScript rewrites the script's own `confhome` /
+// `confhome_cn` assignments to it so helper downloads at install
+// time come from the same commit (see reinstallScriptCommit doc).
+// raw.githubusercontent.com serves the exact file at the requested
+// commit; combined with the local sha256 check below, an MITM or
+// upstream compromise would have to produce a sha256 collision to
+// slip past.
+var (
+	reinstallConfhomeURL = fmt.Sprintf("https://raw.githubusercontent.com/bin456789/reinstall/%s", reinstallScriptCommit)
+	reinstallScriptURL   = reinstallConfhomeURL + "/reinstall.sh"
+)
 
 // reinstallSSHPort is the port reinstall.sh is told to bake into
 // the new system's sshd_config. Matches the port targetSSHPort
@@ -120,17 +132,22 @@ func reinstallOSList() []string {
 }
 
 // runReinstall downloads + runs reinstall.sh, kicks off a detached
-// reboot, then waits for SSH to come back on the new port with key
-// auth. Returns the new key-auth target session — caller takes
-// ownership, original password-auth target should be closed by the
-// caller before this is invoked.
+// reboot, confirms the old system went down, then waits for SSH to
+// come back on the new port with key auth. Returns the new key-auth
+// target session — caller takes ownership, original password-auth
+// target should be closed by the caller before this is invoked.
+//
+// req supplies the reinstall opts plus the target's address and
+// ORIGINAL SSH port — the latter is what the down-detection probes,
+// since the old system is the one listening there.
 //
 // emit receives progress messages on the same channel as the rest
 // of bootstrap. The "wait for SSH" phase periodically emits a
 // heartbeat so the operator can tell the run is still alive — a
 // silent 20-minute install otherwise looks indistinguishable from
 // a hung process.
-func runReinstall(ctx context.Context, target *targetSession, opts ReinstallOpts, pubKey string, privKey []byte, host string, emit func(typ, text string)) (*targetSession, error) {
+func runReinstall(ctx context.Context, target *targetSession, req Request, pubKey string, privKey []byte, emit func(typ, text string)) (*targetSession, error) {
+	opts := req.Reinstall
 	if err := validateReinstall(opts); err != nil {
 		return nil, err
 	}
@@ -155,29 +172,107 @@ func runReinstall(ctx context.Context, target *targetSession, opts ReinstallOpts
 	}
 	emit("ok", "reinstall.sh prepared the new install")
 
-	emit("meta", "Triggering reboot (detached) — SSH session will drop in ~1s...")
-	// Fire-and-forget: the inner `&` should background the reboot
-	// inside the remote shell so the wrapper exits cleanly. But a
-	// fast reboot or half-closed SSH channel can still surface an
-	// error from runRoot — the side-effect has already been
-	// scheduled, so we treat any error as a warning and proceed to
-	// the reconnect wait. Mis-classifying a real failure as
-	// "rebooting" is OK because waitForReinstallTarget will time
-	// out on its 30-minute budget if the box never actually reboots.
-	if _, _, err := target.runRoot(ctx, "(sleep 1; reboot) >/dev/null 2>&1 &", ""); err != nil {
+	// Capture the old system's machine-id before rebooting. The
+	// wait loop uses "machine-id changed" as proof the box really
+	// was reinstalled — without it, a box that boots back into its
+	// OLD system (failed grub entry) while already having key auth
+	// on :4242 from a previous bootstrap would pass the os-release
+	// check and be reported as freshly installed. Read failures
+	// degrade to "" (the proof is skipped), never abort the run.
+	oldMachineID := ""
+	if out, _, err := target.runRoot(ctx, "cat /etc/machine-id 2>/dev/null || true", ""); err == nil {
+		oldMachineID = strings.TrimSpace(out)
+	}
+
+	emit("meta", "Triggering reboot (detached) — SSH session will drop in ~2s...")
+	// Fire-and-forget, hardened against session teardown: setsid
+	// detaches the subshell from the SSH session so neither sshd's
+	// process-group cleanup nor systemd-logind (KillUserProcesses)
+	// can reap it before the sleep elapses — with a bare `&` the
+	// reboot was occasionally lost that way. `reboot -f` is the
+	// fallback for non-systemd targets. A fast reboot or half-closed
+	// SSH channel can still surface an error from runRoot — the
+	// side-effect has already been scheduled, so treat any error as
+	// a warning; waitForTargetDown below catches the case where the
+	// reboot genuinely never fires.
+	rebootCmd := `nohup setsid bash -c 'sleep 2; systemctl reboot || reboot -f' >/dev/null 2>&1 &`
+	if _, _, err := target.runRoot(ctx, rebootCmd, ""); err != nil {
 		emit("meta", fmt.Sprintf("reboot scheduling returned %v — proceeding (the reboot itself is detached)", err))
 	} else {
 		emit("ok", "reboot scheduled")
 	}
 
+	emit("meta", fmt.Sprintf("Confirming the old system drops off :%d (up to %s)...", req.Port, friendly(targetDownBudget)))
+	if err := waitForTargetDown(ctx, req.IP, req.Port); err != nil {
+		return nil, err
+	}
+	emit("ok", "old system went down — reboot confirmed")
+
 	emit("meta", fmt.Sprintf("Waiting for OS install + reboot, then SSH on :%d (key auth as root). Timeout: 30 minutes.", reinstallSSHPort))
-	emit("meta", fmt.Sprintf("(reinstall.sh exposes SSH on :%d from its installer env so you can screen -r the install — we'll keep checking /etc/os-release until it reports the target distro.)", reinstallSSHPort))
-	newTarget, err := waitForReinstallTarget(ctx, host, reinstallSSHPort, privKey, opts.OS, emit)
+	emit("meta", fmt.Sprintf("(reinstall.sh exposes SSH on :%d from its installer env so you can screen -r the install — we'll keep probing until os-release, machine-id, and systemd state all say the new system is up.)", reinstallSSHPort))
+	probe := reinstallReadyProbe{
+		expectedOS:      opts.OS,
+		expectedVersion: opts.Version,
+		oldMachineID:    oldMachineID,
+	}
+	newTarget, err := waitForReinstallTarget(ctx, req.IP, reinstallSSHPort, privKey, probe, emit)
 	if err != nil {
 		return nil, err
 	}
 	emit("ok", fmt.Sprintf("connected to freshly-installed %s %s on :%d", opts.OS, opts.Version, reinstallSSHPort))
 	return newTarget, nil
+}
+
+// targetDownBudget bounds how long runReinstall waits for the old
+// system to stop answering after the detached reboot is triggered.
+// A healthy reboot drops the port within seconds; five minutes is
+// generous slack for a loaded box flushing to disk.
+const targetDownBudget = 5 * time.Minute
+
+// waitForTargetDown polls host:port with plain TCP dials until the
+// port stops accepting connections, confirming the detached reboot
+// actually fired. Failing fast here converts the nastiest reinstall
+// failure mode — reboot silently lost, run burning the full
+// 30-minute install budget before a misleading timeout — into an
+// immediate, self-diagnosing error.
+//
+// Two consecutive failed dials are required before declaring the
+// box down so a single transient network blip can't end the wait
+// early. (A false "down" is harmless anyway — the ready probe's
+// machine-id check keeps the old system from passing as new.)
+func waitForTargetDown(ctx context.Context, host string, port int) error {
+	const (
+		probeInterval = 5 * time.Second
+		dialTimeout   = 5 * time.Second
+		needFailures  = 2
+	)
+	addr := net.JoinHostPort(host, fmt.Sprintf("%d", port))
+	deadline := time.Now().Add(targetDownBudget)
+	failures := 0
+	for {
+		if time.Now().After(deadline) {
+			return fmt.Errorf("old system on %s is still accepting connections %s after the reboot was triggered — the detached reboot appears not to have fired; reboot the box manually (the install starts on next boot) or re-run bootstrap", addr, friendly(targetDownBudget))
+		}
+		d := net.Dialer{Timeout: dialTimeout}
+		conn, err := d.DialContext(ctx, "tcp", addr)
+		switch {
+		case err == nil:
+			_ = conn.Close()
+			failures = 0
+		case ctx.Err() != nil:
+			return ctx.Err()
+		default:
+			failures++
+			if failures >= needFailures {
+				return nil
+			}
+		}
+		select {
+		case <-time.After(probeInterval):
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 }
 
 // ensureCurlScript installs curl via apt-get if it isn't already on
@@ -190,16 +285,16 @@ func ensureCurlScript() string {
 		`set -e`,
 		`if command -v curl >/dev/null 2>&1; then exit 0; fi`,
 		`if ! command -v apt-get >/dev/null 2>&1; then echo "curl not found and apt-get not found to install it" >&2; exit 1; fi`,
-		`DEBIAN_FRONTEND=noninteractive apt-get update -qq`,
-		`DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl`,
+		`DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120 update -qq`,
+		`DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120 install -y -qq curl`,
 		`command -v curl >/dev/null 2>&1`,
 	}, "; ")
 }
 
 // reinstallPrepScript builds the bash one-liner that downloads,
-// verifies, and runs reinstall.sh. The pubkey content goes through
-// shellQuote, which uses '"'"' escapes — safe even with the SSH
-// option-prefix shapes (`command="..." ssh-ed25519 ...`)
+// verifies, pins, and runs reinstall.sh. The pubkey content goes
+// through shellQuote, which uses '"'"' escapes — safe even with the
+// SSH option-prefix shapes (`command="..." ssh-ed25519 ...`)
 // authorized_keys allows.
 //
 // Verification: after download, sha256sum is compared to
@@ -208,9 +303,18 @@ func ensureCurlScript() string {
 // mismatch" message so a tampered mirror or stale pin is
 // distinguishable from a genuine reinstall failure.
 //
-// Output is teed to /tmp/reinstall.log so the operator has a copy
-// to inspect post-reboot via the new target session if anything
-// looked suspicious during the prep phase.
+// Pinning: after the checksum passes, the script's hardcoded
+// `confhome=.../main` (and its China-mirror twin) are rewritten to
+// reinstallConfhomeURL so every helper it downloads at install time
+// (trans.sh, debian.cfg, fix-eth-name.sh, ...) comes from the same
+// pinned commit. This is a deliberate self-authored edit of
+// verified content — without it, runs silently depend on upstream's
+// `main` branch of the day (see reinstallScriptCommit doc).
+//
+// Output is teed to /tmp/reinstall.log so the prep transcript is
+// inspectable if the run fails before the reboot. It does NOT
+// survive the reinstall — the install erases the disk — so anything
+// worth keeping must come out through the emit stream.
 func reinstallPrepScript(opts ReinstallOpts, pubKey string) string {
 	runCmd := `bash reinstall.sh ` + shellQuote(opts.OS) + ` ` + shellQuote(opts.Version) +
 		` --ssh-port ` + fmt.Sprintf("%d", reinstallSSHPort) +
@@ -225,29 +329,71 @@ func reinstallPrepScript(opts ReinstallOpts, pubKey string) string {
 			`; else echo "neither curl nor wget available" >&2; exit 1; fi`,
 		`echo ` + shellQuote(reinstallScriptSHA256+"  reinstall.sh") + ` | sha256sum -c - ` +
 			`|| { echo "reinstall.sh sha256 mismatch — refusing to run (expected ` + reinstallScriptSHA256 + `)" >&2; exit 1; }`,
+		`sed -i -e 's|^confhome=.*|confhome=` + reinstallConfhomeURL + `|'` +
+			` -e 's|^confhome_cn=.*|confhome_cn=` + reinstallConfhomeURL + `|' reinstall.sh`,
 		`chmod +x reinstall.sh`,
 		`bash -o pipefail -c ` + shellQuote(runCmd),
 	}, "; ")
 }
 
-// waitForReinstallTarget polls the target on (host:port) until SSH
-// answers with key auth AND /etc/os-release reports the requested
-// target OS, or until ctx is cancelled / the 30-minute budget
-// elapses. The os-release check is what distinguishes the
-// reinstaller's live environment (where reinstall.sh exposes SSH
-// on :4242 with the same key for `screen -r` monitoring) from the
-// freshly-installed target OS that comes up after the second
-// reboot. Without it we'd attach to the live env mid-install and
-// run `apt install` against an alpine initramfs.
+// reinstallReadyProbe carries the evidence thresholds a dialed
+// session must clear before the wait loop hands it back as "the
+// freshly-installed system":
 //
-// The first 60 seconds are an unconditional sleep — the original
-// box is going down, dialing during that window just produces
-// noise. Subsequent retries are 15s apart; with dialKeyTarget's
-// 15s dial timeout the worst-case loop iteration is 30s. A
-// heartbeat fires every 60s so the operator sees progress.
-func waitForReinstallTarget(ctx context.Context, host string, port int, privKey []byte, expectedOS string, emit func(typ, text string)) (*targetSession, error) {
+//   - expectedOS: /etc/os-release ID (or ID_LIKE) must match —
+//     distinguishes the target OS from the installer's live env.
+//   - expectedVersion: VERSION_ID must match when present — a box
+//     that boots back into an old same-family install answers
+//     honestly here.
+//   - oldMachineID: when non-empty, /etc/machine-id must DIFFER —
+//     positive proof a reinstall happened, catching the
+//     boots-back-into-the-old-system case even when the versions
+//     coincide.
+type reinstallReadyProbe struct {
+	expectedOS      string
+	expectedVersion string
+	oldMachineID    string
+}
+
+// reinstallProbeMarker separates the sections of
+// reinstallProbeScript's output. Unusual enough that it can't
+// appear inside a legitimate /etc/os-release.
+const reinstallProbeMarker = "__ANSBUI_PROBE__"
+
+// reinstallProbeScript gathers everything evalReinstallProbe needs
+// in ONE round trip: os-release, systemd's settle state, and the
+// machine-id. Each fragment tolerates its command missing (the
+// alpine installer env has no systemctl) — classification happens
+// on the Go side where it can be tested. The trailing `true` keeps
+// a missing machine-id from failing the whole probe.
+var reinstallProbeScript = strings.Join([]string{
+	`cat /etc/os-release 2>/dev/null`,
+	`echo ` + reinstallProbeMarker,
+	`systemctl is-system-running 2>/dev/null | head -n1`,
+	`echo ` + reinstallProbeMarker,
+	`cat /etc/machine-id 2>/dev/null`,
+	`true`,
+}, "; ")
+
+// waitForReinstallTarget polls the target on (host:port) until SSH
+// answers with key auth AND evalReinstallProbe's checks all pass,
+// or until ctx is cancelled / the 30-minute budget elapses. The
+// probe is what distinguishes the reinstaller's live environment
+// (where reinstall.sh exposes SSH on :4242 with the same key for
+// `screen -r` monitoring) — and a box that wrongly booted back
+// into its old system — from the freshly-installed target OS.
+// Without it we'd attach to the live env mid-install and run
+// `apt install` against an alpine initramfs.
+//
+// The first 15 seconds are an unconditional sleep — the caller has
+// already confirmed the old system went down, so this only skips
+// the shutdown/BIOS window where dialing is pure noise. Subsequent
+// retries are 15s apart; with dialKeyTarget's 15s dial timeout the
+// worst-case loop iteration is 30s. A heartbeat fires every 60s so
+// the operator sees progress.
+func waitForReinstallTarget(ctx context.Context, host string, port int, privKey []byte, probe reinstallReadyProbe, emit func(typ, text string)) (*targetSession, error) {
 	const (
-		initialWait     = 60 * time.Second
+		initialWait     = 15 * time.Second
 		retryInterval   = 15 * time.Second
 		heartbeatPeriod = 60 * time.Second
 		totalBudget     = 30 * time.Minute
@@ -273,19 +419,19 @@ func waitForReinstallTarget(ctx context.Context, host string, port int, privKey 
 			// matching the new interface), which is invisible over
 			// SSH. Point the operator at the provider console, the
 			// only place that failure is observable.
-			hint := fmt.Sprintf("check the provider's serial/VNC console: the reinstall likely completed but %s isn't reachable on :%d, usually because networking (NIC name / static config) didn't come up in the new install", expectedOS, port)
+			hint := fmt.Sprintf("check the provider's serial/VNC console: the reinstall likely completed but %s isn't reachable on :%d, usually because networking (NIC name / static config) didn't come up in the new install", probe.expectedOS, port)
 			if lastStatus == "" {
 				return nil, fmt.Errorf("timeout after 30 minutes waiting for SSH on :%d — %s", port, hint)
 			}
-			return nil, fmt.Errorf("timeout after 30 minutes waiting for %s to come up (last status: %s) — %s", expectedOS, lastStatus, hint)
+			return nil, fmt.Errorf("timeout after 30 minutes waiting for %s to come up (last status: %s) — %s", probe.expectedOS, lastStatus, hint)
 		}
-		target, status := tryReinstallReady(ctx, host, port, privKey, expectedOS)
+		target, status := tryReinstallReady(ctx, host, port, privKey, probe)
 		if target != nil {
 			return target, nil
 		}
 		lastStatus = status
 		if time.Since(lastBeat) >= heartbeatPeriod {
-			emit("meta", fmt.Sprintf("waiting for %s on :%d (%s elapsed) — %s", expectedOS, port, friendly(time.Since(startedAt)), status))
+			emit("meta", fmt.Sprintf("waiting for %s on :%d (%s elapsed) — %s", probe.expectedOS, port, friendly(time.Since(startedAt)), status))
 			lastBeat = time.Now()
 		}
 		select {
@@ -296,28 +442,69 @@ func waitForReinstallTarget(ctx context.Context, host string, port int, privKey 
 	}
 }
 
-// tryReinstallReady performs one dial + os-release probe. Returns
-// (target, "") when the target OS matches expectedOS — the caller
-// owns the session. Returns (nil, status) when we should keep
-// waiting, where status describes the current state for the
-// heartbeat ("connection refused", "still in installer (alpine)",
-// etc.). The session is closed on the not-ready paths so we don't
-// leak SSH connections during the wait loop.
-func tryReinstallReady(ctx context.Context, host string, port int, privKey []byte, expectedOS string) (*targetSession, string) {
+// tryReinstallReady performs one dial + readiness probe. Returns
+// (target, "") when every probe check passes — the caller owns the
+// session. Returns (nil, status) when we should keep waiting, where
+// status describes the current state for the heartbeat ("dial:
+// connection refused", "still in installer (alpine)", etc.). The
+// session is closed on the not-ready paths so we don't leak SSH
+// connections during the wait loop.
+func tryReinstallReady(ctx context.Context, host string, port int, privKey []byte, probe reinstallReadyProbe) (*targetSession, string) {
 	target, err := dialKeyTarget(ctx, host, port, privKey)
 	if err != nil {
 		return nil, "dial: " + err.Error()
 	}
-	osRelease, _, err := target.runRoot(ctx, "cat /etc/os-release", "")
+	out, _, err := target.runRoot(ctx, reinstallProbeScript, "")
 	if err != nil {
 		_ = target.Close()
-		return nil, "cat /etc/os-release: " + err.Error()
+		return nil, "readiness probe: " + err.Error()
 	}
-	if osMatches(osRelease, expectedOS) {
+	ready, status := evalReinstallProbe(out, probe)
+	if ready {
 		return target, ""
 	}
 	_ = target.Close()
-	return nil, fmt.Sprintf("still in installer env (detected: %s)", detectDistro(osRelease))
+	return nil, status
+}
+
+// evalReinstallProbe classifies one reinstallProbeScript output.
+// Returns (true, "") when the session belongs to the settled,
+// freshly-installed target OS; otherwise (false, status) with a
+// heartbeat-friendly description of why we're still waiting. Pure
+// function so the classification rules are unit-testable.
+//
+// Check order matters for status quality: OS identity first (the
+// common "still in installer" case), then version, then the
+// machine-id reinstall proof, then systemd settle state. The
+// settle gate is what protects the next step's apt-get from
+// first-boot lock contention with cloud-init/unattended-upgrades.
+// Unknown or missing states fail open — debian/ubuntu always run
+// systemd, so only the documented early/late states block.
+func evalReinstallProbe(out string, probe reinstallReadyProbe) (bool, string) {
+	parts := strings.Split(out, reinstallProbeMarker)
+	if len(parts) != 3 {
+		return false, "unexpected readiness-probe output shape"
+	}
+	osRelease := parts[0]
+	sysState := strings.TrimSpace(parts[1])
+	machineID := strings.TrimSpace(parts[2])
+
+	if !osMatches(osRelease, probe.expectedOS) {
+		return false, fmt.Sprintf("still in installer env (detected: %s)", detectDistro(osRelease))
+	}
+	if got := osReleaseField(osRelease, "VERSION_ID"); got != "" && got != strings.TrimSpace(probe.expectedVersion) {
+		return false, fmt.Sprintf("%s answered but reports version %s (want %s) — wrong system, still waiting", probe.expectedOS, got, probe.expectedVersion)
+	}
+	if probe.oldMachineID != "" && machineID != "" && machineID == probe.oldMachineID {
+		return false, "reachable, but /etc/machine-id is unchanged — this is still the pre-reinstall system (did it boot back into the old install?)"
+	}
+	switch sysState {
+	case "initializing", "starting":
+		return false, fmt.Sprintf("%s is up, waiting for systemd to settle (state: %s)", probe.expectedOS, sysState)
+	case "stopping", "maintenance":
+		return false, fmt.Sprintf("system reports systemd state %q — still waiting", sysState)
+	}
+	return true, ""
 }
 
 // osMatches checks whether /etc/os-release identifies expectedOS.
@@ -331,25 +518,30 @@ func osMatches(osRelease, expected string) bool {
 	if expected == "" {
 		return false
 	}
-	var id, idLike string
-	for _, line := range strings.Split(osRelease, "\n") {
-		line = strings.TrimSpace(line)
-		switch {
-		case strings.HasPrefix(line, "ID="):
-			id = strings.ToLower(strings.Trim(strings.TrimPrefix(line, "ID="), `"`))
-		case strings.HasPrefix(line, "ID_LIKE="):
-			idLike = strings.ToLower(strings.Trim(strings.TrimPrefix(line, "ID_LIKE="), `"`))
-		}
-	}
-	if id == expected {
+	if osReleaseField(osRelease, "ID") == expected {
 		return true
 	}
-	for _, like := range strings.Fields(idLike) {
+	for _, like := range strings.Fields(osReleaseField(osRelease, "ID_LIKE")) {
 		if like == expected {
 			return true
 		}
 	}
 	return false
+}
+
+// osReleaseField extracts one KEY=value field from os-release
+// content, lowercased with surrounding quotes stripped. Returns ""
+// when the key is absent — callers treat missing fields as
+// fail-open (e.g. debian testing/sid ships no VERSION_ID).
+func osReleaseField(osRelease, key string) string {
+	prefix := key + "="
+	for _, line := range strings.Split(osRelease, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, prefix) {
+			return strings.ToLower(strings.Trim(strings.TrimPrefix(line, prefix), `"`))
+		}
+	}
+	return ""
 }
 
 // startHeartbeat fires a "still running" emit every 30s until the

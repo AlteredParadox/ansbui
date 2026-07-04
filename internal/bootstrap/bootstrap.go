@@ -541,10 +541,7 @@ func bootstrapTarget(ctx context.Context, target *targetSession, pubKey string, 
 	}
 
 	emit("meta", "Installing sudo + python3 via apt...")
-	_, stderr, err := target.runRoot(ctx,
-		"DEBIAN_FRONTEND=noninteractive apt-get update -qq && "+
-			"DEBIAN_FRONTEND=noninteractive apt-get install -y -qq sudo python3",
-		"")
+	_, stderr, err := target.runRoot(ctx, aptInstallScript("sudo", "python3"), "")
 	if err != nil {
 		emit("fail", "apt install: "+stderr)
 		return err
@@ -602,7 +599,7 @@ func doReinstall(ctx context.Context, target *targetSession, req Request, in rei
 		return nil, err
 	}
 	emit("ok", "private key loaded")
-	return runReinstall(ctx, target, req.Reinstall, in.pubKey, privKey, req.IP, emit)
+	return runReinstall(ctx, target, req, in.pubKey, privKey, emit)
 }
 
 // readControlNodePrivkey reads the SSH private key file from the
@@ -917,6 +914,31 @@ func isDebianFamily(distro string) bool {
 		return true
 	}
 	return false
+}
+
+// aptInstallScript builds the update+install script used against
+// targets that may have JUST booted (bootstrapTarget runs seconds
+// after the post-reinstall sshd first answers). Two first-boot
+// hazards make a naive `apt-get update && apt-get install` flaky:
+//
+//   - cloud-init / unattended-upgrades hold the dpkg lock for a
+//     while after first boot — DPkg::Lock::Timeout waits up to two
+//     minutes for it instead of failing immediately
+//   - `apt-get update` fails transiently while DNS / mirror routing
+//     settles, so it gets three attempts with a pause between
+//
+// pkgs must be fixed identifiers from the caller, never operator
+// input — they're spliced into the script unquoted.
+func aptInstallScript(pkgs ...string) string {
+	const apt = `apt-get -o DPkg::Lock::Timeout=120`
+	return strings.Join([]string{
+		`set -e`,
+		`export DEBIAN_FRONTEND=noninteractive`,
+		`ok=`,
+		`for i in 1 2 3; do if ` + apt + ` update -qq; then ok=1; break; fi; echo "apt-get update failed (attempt $i/3)" >&2; sleep 10; done`,
+		`[ -n "$ok" ] || { echo "apt-get update failed after 3 attempts" >&2; exit 1; }`,
+		apt + ` install -y -qq ` + strings.Join(pkgs, " "),
+	}, "; ")
 }
 
 // ansibleUserSetupScript builds a bash one-liner that creates the
