@@ -25,10 +25,20 @@ func TestLockInventoryKeying(t *testing.T) {
 	if lockInventory(a) == lockInventory(otherFile) {
 		t.Error("different inventory files must not share a mutex")
 	}
-	// The namespace must be disjoint from target keys: a hostile or
-	// unlucky ip:port string can never equal an inventory key because
-	// of the NUL separators.
+	// The three lock domains must be mutually disjoint — no crafted
+	// key in one namespace can collide with another, since the NUL
+	// separator can't appear in a validated address / id / path / fqdn.
 	if lockInventory(a) == lockTarget("inventory") {
 		t.Error("inventory key collided with a plain target key")
+	}
+	if lockDNSRecord("A", "srv-a") == lockTarget("A\x00srv-a") {
+		t.Error("dns key collided with a target key")
+	}
+	if lockDNSRecord("A", "host.example.com") == lockDNSRecord("AAAA", "host.example.com") {
+		t.Error("different record types must not share a mutex")
+	}
+	// DNS fqdn is lower-cased, so case variants share one lock.
+	if lockDNSRecord("A", "Host.Example.com") != lockDNSRecord("A", "host.example.com") {
+		t.Error("dns fqdn case variants must share one mutex")
 	}
 }

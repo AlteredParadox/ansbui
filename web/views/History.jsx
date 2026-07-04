@@ -29,12 +29,13 @@ function HistoryView({ onOpenPlaybook, onRunPlaybook, onOpenAdhoc }) {
   // AnsibleData is a snapshot from boot (or the last explicit
   // refresh), so runs executed since — already persisted by the
   // backend — wouldn't show up here until a full page reload.
-  // Re-sync on mount; the state bump re-renders with the fresh
-  // globals refreshData just wrote.
+  // Re-sync just the runs on mount (a single cheap GET, not the full
+  // SSH+Prom+geo fan-out); the state bump re-renders with the fresh
+  // globals.
   const [, setRunsVersion] = useStateH(0);
   useEffectH(() => {
     let alive = true;
-    globalThis.AnsbuiAPI?.refreshData()
+    globalThis.AnsbuiAPI?.refreshRuns()
       .then(() => { if (alive) setRunsVersion(v => v + 1); })
       .catch(() => {});
     return () => { alive = false; };

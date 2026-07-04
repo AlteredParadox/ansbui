@@ -35,6 +35,14 @@ func isReservedGroupName(name string) bool {
 	return false
 }
 
+// reservedProviderError is the single formatter for the "provider name
+// collides with a reserved group" message, shared by the API-boundary
+// check (validateProvider) and the inventory-edit check so the wording
+// and rule live in one place.
+func reservedProviderError(name string) error {
+	return fmt.Errorf("provider name %q collides with a reserved/umbrella ansible group — pick a different provider label", name)
+}
+
 // addHostToInventoryYAML returns a new inventory file content with
 // fqdn registered as a host inside `all.children.vps_servers.
 // children.debian_servers.children.<provider>.hosts`. Any node
@@ -52,7 +60,7 @@ func addHostToInventoryYAML(content []byte, provider, fqdn string) ([]byte, erro
 		return nil, errors.New("provider name is required")
 	}
 	if isReservedGroupName(provider) {
-		return nil, fmt.Errorf("provider name %q collides with a reserved/umbrella ansible group — pick a different provider label", provider)
+		return nil, reservedProviderError(provider)
 	}
 	if fqdn == "" {
 		return nil, errors.New("fqdn is required")

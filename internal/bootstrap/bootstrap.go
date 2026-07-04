@@ -68,43 +68,59 @@ const (
 	dnsTTLSeconds             = 300
 )
 
-// targetMu serialises bootstrap runs against the same target.
-// Two operators (or a single one with two browser tabs) submitting
-// the same form would otherwise race the SSH bootstrap — `chpasswd`
-// runs twice with different random passwords, the sshd-port flip
-// can interleave with another reload, etc. The mutex is keyed on
-// `<ip>:<port>`; a process-local sync.Mutex per key is enough
-// because the WS handler always lives in this process.
+// keyedMu is a process-local registry of named mutexes serialising
+// bootstrap operations that must not interleave. A single sync.Mutex
+// per key is enough because every WS handler lives in this process.
+// Entries are never evicted; the key space is operator-driven
+// (targets, inventory files, DNS records — hundreds at most), so the
+// map stays small. Callers take ownership of the returned mutex and
+// are responsible for unlocking; ctx cancellation isn't honoured
+// because each critical section is short and queueing a second
+// operator behind the lock is the correct UX.
 var (
-	targetMuRegistry sync.Mutex
-	targetMu         = map[string]*sync.Mutex{}
+	keyedMuRegistry sync.Mutex
+	keyedMu         = map[string]*sync.Mutex{}
 )
 
-// lockTarget returns a mutex specific to the IP:port pair. The
-// caller takes ownership and is responsible for unlocking; a Done
-// channel from ctx isn't honoured because bootstrap steps are
-// short and a queued operator behind a lock is the correct UX.
-func lockTarget(key string) *sync.Mutex {
-	targetMuRegistry.Lock()
-	defer targetMuRegistry.Unlock()
-	m, ok := targetMu[key]
+// lockFor returns the mutex for (namespace, parts...). The namespace
+// makes each lock domain disjoint; parts are joined under a NUL
+// separator (which can't appear in a validated address, provider,
+// path, or fqdn) so keys from different domains — or with different
+// components — can never collide.
+func lockFor(namespace string, parts ...string) *sync.Mutex {
+	key := namespace + "\x00" + strings.Join(parts, "\x00")
+	keyedMuRegistry.Lock()
+	defer keyedMuRegistry.Unlock()
+	m, ok := keyedMu[key]
 	if !ok {
 		m = &sync.Mutex{}
-		targetMu[key] = m
+		keyedMu[key] = m
 	}
 	return m
 }
 
-// lockInventory returns a mutex specific to one inventory file on one
-// control server. targetMu only serialises runs against the *same*
+// lockTarget serialises bootstrap runs against the same target
+// (ip:port). Two operators — or one with two tabs — submitting the
+// same form would otherwise race the SSH bootstrap: chpasswd runs
+// twice with different random passwords, the sshd-port flip
+// interleaves with another reload, etc.
+func lockTarget(ipPort string) *sync.Mutex { return lockFor("target", ipPort) }
+
+// lockInventory serialises the read-modify-write of one inventory
+// file on one control server. lockTarget only covers the *same*
 // target; two concurrent bootstraps of different servers still share
-// srv.Inventory, and their read-modify-write cycles would interleave —
-// the second write silently erases the first run's host even though
-// both runs report success. Keyed through the same registry as
-// lockTarget with a NUL-separated namespace so an ip:port target key
-// can never collide with it.
+// srv.Inventory, and their RMW cycles would interleave — the second
+// write silently erasing the first run's host though both report
+// success.
 func lockInventory(srv config.Server) *sync.Mutex {
-	return lockTarget("inventory\x00" + srv.ID + "\x00" + path.Join(srv.WorkDir, srv.Inventory))
+	return lockFor("inventory", srv.ID, path.Join(srv.WorkDir, srv.Inventory))
+}
+
+// lockDNSRecord serialises the find→create window for one DNS record
+// set, so two concurrent bootstraps of the same fqdn with different
+// IPs can't both see zero records and both create a round-robin pair.
+func lockDNSRecord(recordType, fqdn string) *sync.Mutex {
+	return lockFor("dns", recordType, strings.ToLower(fqdn))
 }
 
 // Run executes the full bootstrap workflow, invoking emit for
@@ -286,7 +302,7 @@ func validateProvider(p string) error {
 	// Also enforced at the inventory-edit layer; rejecting here turns
 	// a mid-run failure into a form error before any side effects.
 	if isReservedGroupName(normalized) {
-		return fmt.Errorf("provider name %q collides with a reserved/umbrella ansible group — pick a different provider label", normalized)
+		return reservedProviderError(normalized)
 	}
 	return nil
 }
@@ -712,10 +728,9 @@ func ensureRecord(ctx context.Context, pb *porkbun.Client, recordType, domain, s
 	// bootstraps of the same fqdn with different addresses would both
 	// see zero records and both create — assembling exactly the
 	// round-robin record set the conflict guard below exists to
-	// prevent. targetMu doesn't cover this (it keys on ip:port, and
-	// the racing runs have different IPs). Process-local is enough:
-	// ansbui is the only writer touching these records mid-bootstrap.
-	mu := lockTarget("dns\x00" + recordType + "\x00" + strings.ToLower(fqdn))
+	// prevent. lockTarget doesn't cover this (it keys on ip:port, and
+	// the racing runs have different IPs).
+	mu := lockDNSRecord(recordType, fqdn)
 	mu.Lock()
 	defer mu.Unlock()
 	// Canonicalize ip so a mixed-case IPv6 input (`2001:DB8::1`)

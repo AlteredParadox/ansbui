@@ -230,6 +230,24 @@
     return globalThis.AnsibleData;
   };
 
+  // refreshRuns re-syncs only the run list + activity — one cheap GET.
+  // The History view uses this on mount instead of refreshData(), whose
+  // /api/inventory leg runs `ansible-inventory` over SSH plus Prometheus
+  // and geo lookups just to repaint a runs table the backend serves
+  // from memory. Falls back to the full refresh if AnsibleData hasn't
+  // been built yet (nothing else to merge into).
+  api.refreshRuns = async () => {
+    if (!globalThis.AnsibleData) return api.refreshData();
+    const runs = await api.listRuns().catch(() => ({ runs: [] }));
+    const RUNS = (runs.runs || []).map(toRunCard);
+    globalThis.AnsibleData = {
+      ...globalThis.AnsibleData,
+      RUNS,
+      ACTIVITY: activityFromRuns(RUNS)
+    };
+    return globalThis.AnsibleData;
+  };
+
   // annotatePlaybooksWithRuns walks the raw run records (before
   // toRunCard's string friendlification) and picks the most recent
   // run per playbook path/name. Populates lastRun, lastStatus, and a
