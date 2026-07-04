@@ -274,7 +274,7 @@ func TestManagerSubscribeRace(t *testing.T) {
 func TestFinishSuccessBeatsLateCancel(t *testing.T) {
 	m := New()
 	release := make(chan struct{})
-	job, err := m.Start("test", nil, func(ctx context.Context, _ func(string, string)) error {
+	job, err := m.Start("test", nil, func(_ context.Context, _ func(string, string)) error {
 		<-release // hold until we've cancelled, then succeed anyway
 		return nil
 	})

@@ -154,8 +154,10 @@ func (j *Job) Cancel() {
 	j.cancel()
 }
 
-// Done returns a channel that closes when the job's terminal
-// state is recorded. Useful for tests / shutdown wait.
+// Done returns a channel that closes when the job's terminal state is
+// recorded AND its running-count slot has been freed. Useful for
+// tests / shutdown wait; the slot-freed guarantee lets a caller Start
+// a replacement immediately after Done() without racing the cap.
 func (j *Job) Done() <-chan struct{} {
 	return j.done
 }
@@ -264,7 +266,11 @@ func (j *Job) finish(err error, ctxErr error) {
 		close(w.ch)
 	}
 	j.waiters = nil
-	close(j.done)
+	// NB: j.done is deliberately NOT closed here — the Start goroutine
+	// closes it after afterFinish has freed the running-count slot, so
+	// a waiter unblocked by Done() can rely on the slot already being
+	// available (otherwise a Start immediately after Done() could spuriously
+	// hit ErrTooManyRunning against the just-finished job's stale slot).
 }
 
 // Manager owns the in-memory job registry. The zero value is not
@@ -343,6 +349,10 @@ func (m *Manager) Start(kind string, summary map[string]string, fn Func) (*Job, 
 		fnErr := runFnSafely(ctx, fn, job)
 		job.finish(fnErr, ctx.Err())
 		m.afterFinish(job.ID)
+		// Close done last, after the running-count slot is freed, so
+		// Done() firing guarantees a fresh Start won't false-positive
+		// on ErrTooManyRunning against this job's slot.
+		close(job.done)
 	}()
 	return job, nil
 }
