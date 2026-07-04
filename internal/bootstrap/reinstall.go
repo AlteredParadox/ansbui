@@ -17,10 +17,13 @@ import (
 //  1. download reinstall.sh (sha256-verified against the pinned
 //     commit) and repoint its helper downloads at the same commit
 //  2. run reinstall.sh <os> <version> --ssh-port 4242 --ssh-key <pub>
-//  3. capture the old system's /etc/machine-id, trigger a reboot in
+//  3. cross-check the network config reinstall.sh detected against
+//     the bootstrap target address — abort BEFORE the reboot if the
+//     new system would come up on the wrong address
+//  4. capture the old system's /etc/machine-id, trigger a reboot in
 //     a detached session, and confirm the old system actually drops
 //     off its SSH port
-//  4. poll-dial :4242 with key auth until the freshly-installed
+//  5. poll-dial :4242 with key auth until the freshly-installed
 //     system answers with the right os-release, a changed
 //     machine-id, and a settled systemd
 //
@@ -189,6 +192,21 @@ func runReinstall(ctx context.Context, target *targetSession, req Request, pubKe
 	}
 	emit("ok", "reinstall.sh prepared the new install")
 
+	// Pre-reboot network cross-check. reinstall.sh bakes the network
+	// config it auto-detected on the OLD system into the installer
+	// (default-route NIC, FIRST global address on it as primary —
+	// and only the primary makes it into the new install for IPv4).
+	// The pre-reboot environment is trusted — it's provider-set and
+	// we're SSH'd in over it — so the address this bootstrap dialed
+	// is ground truth. If detection picked something else (multi-IP
+	// box, unusual routing), the new system would come up on the
+	// wrong address: a guaranteed 45-minute timeout and possibly a
+	// console-rescue job. Abort now instead, while the old system
+	// is still alive and untouched.
+	if err := verifyReinstallNetconf(ctx, parseReinstallNetInfo(stdout), req.IP, emit); err != nil {
+		return nil, err
+	}
+
 	// Capture the old system's machine-id before rebooting. The
 	// wait loop uses "machine-id changed" as proof the box really
 	// was reinstalled — without it, a box that boots back into its
@@ -238,6 +256,170 @@ func runReinstall(ctx context.Context, target *targetSession, req Request, pubKe
 	}
 	emit("ok", fmt.Sprintf("connected to freshly-installed %s %s on :%d", opts.OS, opts.Version, reinstallSSHPort))
 	return newTarget, nil
+}
+
+// reinstallNetInfo is the network config reinstall.sh reports
+// detecting during prep, parsed from the plain-text "Network Info"
+// block collect_netconf echoes (`IPv4 Address: 1.2.3.4/24` etc.).
+// Addresses keep their /cidr suffix for display; ips() strips it.
+type reinstallNetInfo struct {
+	ipv4Addr, ipv4Gateway string
+	ipv6Addr, ipv6Gateway string
+}
+
+// parseReinstallNetInfo extracts the detected addresses/gateways
+// from reinstall.sh's prep output. Field labels are fixed English
+// literals in the pinned script, so prefix matching is stable
+// across runs; when a label appears more than once (collect_netconf
+// can run twice during prep) the last occurrence wins, matching
+// what actually gets baked into the installer. Missing fields stay
+// "" — callers fail open on absent data.
+func parseReinstallNetInfo(out string) reinstallNetInfo {
+	var nc reinstallNetInfo
+	fields := map[string]*string{
+		"ipv4 address:": &nc.ipv4Addr,
+		"ipv4 gateway:": &nc.ipv4Gateway,
+		"ipv6 address:": &nc.ipv6Addr,
+		"ipv6 gateway:": &nc.ipv6Gateway,
+	}
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		lower := strings.ToLower(line)
+		for prefix, dst := range fields {
+			if strings.HasPrefix(lower, prefix) {
+				*dst = strings.TrimSpace(line[len(prefix):])
+			}
+		}
+	}
+	return nc
+}
+
+// ips returns the detected primary addresses as parsed IPs, /cidr
+// suffixes stripped. Unparseable or empty fields are skipped.
+func (nc reinstallNetInfo) ips() []net.IP {
+	var out []net.IP
+	for _, raw := range []string{nc.ipv4Addr, nc.ipv6Addr} {
+		host := raw
+		if i := strings.IndexByte(raw, '/'); i >= 0 {
+			host = raw[:i]
+		}
+		if ip := net.ParseIP(strings.TrimSpace(host)); ip != nil {
+			out = append(out, ip)
+		}
+	}
+	return out
+}
+
+// summary renders the detection for the emit stream, e.g.
+// "IPv4 1.2.3.4/24 via 1.2.3.1; IPv6 (none)".
+func (nc reinstallNetInfo) summary() string {
+	part := func(label, addr, gw string) string {
+		if addr == "" {
+			return label + " (none)"
+		}
+		if gw == "" {
+			gw = "?"
+		}
+		return fmt.Sprintf("%s %s via %s", label, addr, gw)
+	}
+	return part("IPv4", nc.ipv4Addr, nc.ipv4Gateway) + "; " + part("IPv6", nc.ipv6Addr, nc.ipv6Gateway)
+}
+
+// Verdicts for classifyDetectedNetconf.
+const (
+	netconfMatch     = iota // a detected address equals a target address
+	netconfNoData           // nothing usable detected/parsed — fail open
+	netconfNATLikely        // no match, but a detected address is private (1:1 NAT provider)
+	netconfMismatch         // all detected addresses public, none match — abort-worthy
+)
+
+// classifyDetectedNetconf compares reinstall.sh's detected primary
+// addresses against the bootstrap target's address(es). The NAT
+// exemption keeps the gate from false-aborting on providers that
+// give instances private on-box addresses behind 1:1 NAT (the
+// target public IP never appears on the box there, and reinstall.sh
+// handles that layout fine).
+func classifyDetectedNetconf(detected, targets []net.IP) int {
+	if len(detected) == 0 {
+		return netconfNoData
+	}
+	anyPrivate := false
+	for _, d := range detected {
+		for _, t := range targets {
+			if d.Equal(t) {
+				return netconfMatch
+			}
+		}
+		if isNATCandidate(d) {
+			anyPrivate = true
+		}
+	}
+	if anyPrivate {
+		return netconfNATLikely
+	}
+	return netconfMismatch
+}
+
+// isNATCandidate reports whether ip is the kind of address a
+// 1:1-NAT provider puts on the instance itself: RFC1918 / ULA
+// (IsPrivate), CGNAT 100.64.0.0/10, loopback, or link-local.
+func isNATCandidate(ip net.IP) bool {
+	if ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast() {
+		return true
+	}
+	if v4 := ip.To4(); v4 != nil && v4[0] == 100 && v4[1]&0xc0 == 64 {
+		return true
+	}
+	return false
+}
+
+// resolveTargetIPs turns the bootstrap target address into IPs to
+// compare against: literal IPs pass through, hostnames resolve via
+// DNS (both families).
+func resolveTargetIPs(ctx context.Context, addr string) ([]net.IP, error) {
+	if ip := net.ParseIP(addr); ip != nil {
+		return []net.IP{ip}, nil
+	}
+	addrs, err := net.DefaultResolver.LookupIPAddr(ctx, addr)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]net.IP, 0, len(addrs))
+	for _, a := range addrs {
+		out = append(out, a.IP)
+	}
+	return out, nil
+}
+
+// verifyReinstallNetconf is the pre-reboot gate: it surfaces what
+// reinstall.sh detected and aborts (before anything destructive
+// happens) when the reinstalled system would come up on an address
+// this bootstrap isn't targeting. Every uncertain path — parse
+// failure, DNS failure, NAT-shaped addressing — fails open with a
+// note rather than blocking a legitimate run.
+func verifyReinstallNetconf(ctx context.Context, nc reinstallNetInfo, targetAddr string, emit func(typ, text string)) error {
+	emit("meta", "reinstall.sh network detection: "+nc.summary())
+	detected := nc.ips()
+	if len(detected) == 0 {
+		emit("meta", "couldn't parse reinstall.sh's network detection from the prep output — skipping the pre-reboot address cross-check")
+		return nil
+	}
+	targets, err := resolveTargetIPs(ctx, targetAddr)
+	if err != nil {
+		emit("meta", fmt.Sprintf("could not resolve %s for the pre-reboot address cross-check (%v) — skipping", targetAddr, err))
+		return nil
+	}
+	switch classifyDetectedNetconf(detected, targets) {
+	case netconfMatch:
+		emit("ok", "detected address matches the bootstrap target — new system will come up reachable")
+	case netconfNATLikely:
+		emit("meta", "detected addresses are private (box likely behind 1:1 NAT) — address cross-check not applicable, proceeding")
+	case netconfMismatch:
+		return fmt.Errorf(
+			"aborting before reboot: reinstall.sh will configure the new system with %s, but this bootstrap targets %s — the reinstalled box would come up on the wrong address and never be reachable. The current OS is untouched. If the box has multiple IPs, reinstall.sh only carries the default-route NIC's primary address into the new install; re-run targeting that address, or fix the box's routing so the target address is primary",
+			nc.summary(), targetAddr)
+	}
+	return nil
 }
 
 // Phase budgets for the reinstall workflow.

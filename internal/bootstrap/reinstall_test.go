@@ -1,6 +1,7 @@
 package bootstrap
 
 import (
+	"net"
 	"strings"
 	"testing"
 )
@@ -173,6 +174,77 @@ func TestSanitizeLogLine(t *testing.T) {
 	long := strings.Repeat("x", 500)
 	if got := sanitizeLogLine(long); len([]rune(got)) != 161 { // 160 + ellipsis
 		t.Fatalf("long line not truncated: %d runes", len([]rune(got)))
+	}
+}
+
+// prepNetworkInfo mimics the plain-echo block collect_netconf
+// writes into the prep output (values as reinstall.sh formats them,
+// surrounded by unrelated prep noise).
+const prepNetworkInfo = `Downloading cloud image...
+***** NETWORK INFO *****
+IPv4 MAC: aa:bb:cc:dd:ee:ff
+IPv4 Address: 203.0.113.5/24
+IPv4 Gateway: 203.0.113.1
+---
+IPv6 MAC: aa:bb:cc:dd:ee:ff
+IPv6 Address: 2001:db8::5/64
+IPv6 Gateway: 2001:db8::1
+Building initrd...`
+
+func TestParseReinstallNetInfo(t *testing.T) {
+	nc := parseReinstallNetInfo(prepNetworkInfo)
+	if nc.ipv4Addr != "203.0.113.5/24" || nc.ipv4Gateway != "203.0.113.1" {
+		t.Fatalf("ipv4 = %q via %q", nc.ipv4Addr, nc.ipv4Gateway)
+	}
+	if nc.ipv6Addr != "2001:db8::5/64" || nc.ipv6Gateway != "2001:db8::1" {
+		t.Fatalf("ipv6 = %q via %q", nc.ipv6Addr, nc.ipv6Gateway)
+	}
+	ips := nc.ips()
+	if len(ips) != 2 || ips[0].String() != "203.0.113.5" || ips[1].String() != "2001:db8::5" {
+		t.Fatalf("ips() = %v", ips)
+	}
+
+	// Last occurrence wins when the block repeats.
+	twice := prepNetworkInfo + "\nIPv4 Address: 198.51.100.9/24\n"
+	if got := parseReinstallNetInfo(twice).ipv4Addr; got != "198.51.100.9/24" {
+		t.Fatalf("repeat block: ipv4Addr = %q", got)
+	}
+
+	// Empty fields (v6-less box) stay empty and don't produce IPs.
+	v4only := "IPv4 Address: 203.0.113.5/24\nIPv4 Gateway: 203.0.113.1\nIPv6 Address:\nIPv6 Gateway:\n"
+	nc = parseReinstallNetInfo(v4only)
+	if nc.ipv6Addr != "" || len(nc.ips()) != 1 {
+		t.Fatalf("v4-only parse: ipv6Addr=%q ips=%v", nc.ipv6Addr, nc.ips())
+	}
+
+	if got := parseReinstallNetInfo("no network block here").ips(); len(got) != 0 {
+		t.Fatalf("garbage parse produced ips %v", got)
+	}
+}
+
+func TestClassifyDetectedNetconf(t *testing.T) {
+	ip := net.ParseIP
+	cases := []struct {
+		name     string
+		detected []net.IP
+		targets  []net.IP
+		want     int
+	}{
+		{"match v4", []net.IP{ip("203.0.113.5")}, []net.IP{ip("203.0.113.5")}, netconfMatch},
+		{"match v6 among many", []net.IP{ip("203.0.113.5"), ip("2001:db8::5")}, []net.IP{ip("2001:db8::5")}, netconfMatch},
+		{"no data", nil, []net.IP{ip("203.0.113.5")}, netconfNoData},
+		{"nat private v4", []net.IP{ip("10.0.0.7")}, []net.IP{ip("203.0.113.5")}, netconfNATLikely},
+		{"nat cgnat", []net.IP{ip("100.64.1.2")}, []net.IP{ip("203.0.113.5")}, netconfNATLikely},
+		{"public mismatch", []net.IP{ip("198.51.100.9")}, []net.IP{ip("203.0.113.5")}, netconfMismatch},
+		{"dual public mismatch", []net.IP{ip("198.51.100.9"), ip("2001:db8::9")}, []net.IP{ip("203.0.113.5")}, netconfMismatch},
+		{"private plus public no match", []net.IP{ip("10.0.0.7"), ip("2001:db8::9")}, []net.IP{ip("203.0.113.5")}, netconfNATLikely},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := classifyDetectedNetconf(tc.detected, tc.targets); got != tc.want {
+				t.Fatalf("got verdict %d, want %d", got, tc.want)
+			}
+		})
 	}
 }
 
