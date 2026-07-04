@@ -155,15 +155,20 @@
       // run streams. Switching to the same view is always allowed.
       // (viewRef, not a functional updater — confirm() must not run
       // inside the updater, which React may invoke more than once.)
+      // Returns true if the navigation happened, false if the operator
+      // declined the leave-a-streaming-run confirm — callers that also
+      // stage prefill/selection state must gate it on this, or a
+      // declined nav leaves stale prefill that fires on the next visit.
       const viewRef = useRef(null);
       viewRef.current = view;
       const setView = useCallback((next) => {
         const active = globalThis.AnsbuiActiveRun;
         if (next !== viewRef.current && active &&
-            !window.confirm(`${active.label} is still streaming — leaving this page aborts it on the remote. Leave anyway?`)) {
-          return;
+            !globalThis.confirmAbandonRun(active.label, 'leaving this page')) {
+          return false;
         }
         setViewRaw(next);
+        return true;
       }, []);
       const [paletteOpen, setPaletteOpen] = useState(false);
       const [adhocPrefill, setAdhocPrefill] = useState(null);
@@ -208,27 +213,29 @@
 
       const [pbRunnerPrefill, setPbRunnerPrefill] = useState(null);
       const openPalette = useCallback(() => setPaletteOpen(true), []);
+      // Stage prefill/selection only after setView confirms the
+      // navigation — otherwise a declined "run still streaming" prompt
+      // leaves the prefill set to fire on a later unrelated visit.
       const openAdhoc = useCallback((prefill) => {
-        setAdhocPrefill(prefill || null);
-        setView('adhoc');
-      }, []);
+        if (setView('adhoc')) setAdhocPrefill(prefill || null);
+      }, [setView]);
       const runPlaybook = useCallback((id) => {
+        if (!setView('playbooks')) return;
         setPlaybookId(id);
         setPbRunnerPrefill(null);
-        setView('playbooks');
-      }, []);
+      }, [setView]);
       // openPlaybookRunner navigates to the Playbooks view, selects the
       // matching playbook by path, and asks PlaybooksView to auto-open
       // its Run dialog with the supplied prefill. Used by History's
       // Re-run / Retry failed actions.
       const openPlaybookRunner = useCallback((prefill) => {
         if (!prefill) return;
+        if (!setView('playbooks')) return;
         const pbs = (globalThis.AnsibleData || {}).PLAYBOOKS || [];
         const match = pbs.find(p => p.path === prefill.playbookPath || p.name === prefill.playbookPath);
         if (match) setPlaybookId(match.id);
         setPbRunnerPrefill({ ...prefill, issuedAt: Date.now() });
-        setView('playbooks');
-      }, []);
+      }, [setView]);
 
       const crumb = {
         dashboard: ['Workspace', 'Dashboard'],

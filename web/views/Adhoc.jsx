@@ -55,6 +55,28 @@ function suggestedTargets(hosts, groups, descendants) {
   return [{ id: 'all', count: hosts.length }, ...sorted];
 }
 
+// splitTargetPattern splits an ansible target string on the ':' and
+// ',' pattern separators, but NOT inside '[...]' host ranges — so
+// `web[01:05]` stays one token instead of being torn into `web[01`
+// and `05]`. Whitespace-trimmed, empties dropped.
+function splitTargetPattern(pattern) {
+  const toks = [];
+  let cur = '';
+  let depth = 0;
+  for (const ch of pattern) {
+    if (ch === '[') depth += 1;
+    else if (ch === ']') depth = Math.max(0, depth - 1);
+    if ((ch === ':' || ch === ',') && depth === 0) {
+      if (cur.trim()) toks.push(cur.trim());
+      cur = '';
+    } else {
+      cur += ch;
+    }
+  }
+  if (cur.trim()) toks.push(cur.trim());
+  return toks;
+}
+
 const STATE_TO_CLASS = { ok: 'ok', changed: 'changed', failed: 'err' };
 
 function hstickClass(state) {
@@ -105,20 +127,34 @@ function AdhocView({ prefill }) {
     if (prefill.timeout) setTimeoutState(prefill.timeout);
   }, [prefill]);
 
-  // resolvedHosts approximates what ansible will expand `target` to.
-  // Derived from `target` alone — the payload sends exactly `target`,
-  // so this count can never disagree with the real blast radius.
-  // (A stale prefill selection used to short-circuit here: the header
-  // said "2 hosts" while the payload said 'all', and a retry-failed
-  // host list showed 0.) Tokens split on ansible's ':' / ',' pattern
-  // separators and resolve as host name, group id (with descendants),
-  // or 'all'; negation/intersection tokens aren't modelled.
+  // resolvedHosts approximates what ansible will expand `target` to,
+  // for the header count and the per-host status grid (the payload
+  // sends the raw `target` regardless).
+  //
+  // When the composer was opened from Inventory's multi-select, the
+  // prefill carries the concrete host objects plus a `target` equal to
+  // their joined names. We use those directly WHILE the target still
+  // matches the prefill — this keeps host names that contain ':' (IPv6
+  // literals) intact, since the token parser below splits on ':'. Once
+  // the operator picks a different target chip, `target` diverges from
+  // `prefill.target` and we fall through to parsing (which fixes the
+  // old stale-selection bug where an edited target still showed the
+  // original selection's count).
+  //
+  // The parser tokenises on ansible's ':'/',' separators but not
+  // inside '[...]' host ranges (web[01:05]); group tokens expand via
+  // descendants. Negation/intersection ('!', '&') aren't modelled, so
+  // a pattern using them can over-count — the safe direction for a
+  // blast-radius warning.
   const resolvedHosts = useMemoA(() => {
+    if (prefill?.selectedHosts && target === prefill.target) {
+      return prefill.selectedHosts;
+    }
     const byName = new Map(HOSTS.map(h => [h.name, h]));
     const out = [];
     const seen = new Set();
     const add = (h) => { if (!seen.has(h.id)) { seen.add(h.id); out.push(h); } };
-    for (const tok of target.split(/[,:]/).map(t => t.trim()).filter(Boolean)) {
+    for (const tok of splitTargetPattern(target)) {
       if (tok === 'all') { HOSTS.forEach(add); continue; }
       const host = byName.get(tok);
       if (host) { add(host); continue; }
@@ -129,7 +165,7 @@ function AdhocView({ prefill }) {
       matches.forEach(add);
     }
     return out;
-  }, [target, HOSTS, descendants]);
+  }, [target, HOSTS, descendants, prefill]);
 
   const mod = MODULES.find(m => m.name === moduleName)
     || { id: moduleName.split('.').pop() || 'custom', name: moduleName, desc: '', args: [] };

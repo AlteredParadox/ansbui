@@ -471,7 +471,16 @@ function PlaybooksView({ initialId, runnerPrefill }) {
 }
 
 function PlaybookRunner({ open, pb, seed, onClose }) {
-  const dialogRef = globalThis.useDialog(open, onClose);
+  // guardRunClose vetoes any close while a run streams (unless the
+  // operator confirms). Passed to useDialog so even a browser
+  // force-close — a second Escape with no cancelable event — is
+  // caught and the dialog re-shown, instead of silently dropping the
+  // WebSocket and killing the remote ansible-playbook. It reads the
+  // live `running` via a ref so useDialog's listener always sees the
+  // current value without re-subscribing on every render.
+  const runningRef = useRefP(false);
+  const guardRunClose = () => !runningRef.current || globalThis.confirmAbandonRun('This playbook run', 'closing the dialog');
+  const dialogRef = globalThis.useDialog(open, onClose, { guardClose: guardRunClose });
   const [limit, setLimit] = useStateP('');
   const [limitPickerOpen, setLimitPickerOpen] = useStateP(false);
   const [tagsRaw, setTagsRaw] = useStateP('');
@@ -556,13 +565,20 @@ function PlaybookRunner({ open, pb, seed, onClose }) {
 
   useEffectP(() => () => { if (streamRef.current) streamRef.current.close(); }, []);
 
+  // Keep runningRef in sync so guardRunClose (registered once on the
+  // dialog's 'close' listener) always sees the live value.
+  useEffectP(() => { runningRef.current = running; }, [running]);
+
   // Closing this dialog (Escape, backdrop, ✕) drops the WebSocket and
   // the backend kills the remote ansible-playbook when the peer goes
   // away — so while a run streams, every close path asks first. The
   // same guard warns on navigation / tab close.
   globalThis.useRunGuard(running, 'A playbook run');
+  // requestClose backs the explicit affordances (✕ / backdrop), which
+  // set open=false and so bypass useDialog's guardClose — they must
+  // run the same confirm themselves.
   const requestClose = () => {
-    if (running && !globalThis.confirm('A playbook run is still streaming — closing this dialog aborts it on the remote. Close anyway?')) return;
+    if (!guardRunClose()) return;
     onClose();
   };
 
@@ -622,15 +638,17 @@ function PlaybookRunner({ open, pb, seed, onClose }) {
       ref={dialogRef}
       className="ansbui-dialog ansbui-dialog-runner"
       aria-label={`Run ${pb.name}`}
-      // Escape fires the native cancel event; preventDefault stops the
-      // dialog from closing itself so requestClose alone decides
-      // (confirm-while-running). Escape is handled ONLY here — a
-      // keydown handler for it too would make one keypress ask twice.
-      // The no-op keydown keeps the clickable backdrop paired with a
-      // keyboard listener (Sonar S1082), like dialogBackdropHandlers.
+      // Escape fires the cancelable 'cancel' event: preventDefault
+      // stops the dialog closing so requestClose decides cleanly (no
+      // flicker) on the first press. A second Escape that the browser
+      // makes non-cancelable slips past this and force-closes — that
+      // path is caught by useDialog's guardClose, which re-shows the
+      // dialog. Escape is handled ONLY here; the no-op keydown just
+      // keeps the clickable backdrop paired with a keyboard listener
+      // (Sonar S1082), like dialogBackdropHandlers.
       onCancel={(e) => { e.preventDefault(); requestClose(); }}
       onClick={(e) => { if (e.target === dialogRef.current) requestClose(); }}
-      onKeyDown={() => { /* Escape handled via onCancel */ }}
+      onKeyDown={() => { /* Escape handled via onCancel + guardClose */ }}
     >
       <div className="pb-runner card">
         <div className="pb-runner-head">

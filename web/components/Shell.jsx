@@ -15,8 +15,19 @@ const { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo } = R
 //                top-layer element on route/phase transitions
 // - onClose    → fires when the dialog closes for any reason (Escape,
 //                our el.close() call, form method="dialog", etc.)
-function useDialog(open, onClose) {
+//
+// opts.guardClose (optional): a predicate consulted on every native
+// close. When it returns false the close is vetoed and, if the element
+// already went away (a browser can force a <dialog> shut on a second
+// Escape with no cancelable 'cancel' event), it is re-shown. This is
+// the authoritative teardown chokepoint — intercepting 'cancel' alone
+// misses the force-close path, so a streamed run could be silently
+// aborted. Explicit affordances (✕ / backdrop) must run their own
+// confirm before calling onClose, since those set open=false first and
+// so slip past this guard.
+function useDialog(open, onClose, opts) {
   const ref = useRef(null);
+  const guardClose = opts && opts.guardClose;
   // useLayoutEffect so showModal / close runs before paint.
   useLayoutEffect(() => {
     const el = ref.current;
@@ -34,12 +45,32 @@ function useDialog(open, onClose) {
   }, [open]);
   useEffect(() => {
     const el = ref.current;
-    if (!el || !onClose) return undefined;
-    const handler = () => onClose();
+    if (!el) return undefined;
+    const handler = () => {
+      // Only guard closes that happen while the dialog is meant to be
+      // open — a programmatic close (open already false) is the app
+      // closing it deliberately and must pass through.
+      if (guardClose && open && !guardClose()) {
+        if (!el.open) el.showModal();
+        return;
+      }
+      if (onClose) onClose();
+    };
     el.addEventListener('close', handler);
     return () => el.removeEventListener('close', handler);
-  }, [onClose]);
+  }, [onClose, guardClose, open]);
   return ref;
+}
+
+// confirmAbandonRun is the single source of the "a run is streaming —
+// leaving aborts it on the remote" prompt, shared by the nav guard,
+// the dialog-close guard, and the run-dialog buttons so their wording
+// (and any future "skip the confirm once the run's terminal event
+// arrived" logic) can't drift. `verb` describes the action, e.g.
+// "leaving this page" or "closing the dialog". Returns true when the
+// caller may proceed.
+function confirmAbandonRun(label, verb) {
+  return globalThis.confirm(`${label} is still streaming — ${verb} aborts it on the remote. Continue anyway?`);
 }
 
 // useRunGuard registers a global marker while a streamed run is in
@@ -250,5 +281,6 @@ globalThis.TopLayoutNav = TopLayoutNav;
 globalThis.TWEAK_DEFAULTS = TWEAK_DEFAULTS;
 globalThis.useDialog = useDialog;
 globalThis.useRunGuard = useRunGuard;
+globalThis.confirmAbandonRun = confirmAbandonRun;
 globalThis.dialogBackdropHandlers = dialogBackdropHandlers;
 globalThis.AnsbuiCenterDialog = AnsbuiCenterDialog;
