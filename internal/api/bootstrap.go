@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/AlteredParadox/ansbui/internal/ansible"
 	"github.com/AlteredParadox/ansbui/internal/bootstrap"
 	"github.com/AlteredParadox/ansbui/internal/jobs"
 	"github.com/gorilla/websocket"
@@ -121,6 +122,26 @@ func (s *Server) httpBootstrapGet(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, job.Snapshot())
 }
 
+// httpBootstrapLog returns a job's snapshot plus its full buffered
+// event log — the REST twin of the WS stream's backlog replay, for
+// the "recent runs" panel on the Bootstrap view. Event text is
+// already redacted at emit time (bootstrap.Run wraps rawEmit), so
+// serving the buffer verbatim can't leak more than the live stream
+// did. The log lives only in the jobs registry's memory (up to
+// maxRetained jobs), so a backend restart clears it.
+func (s *Server) httpBootstrapLog(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	job, ok := s.Jobs.Get(id)
+	if !ok {
+		writeError(w, http.StatusNotFound, errUnknownJobID)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"job":    job.Snapshot(),
+		"events": job.Events(),
+	})
+}
+
 // httpBootstrapCancel signals the orchestrator's context. The job
 // is expected to honour cancellation promptly and return.
 func (s *Server) httpBootstrapCancel(w http.ResponseWriter, r *http.Request) {
@@ -209,6 +230,79 @@ func (s *Server) wsBootstrapStream(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+}
+
+// BootstrapRunRecord converts a finished bootstrap job into the
+// RunRecord shape the on-disk run history persists — the jobs
+// registry is memory-only, so this is what makes a failed run's log
+// survive a backend restart. Returns ok=false for non-bootstrap
+// kinds and still-running jobs. Wired into jobs.Manager.OnFinish by
+// main.go.
+//
+// Event text is already redacted (bootstrap.Run wraps emit) and the
+// recorder's Append redacts the whole record again, so nothing new
+// reaches disk. The sanitized Summary rides in Args — the same
+// map[string]string slot ad-hoc records use for replay — so the UI
+// can show provider/hostname for restored rows without new fields.
+func BootstrapRunRecord(job *jobs.Job) (ansible.RunRecord, bool) {
+	snap := job.Snapshot()
+	if snap.Kind != "bootstrap" || snap.Status == jobs.StatusRunning {
+		return ansible.RunRecord{}, false
+	}
+	events := job.Events()
+	logEvents := make([]ansible.Event, 0, len(events)+1)
+	for _, e := range events {
+		logEvents = append(logEvents, ansible.Event{Type: e.Type, Text: e.Text})
+	}
+	// Synthesize the terminal line when the orchestrator died without
+	// one (cancel, panic) — mirrors writeTerminalEvent on the WS path,
+	// so the persisted log always ends with a verdict.
+	if n := len(logEvents); n == 0 || (logEvents[n-1].Type != "done" && logEvents[n-1].Type != "fail") {
+		switch snap.Status {
+		case jobs.StatusSucceeded:
+			logEvents = append(logEvents, ansible.Event{Type: "done", Text: "complete"})
+		case jobs.StatusCancelled:
+			logEvents = append(logEvents, ansible.Event{Type: "fail", Text: "cancelled"})
+		default:
+			text := snap.Error
+			if text == "" {
+				text = "failed"
+			}
+			logEvents = append(logEvents, ansible.Event{Type: "fail", Text: text})
+		}
+	}
+	okCount, failCount := 0, 0
+	for _, e := range logEvents {
+		switch e.Type {
+		case "ok":
+			okCount++
+		case "fail":
+			failCount++
+		}
+	}
+	status := "err"
+	if snap.Status == jobs.StatusSucceeded {
+		status = "ok"
+	}
+	target := snap.Summary["hostname"]
+	if target == "" {
+		target = snap.Summary["ip"]
+	}
+	return ansible.RunRecord{
+		ID:        snap.ID,
+		Kind:      "bootstrap",
+		Server:    snap.Summary["server"],
+		Target:    target,
+		Status:    status,
+		OK:        okCount,
+		Failed:    failCount,
+		Duration:  snap.EndedAt.Sub(snap.StartedAt).Round(time.Millisecond).String(),
+		Who:       "ui",
+		StartedAt: snap.StartedAt,
+		EndedAt:   snap.EndedAt,
+		Log:       logEvents,
+		Args:      snap.Summary,
+	}, true
 }
 
 func writeJobEvent(conn *websocket.Conn, e jobs.Event) error {

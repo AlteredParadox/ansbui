@@ -320,3 +320,41 @@ func TestShutdownCancelsInFlight(t *testing.T) {
 		t.Fatalf(statusMismatch, got, StatusCancelled)
 	}
 }
+
+// TestOnFinishHook verifies the hook fires after the terminal state
+// is recorded (Snapshot/Events are complete inside it) and that a
+// panicking hook is contained — the running-count slot still frees,
+// so a persistence bug can't wedge the cap.
+func TestOnFinishHook(t *testing.T) {
+	m := New()
+	var got atomic.Pointer[Snapshot]
+	m.OnFinish = func(j *Job) {
+		snap := j.Snapshot()
+		got.Store(&snap)
+		panic("hook bug")
+	}
+	job, err := m.Start("bootstrap", nil, func(_ context.Context, emit func(string, string)) error {
+		emit("ok", "step 1")
+		return nil
+	})
+	if err != nil {
+		t.Fatalf(startErr, err)
+	}
+	<-job.Done()
+	snap := got.Load()
+	if snap == nil {
+		t.Fatal("OnFinish was not called")
+	}
+	if snap.Status != StatusSucceeded {
+		t.Fatalf(statusMismatch, snap.Status, StatusSucceeded)
+	}
+	if snap.EventCount != 1 {
+		t.Fatalf("EventCount inside hook = %d, want 1", snap.EventCount)
+	}
+	// Slot accounting must survive the hook panic.
+	for i := 0; i < defaultMaxRunning; i++ {
+		if _, err := m.Start("test", nil, func(_ context.Context, _ func(string, string)) error { return nil }); err != nil {
+			t.Fatalf("Start #%d after hook panic: %v", i, err)
+		}
+	}
+}

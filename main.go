@@ -64,6 +64,18 @@ func main() {
 	}
 
 	jobMgr := jobs.New()
+	// Persist finished bootstrap jobs into the same run history the
+	// adhoc/playbook flows write, so a failed run's log survives a
+	// restart (the jobs registry itself is memory-only).
+	jobMgr.OnFinish = func(j *jobs.Job) {
+		rec, ok := api.BootstrapRunRecord(j)
+		if !ok {
+			return
+		}
+		if err := runs.Append(rec); err != nil {
+			log.Printf("persist bootstrap run %s: %v", rec.ID, err)
+		}
+	}
 	srv := &api.Server{
 		Config:  cfg,
 		Pool:    pool,

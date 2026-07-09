@@ -88,6 +88,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/bootstrap/start", limitBody(smallBody, s.httpBootstrapStart))
 	mux.HandleFunc("GET /api/bootstrap/jobs", s.httpBootstrapList)
 	mux.HandleFunc("GET /api/bootstrap/jobs/{id}", s.httpBootstrapGet)
+	mux.HandleFunc("GET /api/bootstrap/jobs/{id}/log", s.httpBootstrapLog)
 	mux.HandleFunc("POST /api/bootstrap/jobs/{id}/cancel", limitBody(emptyBody, s.httpBootstrapCancel))
 	mux.HandleFunc("GET /api/bootstrap/jobs/{id}/stream", s.wsBootstrapStream)
 

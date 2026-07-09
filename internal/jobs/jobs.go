@@ -147,6 +147,15 @@ func (j *Job) Snapshot() Snapshot {
 	return snap
 }
 
+// Events returns a copy of the job's buffered event log. Callable at
+// any point in the lifecycle; the copy lets the caller serialize it
+// without holding the job's mutex against a live orchestrator's emits.
+func (j *Job) Events() []Event {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return append([]Event(nil), j.events...)
+}
+
 // Cancel signals the orchestrator's context. The orchestrator is
 // expected to honour it promptly and return; finish then marks the
 // job cancelled. Cancel after the job has finished is a no-op.
@@ -283,6 +292,16 @@ type Manager struct {
 	maxRetained  int
 	maxRunning   int
 	shuttingDown bool
+
+	// OnFinish, when set, is invoked from the job's own goroutine
+	// right after the terminal state is recorded — Snapshot() and
+	// Events() are complete and stable by then. Used to persist
+	// finished bootstrap runs into the on-disk run history. Set it
+	// before the first Start; it is read without the manager's mutex.
+	// A panic inside the hook is recovered and logged so a
+	// persistence bug can't kill the goroutine before it frees the
+	// running-count slot (which would wedge the cap accounting).
+	OnFinish func(*Job)
 }
 
 // ErrShuttingDown is returned by Start once Shutdown has begun, so a
@@ -348,6 +367,7 @@ func (m *Manager) Start(kind string, summary map[string]string, fn Func) (*Job, 
 		// corrupted by a double-call.
 		fnErr := runFnSafely(ctx, fn, job)
 		job.finish(fnErr, ctx.Err())
+		m.notifyFinish(job)
 		m.afterFinish(job.ID)
 		// Close done last, after the running-count slot is freed, so
 		// Done() firing guarantees a fresh Start won't false-positive
@@ -373,6 +393,22 @@ func runFnSafely(ctx context.Context, fn Func, job *Job) (err error) {
 		}
 	}()
 	return fn(ctx, job.emit)
+}
+
+// notifyFinish runs the OnFinish hook under a recover. Called before
+// afterFinish so the hook always sees the job while it's still in the
+// registry, and before close(done) so a test waiting on Done() can
+// rely on the hook having run.
+func (m *Manager) notifyFinish(job *Job) {
+	if m.OnFinish == nil {
+		return
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("job %s (%s) OnFinish panic: %v\n%s", job.ID, job.Kind, r, debug.Stack())
+		}
+	}()
+	m.OnFinish(job)
 }
 
 // afterFinish accounts a finished job and evicts the oldest

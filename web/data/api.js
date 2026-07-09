@@ -123,6 +123,11 @@
     method: 'POST', body: JSON.stringify(payload)
   });
   api.getBootstrapJob = (id) => json(`/api/bootstrap/jobs/${encodeURIComponent(id)}`);
+  api.listBootstrapJobs = () => json('/api/bootstrap/jobs');
+  // REST twin of attachBootstrapJob's backlog replay — returns
+  // { job, events } for a (usually finished) job so the "recent
+  // runs" panel can show why a run failed without opening a WS.
+  api.getBootstrapJobLog = (id) => json(`/api/bootstrap/jobs/${encodeURIComponent(id)}/log`);
   api.cancelBootstrapJob = (id) => json(`/api/bootstrap/jobs/${encodeURIComponent(id)}/cancel`, {
     method: 'POST'
   });
@@ -360,7 +365,7 @@
     return {
       id: r.id,
       kind: r.kind || 'adhoc',
-      pb: r.playbook || r.module || '',
+      pb: r.playbook || r.module || (r.kind === 'bootstrap' ? 'bootstrap' : ''),
       playbook: r.playbook || '',
       module: r.module || '',
       target: r.target || '',

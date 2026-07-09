@@ -54,6 +54,25 @@ const ADDR_IPV6_RE = /^(?=.*:.*:)[0-9a-fA-F:]+$/;
 const ADDR_DIGITDOT_RE = /^[0-9.]+$/;
 const ADDR_HOST_RE = /^[a-zA-Z0-9.-]+$/;
 const hostLabelsOK = (s) => s.split('.').every(l => l.length >= 1 && l.length <= 63 && l[0] !== '-' && l[l.length - 1] !== '-');
+
+// Small display helpers for the "recent runs" panel. Kept local
+// (api.js has its own `friendly` but doesn't export it).
+const bootAgo = (iso) => {
+  if (!iso) return '';
+  const diff = (Date.now() - new Date(iso).getTime()) / 1000;
+  if (diff < 60) return `${Math.round(diff)}s ago`;
+  if (diff < 3600) return `${Math.round(diff / 60)}m ago`;
+  if (diff < 86400) return `${Math.round(diff / 3600)}h ago`;
+  return `${Math.round(diff / 86400)}d ago`;
+};
+const bootDuration = (startIso, endIso) => {
+  if (!startIso || !endIso) return '';
+  const secs = (new Date(endIso).getTime() - new Date(startIso).getTime()) / 1000;
+  if (secs < 0) return '';
+  if (secs < 90) return `${Math.round(secs)}s`;
+  return `${Math.round(secs / 60)}m`;
+};
+const JOB_DOT_CLASS = { succeeded: 'ok', failed: 'err', cancelled: 'warn', running: 'run' };
 const classifyAddress = (s) => {
   if (!s || s.length > 253) return '';
   if (s.includes(':')) return ADDR_IPV6_RE.test(s) ? 'ipv6' : '';
@@ -79,6 +98,10 @@ function BootstrapView() {
   const [output, setOutput] = useStateBoot([]);
   const [error, setError] = useStateBoot('');
   const [activeSummary, setActiveSummary] = useStateBoot(null);
+  const [recentJobs, setRecentJobs] = useStateBoot([]);
+  // id of the finished job whose log is loaded in the terminal, or
+  // null when the terminal shows a live run / is empty.
+  const [viewingJob, setViewingJob] = useStateBoot(null);
   const streamRef = useRefBoot(null);
   // jobIdRef is the job THIS component started or re-attached to.
   // Cancel must use it, never localStorage: the storage key is shared
@@ -147,10 +170,55 @@ function BootstrapView() {
 
   const append = (entry) => setOutput(prev => [...prev, entry]);
 
+  // refreshRecent re-syncs the "recent runs" panel from two sources:
+  // the live jobs registry (authoritative for running + recently
+  // finished runs) and the persisted run history (what survives a
+  // backend restart). A finished job appears in both until evicted —
+  // the registry row wins so status keeps its cancelled/failed
+  // distinction. Both fetches are best-effort; live run UX is
+  // unaffected if either fails.
+  const refreshRecent = () => {
+    if (!globalThis.AnsbuiAPI) return;
+    Promise.all([
+      globalThis.AnsbuiAPI.listBootstrapJobs().catch(() => ({ jobs: [] })),
+      globalThis.AnsbuiAPI.listRuns().catch(() => ({ runs: [] }))
+    ]).then(([jobRes, runRes]) => {
+      if (!mountedRef.current) return;
+      const rows = [...(jobRes?.jobs || [])];
+      const seen = new Set(rows.map(j => j.id));
+      for (const r of (runRes?.runs || [])) {
+        if (r.kind !== 'bootstrap' || seen.has(r.id)) continue;
+        rows.push({
+          id: r.id,
+          // Persisted records collapse to ok/err; cancelled runs read
+          // as failed here, but their log ends with a "cancelled" line.
+          status: r.status === 'ok' ? 'succeeded' : 'failed',
+          // The backend stores the sanitized job summary in the
+          // record's args slot — provider/hostname/ip round-trip.
+          summary: r.args || { hostname: r.target },
+          startedAt: r.startedAt,
+          endedAt: r.endedAt,
+          error: '',
+          persisted: true
+        });
+      }
+      // ISO-8601 UTC strings sort lexicographically.
+      rows.sort((a, b) => (b.startedAt || '').localeCompare(a.startedAt || ''));
+      setRecentJobs(rows.slice(0, 20));
+    });
+  };
+
+  useEffectBoot(() => { refreshRecent(); }, []);
+
   const finish = (ok, text) => {
     append({ t: ok ? 'done' : 'fail', text });
     setRunning(false);
     setActiveSummary(null);
+    // The done/fail WS event arrives a beat before the backend marks
+    // the job terminal (emit happens inside Run, finish() after it
+    // returns) — delay the list refresh so the row shows the final
+    // status instead of a stale "running".
+    globalThis.setTimeout(refreshRecent, 600);
     // Only clear the shared storage key if it still points at OUR
     // job — another tab may have started a newer run since.
     if (globalThis.localStorage?.getItem(BOOTSTRAP_JOB_KEY) === jobIdRef.current) {
@@ -207,6 +275,79 @@ function BootstrapView() {
     });
   };
 
+  // fetchRunLog returns { snap, events } for a finished run. Registry
+  // rows try the live job log first (richer status: cancelled vs
+  // failed) and fall back to the persisted run history on 404 — the
+  // job may have been evicted between the list fetch and the click.
+  // Persisted rows go straight to the run history.
+  const fetchRunLog = async (job) => {
+    if (!job.persisted) {
+      try {
+        const res = await globalThis.AnsbuiAPI.getBootstrapJobLog(job.id);
+        return { snap: res?.job || job, events: res?.events || [] };
+      } catch (e) {
+        if (e?.status !== 404) throw e;
+      }
+    }
+    const run = await globalThis.AnsbuiAPI.getRun(job.id);
+    // Persisted logs already end with their verdict line (the backend
+    // converter synthesizes it), so the caller's synthesis is a no-op.
+    return { snap: job, events: run?.log || [] };
+  };
+
+  // viewJobLog loads a recent run's buffered log into the terminal.
+  // Finished runs come via REST ({job, events}); a still-running run
+  // re-attaches the live stream instead, exactly like the on-mount
+  // re-attach path, so the operator gets a tail rather than a stale
+  // snapshot.
+  const viewJobLog = async (job) => {
+    if (running || !globalThis.AnsbuiAPI) return;
+    if (job.status === 'running') {
+      jobIdRef.current = job.id;
+      globalThis.localStorage?.setItem(BOOTSTRAP_JOB_KEY, job.id);
+      setActiveSummary(job.summary || {});
+      setViewingJob(null);
+      setOutput([]);
+      setRunning(true);
+      attachStream(job.id);
+      return;
+    }
+    try {
+      const { snap, events } = await fetchRunLog(job);
+      if (!mountedRef.current) return;
+      const header = {
+        t: 'meta',
+        text: `# ${snap.summary?.hostname || snap.summary?.ip || 'bootstrap'} · started ${bootAgo(snap.startedAt)} · ${snap.status}`
+      };
+      const lines = events.map(evt => ({
+        t: ['meta', 'ok', 'fail', 'done'].includes(evt.type) ? evt.type : 'meta',
+        text: evt.text || ''
+      }));
+      // Mirror the WS path's synthesized terminal event: a cancelled
+      // run (or a panic) dies without emitting its own done/fail, so
+      // the log would otherwise just stop mid-step with no verdict.
+      const last = lines[lines.length - 1];
+      if (!last || (last.t !== 'done' && last.t !== 'fail')) {
+        if (snap.status === 'succeeded') lines.push({ t: 'done', text: 'complete' });
+        else if (snap.status === 'cancelled') lines.push({ t: 'fail', text: 'cancelled' });
+        else if (snap.status === 'failed') lines.push({ t: 'fail', text: snap.error || 'failed' });
+      }
+      setOutput([header, ...lines]);
+      setViewingJob(job.id);
+      setError('');
+    } catch (e) {
+      if (!mountedRef.current) return;
+      if (e?.status === 404) {
+        // Gone from the registry AND the persisted history (evicted
+        // from both) — re-sync so the row disappears.
+        setError('run log no longer available (evicted from run history)');
+        refreshRecent();
+        return;
+      }
+      setError(`could not load run log: ${e.message || e}`);
+    }
+  };
+
   // hostnameError / reinstallError split off the multi-check field
   // groups so validateForm itself stays under Sonar's S3776
   // cognitive-complexity ceiling. Each returns the first failed
@@ -258,7 +399,7 @@ function BootstrapView() {
     if (v.error) { setError(v.error); return; }
     const { portNum } = v;
 
-    setOutput([]); setRunning(true);
+    setOutput([]); setRunning(true); setViewingJob(null);
 
     const payload = {
       provider: provider.trim(),
@@ -286,6 +427,7 @@ function BootstrapView() {
       jobIdRef.current = jobId;
       globalThis.localStorage?.setItem(BOOTSTRAP_JOB_KEY, jobId);
       attachStream(jobId);
+      refreshRecent();
     } catch (e) {
       setRunning(false);
       setError(e.message || String(e));
@@ -451,6 +593,51 @@ function BootstrapView() {
             <span className="term-text">{line.text}</span>
           </div>
         ))}
+      </div>
+
+      <div className="card" style={{ padding: 12, marginTop: 14 }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <div className="section-title">Recent runs</div>
+          <button type="button" className="btn small" onClick={refreshRecent}>
+            <Icon name="refresh" size={12}/> Refresh
+          </button>
+        </div>
+        <div className="mute" style={{ fontSize: 11, marginTop: 4 }}>
+          Click a run to load its log above &mdash; failed runs keep the step that broke. Saved to run history; survives restarts.
+        </div>
+        {recentJobs.length === 0 && (
+          <div className="mute-2 mono" style={{ fontSize: 12, marginTop: 10 }}>no bootstrap runs yet</div>
+        )}
+        <div style={{ marginTop: 8 }}>
+          {recentJobs.map(j => (
+            <button
+              type="button"
+              key={j.id}
+              className={`history-row ${viewingJob === j.id ? 'active' : ''}`}
+              onClick={() => viewJobLog(j)}
+              disabled={running}
+              title={running ? 'finish or cancel the current run first' : (j.status === 'running' ? 'attach to this live run' : 'view this run’s log')}
+            >
+              <span className={`dot ${JOB_DOT_CLASS[j.status] || 'warn'}`}/>
+              <div className="history-row-main">
+                <div className="history-row-top">
+                  <span className="mono">{j.summary?.hostname || j.summary?.ip || j.id}</span>
+                  {j.summary?.provider && <span className="mute mono" style={{ fontSize: 11 }}>· {j.summary.provider}</span>}
+                  <span className="mute mono" style={{ marginLeft: 'auto', fontSize: 11 }}>{bootAgo(j.startedAt)}</span>
+                </div>
+                <div className="history-row-bot">
+                  <span className={`pill ${JOB_DOT_CLASS[j.status] === 'run' ? 'info' : (JOB_DOT_CLASS[j.status] || 'warn')}`}>{j.status}</span>
+                  {bootDuration(j.startedAt, j.endedAt) && <span className="mute mono" style={{ fontSize: 11 }}>{bootDuration(j.startedAt, j.endedAt)}</span>}
+                  {j.status === 'failed' && j.error && (
+                    <span className="mono" style={{ color: 'var(--err)', fontSize: 11, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {j.error}
+                    </span>
+                  )}
+                </div>
+              </div>
+            </button>
+          ))}
+        </div>
       </div>
     </div>
   );
