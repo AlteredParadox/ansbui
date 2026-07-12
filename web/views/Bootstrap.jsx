@@ -79,6 +79,13 @@ function jobPillClass(status) {
   const dot = JOB_DOT_CLASS[status] || 'warn';
   return dot === 'run' ? 'info' : dot;
 }
+
+// Hover text for a recent-job row: blocked while a run is active,
+// otherwise attach vs view depending on the job's state.
+function jobRowTitle(running, status) {
+  if (running) return 'finish or cancel the current run first';
+  return status === 'running' ? 'attach to this live run' : 'view this run’s log';
+}
 const classifyAddress = (s) => {
   if (!s || s.length > 253) return '';
   if (s.includes(':')) return ADDR_IPV6_RE.test(s) ? 'ipv6' : '';
@@ -632,7 +639,7 @@ function BootstrapView() {
               className={`history-row ${viewingJob === j.id ? 'active' : ''}`}
               onClick={() => viewJobLog(j)}
               disabled={running}
-              title={running ? 'finish or cancel the current run first' : (j.status === 'running' ? 'attach to this live run' : 'view this run’s log')}
+              title={jobRowTitle(running, j.status)}
             >
               <span className={`dot ${JOB_DOT_CLASS[j.status] || 'warn'}`}/>
               <div className="history-row-main">

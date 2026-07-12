@@ -43,27 +43,34 @@ func TestTailBuffer(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			b := &tailBuffer{max: tc.max}
-			for _, w := range tc.writes {
-				n, err := b.Write([]byte(w))
-				if err != nil || n != len(w) {
-					t.Fatalf("write %q: n=%d err=%v", w, n, err)
-				}
-			}
-			got := b.String()
-			if !strings.HasSuffix(got, tc.wantSuffix) {
-				t.Fatalf("tail = %q, want suffix %q", got, tc.wantSuffix)
-			}
-			if b.truncated != tc.wantTruncated {
-				t.Fatalf("truncated = %v, want %v", b.truncated, tc.wantTruncated)
-			}
-			if tc.wantTruncated != strings.Contains(got, "output exceeded") {
-				t.Fatalf("truncation notice mismatch: %q", got)
-			}
-			if len(b.buf) > tc.max {
-				t.Fatalf("buffer grew past cap: %d > %d", len(b.buf), tc.max)
-			}
+			assertTailBuffer(t, tc.max, tc.writes, tc.wantSuffix, tc.wantTruncated)
 		})
+	}
+}
+
+// assertTailBuffer runs one TestTailBuffer case. Top-level so the
+// branching lives outside the subtest closure (S3776).
+func assertTailBuffer(t *testing.T, max int, writes []string, wantSuffix string, wantTruncated bool) {
+	t.Helper()
+	b := &tailBuffer{max: max}
+	for _, w := range writes {
+		n, err := b.Write([]byte(w))
+		if err != nil || n != len(w) {
+			t.Fatalf("write %q: n=%d err=%v", w, n, err)
+		}
+	}
+	got := b.String()
+	if !strings.HasSuffix(got, wantSuffix) {
+		t.Fatalf("tail = %q, want suffix %q", got, wantSuffix)
+	}
+	if b.truncated != wantTruncated {
+		t.Fatalf("truncated = %v, want %v", b.truncated, wantTruncated)
+	}
+	if wantTruncated != strings.Contains(got, "output exceeded") {
+		t.Fatalf("truncation notice mismatch: %q", got)
+	}
+	if len(b.buf) > max {
+		t.Fatalf("buffer grew past cap: %d > %d", len(b.buf), max)
 	}
 }
 
