@@ -164,12 +164,29 @@ func (b *cappedBuffer) Write(p []byte) (int, error) {
 	return b.buf.Write(p)
 }
 
+// runSem bounds simultaneous Run invocations process-wide. Each call
+// holds an SSH session plus up to ~8.25 MiB of buffers, and the
+// callers are the metadata endpoints (inventory, facts, playbooks,
+// vault, connection test) — per-call caps alone still let a request
+// burst from an allowlisted client multiply into process-exhausting
+// aggregate usage. Excess callers queue here (bounded by their own
+// ctx / the default deadline) rather than erroring, since metadata
+// bursts are typically short page-load fan-outs.
+var runSem = make(chan struct{}, 16)
+
 // Run opens a session, runs cmd, and returns stdout/stderr. The run
 // is cancelled when ctx ends and always bounded by runDefaultTimeout;
-// stdout/stderr are capped (see cappedBuffer).
+// stdout/stderr are capped (see cappedBuffer) and total concurrency
+// is bounded by runSem.
 func Run(ctx context.Context, client *ssh.Client, cmd string) (stdout, stderr string, err error) {
 	ctx, cancel := context.WithTimeout(ctx, runDefaultTimeout)
 	defer cancel()
+	select {
+	case runSem <- struct{}{}:
+		defer func() { <-runSem }()
+	case <-ctx.Done():
+		return "", "", fmt.Errorf("waiting for an SSH query slot: %w", ctx.Err())
+	}
 	so := &cappedBuffer{name: "stdout", max: runMaxStdout}
 	se := &cappedBuffer{name: "stderr", max: runMaxStderr}
 	err = Stream(ctx, client, cmd, nil, so, se)

@@ -206,12 +206,27 @@ var (
 // must fail the pipe rather than silently stop reading.
 const maxScanLine = 1024 * 1024
 
+// maxLiveLineBytes caps the text of one EVENT, applied before the
+// line enters the events channel. The scanner tolerates lines up to
+// maxScanLine so a long line doesn't abort the run, but shipping
+// them whole meant a 64-event channel could buffer ~64 MiB per run
+// against a slow WebSocket peer (× 8 concurrent runs) — the history
+// cap only applied after the live write. 64 KiB matches the history
+// per-event ceiling, so nothing that would have been retained is
+// lost; the byte-slice cut can split a UTF-8 rune, same accepted
+// tradeoff as the history cap.
+const maxLiveLineBytes = 64 << 10
+
 func scanLines(ctx context.Context, r *io.PipeReader, stream string, out chan<- Event) {
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, 64*1024), maxScanLine)
 	for sc.Scan() {
+		line := sc.Text()
+		if len(line) > maxLiveLineBytes {
+			line = line[:maxLiveLineBytes] + "… [line truncated]"
+		}
 		select {
-		case out <- classify(sc.Text(), stream):
+		case out <- classify(line, stream):
 		case <-ctx.Done():
 			_ = r.CloseWithError(ctx.Err())
 			return

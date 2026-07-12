@@ -4,8 +4,10 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/AlteredParadox/ansbui/internal/config"
+	"github.com/AlteredParadox/ansbui/internal/sshpool"
 )
 
 func (s *Server) listServers(w http.ResponseWriter, _ *http.Request) {
@@ -68,16 +70,11 @@ func (s *Server) testServer(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	sess, err := client.NewSession()
-	if err != nil {
-		writeJSON(w, http.StatusOK, map[string]any{
-			"ok":    false,
-			"error": fmt.Sprintf("open session: %v", err),
-		})
-		return
-	}
-	defer sess.Close()
-	out, err := sess.Output("ansible --version 2>&1 | head -n1")
+	// sshpool.Run (not a raw session) so the probe inherits ctx
+	// cancellation, the default execution deadline, and output caps —
+	// a responsive sshd fronting a hung `ansible --version` used to
+	// retain this handler indefinitely.
+	out, _, err := sshpool.Run(ctx, client, "ansible --version 2>&1 | head -n1")
 	if err != nil {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"ok":    false,
@@ -87,7 +84,7 @@ func (s *Server) testServer(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":      true,
-		"version": string(out),
+		"version": strings.TrimSpace(out),
 	})
 }
 
