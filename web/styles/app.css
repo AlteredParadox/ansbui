@@ -707,7 +707,9 @@ th .text-btn { display: inline-flex; gap: 6px; align-items: center; width: 100%;
   transition: background 200ms var(--ease);
 }
 .hstick-ok { background: var(--ok); }
-.hstick-changed { background: var(--warn); }
+/* "changed" is a healthy run outcome — green, same as ok (see the
+   rs-* palette rationale in tokens.css). Only failures read red. */
+.hstick-changed { background: var(--ok); }
 .hstick-err { background: var(--err); }
 
 .terminal {
@@ -735,7 +737,7 @@ th .text-btn { display: inline-flex; gap: 6px; align-items: center; width: 100%;
   margin-top: 2px;
 }
 .term-ok .term-prefix { color: var(--ok); background: oklch(0.75 0.16 150 / 0.15); }
-.term-changed .term-prefix { color: var(--warn); background: oklch(0.82 0.14 82 / 0.15); }
+.term-changed .term-prefix { color: var(--ok); background: oklch(0.75 0.16 150 / 0.15); }
 .term-fail .term-prefix { color: var(--err); background: oklch(0.66 0.21 25 / 0.18); }
 .term-text { flex: 1; color: var(--text); white-space: pre-wrap; word-break: break-all; }
 .term-ok .term-text { color: var(--text-2); }
@@ -743,7 +745,7 @@ th .text-btn { display: inline-flex; gap: 6px; align-items: center; width: 100%;
 .term-fail .term-text { color: var(--err); }
 .term-meta .term-text { color: var(--text-3); }
 .term-recap .term-text { color: var(--ok); }
-.term-recap-warn .term-text { color: var(--warn); }
+.term-recap-warn .term-text { color: var(--ok); } /* recap-warn = changed>0, a healthy outcome */
 .term-recap-fail .term-text { color: var(--err); }
 .term-done .term-text { color: var(--accent); font-weight: 550; }
 .term-sep { height: 4px; }
@@ -815,7 +817,7 @@ th .text-btn { display: inline-flex; gap: 6px; align-items: center; width: 100%;
 .matrix-task-name { font-size: 12px; font-weight: 500; }
 .matrix-cell { width: 36px; height: 36px; text-align: center; color: var(--text-4); padding: 0 !important; }
 .matrix-cell.matrix-ok { background: oklch(0.75 0.16 150 / 0.3); }
-.matrix-cell.matrix-changed { background: oklch(0.82 0.14 82 / 0.3); }
+.matrix-cell.matrix-changed { background: oklch(0.75 0.16 150 / 0.3); }
 .matrix-cell.matrix-err { background: oklch(0.66 0.21 25 / 0.35); }
 
 /* ============ VAULT ============ */

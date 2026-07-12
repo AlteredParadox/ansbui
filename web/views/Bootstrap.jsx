@@ -73,9 +73,8 @@ const bootDuration = (startIso, endIso) => {
   return `${Math.round(secs / 60)}m`;
 };
 // Bootstrap jobs share the run-status (rs-*) palette: a success is
-// blue (nothing "changed" in the ansible sense — the box was set
-// up), a failure red, cancelled grey, running pulses blue. Unknown
-// statuses fall back to the neutral grey.
+// green, a failure red, cancelled grey, running pulses blue.
+// Unknown statuses fall back to the neutral grey.
 const JOB_DOT_CLASS = { succeeded: 'rs-ok', failed: 'rs-err', cancelled: 'rs-cancelled', running: 'rs-run' };
 
 function jobStatusClass(status) {

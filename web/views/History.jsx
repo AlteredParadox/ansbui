@@ -78,7 +78,7 @@ function HistoryView({ onOpenPlaybook, onRunPlaybook, onOpenAdhoc }) {
           <div className="seg">
             <button type="button" className={filter === 'all' ? 'on' : ''} onClick={() => setFilter('all')}>All</button>
             <button type="button" className={filter === 'ok' ? 'on' : ''} onClick={() => setFilter('ok')}>Success</button>
-            <button type="button" className={filter === 'warn' ? 'on' : ''} onClick={() => setFilter('warn')}>Warn</button>
+            <button type="button" className={filter === 'warn' ? 'on' : ''} onClick={() => setFilter('warn')}>Changed</button>
             <button type="button" className={filter === 'err' ? 'on' : ''} onClick={() => setFilter('err')}>Failed</button>
             <button type="button" className={filter === 'cancelled' ? 'on' : ''} onClick={() => setFilter('cancelled')}>Cancelled</button>
           </div>
