@@ -13,48 +13,58 @@ import (
 // its cap.
 func TestTailBuffer(t *testing.T) {
 	t.Parallel()
-
-	t.Run("under cap keeps everything verbatim", func(t *testing.T) {
-		b := &tailBuffer{max: 16}
-		if _, err := b.Write([]byte("hello ")); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := b.Write([]byte("world")); err != nil {
-			t.Fatal(err)
-		}
-		if got := b.String(); got != "hello world" {
-			t.Fatalf("got %q", got)
-		}
-	})
-
-	t.Run("overflow keeps the tail and flags truncation", func(t *testing.T) {
-		b := &tailBuffer{max: 8}
-		_, _ = b.Write([]byte("0123456789")) // single write over cap
-		if !b.truncated {
-			t.Fatal("expected truncated flag")
-		}
-		if !strings.HasSuffix(b.String(), "23456789") {
-			t.Fatalf("tail not kept: %q", b.String())
-		}
-		if !strings.Contains(b.String(), "output exceeded") {
-			t.Fatalf("missing truncation notice: %q", b.String())
-		}
-	})
-
-	t.Run("incremental overflow drops the oldest bytes", func(t *testing.T) {
-		b := &tailBuffer{max: 8}
-		for _, chunk := range []string{"aaaa", "bbbb", "cccc"} {
-			if n, err := b.Write([]byte(chunk)); err != nil || n != 4 {
-				t.Fatalf("write: n=%d err=%v", n, err)
+	cases := []struct {
+		name          string
+		max           int
+		writes        []string
+		wantSuffix    string
+		wantTruncated bool
+	}{
+		{
+			name:       "under cap keeps everything verbatim",
+			max:        16,
+			writes:     []string{"hello ", "world"},
+			wantSuffix: "hello world",
+		},
+		{
+			name:          "single write over cap keeps the tail",
+			max:           8,
+			writes:        []string{"0123456789"},
+			wantSuffix:    "23456789",
+			wantTruncated: true,
+		},
+		{
+			name:          "incremental overflow drops the oldest bytes",
+			max:           8,
+			writes:        []string{"aaaa", "bbbb", "cccc"},
+			wantSuffix:    "bbbbcccc",
+			wantTruncated: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			b := &tailBuffer{max: tc.max}
+			for _, w := range tc.writes {
+				n, err := b.Write([]byte(w))
+				if err != nil || n != len(w) {
+					t.Fatalf("write %q: n=%d err=%v", w, n, err)
+				}
 			}
-		}
-		if !strings.HasSuffix(b.String(), "bbbbcccc") {
-			t.Fatalf("expected last 8 bytes, got %q", b.String())
-		}
-		if len(b.buf) > 8 {
-			t.Fatalf("buffer grew past cap: %d", len(b.buf))
-		}
-	})
+			got := b.String()
+			if !strings.HasSuffix(got, tc.wantSuffix) {
+				t.Fatalf("tail = %q, want suffix %q", got, tc.wantSuffix)
+			}
+			if b.truncated != tc.wantTruncated {
+				t.Fatalf("truncated = %v, want %v", b.truncated, tc.wantTruncated)
+			}
+			if tc.wantTruncated != strings.Contains(got, "output exceeded") {
+				t.Fatalf("truncation notice mismatch: %q", got)
+			}
+			if len(b.buf) > tc.max {
+				t.Fatalf("buffer grew past cap: %d > %d", len(b.buf), tc.max)
+			}
+		})
+	}
 }
 
 // stepContext must impose the default step deadline ONLY when the

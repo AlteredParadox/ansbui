@@ -50,6 +50,14 @@ func TestBootstrapRunRecordPersists(t *testing.T) {
 	if !ok {
 		t.Fatalf("run %s not found after reopen", job.ID)
 	}
+	assertPersistedBootstrapRun(t, run)
+}
+
+// assertPersistedBootstrapRun checks the reloaded record against the
+// events TestBootstrapRunRecordPersists emitted. Split out to keep
+// the test body under the cognitive-complexity ceiling (S3776).
+func assertPersistedBootstrapRun(t *testing.T, run ansible.RunRecord) {
+	t.Helper()
 	if run.Kind != "bootstrap" || run.Status != "err" {
 		t.Fatalf("kind/status = %q/%q, want bootstrap/err", run.Kind, run.Status)
 	}

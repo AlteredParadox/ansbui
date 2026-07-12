@@ -255,32 +255,8 @@ func BootstrapRunRecord(job *jobs.Job) (ansible.RunRecord, bool) {
 	for _, e := range events {
 		logEvents = append(logEvents, ansible.Event{Type: e.Type, Text: e.Text})
 	}
-	// Synthesize the terminal line when the orchestrator died without
-	// one (cancel, panic) — mirrors writeTerminalEvent on the WS path,
-	// so the persisted log always ends with a verdict.
-	if n := len(logEvents); n == 0 || (logEvents[n-1].Type != "done" && logEvents[n-1].Type != "fail") {
-		switch snap.Status {
-		case jobs.StatusSucceeded:
-			logEvents = append(logEvents, ansible.Event{Type: "done", Text: "complete"})
-		case jobs.StatusCancelled:
-			logEvents = append(logEvents, ansible.Event{Type: "fail", Text: "cancelled"})
-		default:
-			text := snap.Error
-			if text == "" {
-				text = "failed"
-			}
-			logEvents = append(logEvents, ansible.Event{Type: "fail", Text: text})
-		}
-	}
-	okCount, failCount := 0, 0
-	for _, e := range logEvents {
-		switch e.Type {
-		case "ok":
-			okCount++
-		case "fail":
-			failCount++
-		}
-	}
+	logEvents = ensureTerminalEvent(logEvents, snap)
+	okCount, failCount := tallyOkFail(logEvents)
 	status := "err"
 	if snap.Status == jobs.StatusSucceeded {
 		status = "ok"
@@ -304,6 +280,42 @@ func BootstrapRunRecord(job *jobs.Job) (ansible.RunRecord, bool) {
 		Log:       logEvents,
 		Args:      snap.Summary,
 	}, true
+}
+
+// ensureTerminalEvent synthesizes the terminal line when the
+// orchestrator died without one (cancel, panic) — mirrors
+// writeTerminalEvent on the WS path, so the persisted log always
+// ends with a verdict.
+func ensureTerminalEvent(logEvents []ansible.Event, snap jobs.Snapshot) []ansible.Event {
+	if n := len(logEvents); n > 0 && (logEvents[n-1].Type == "done" || logEvents[n-1].Type == "fail") {
+		return logEvents
+	}
+	switch snap.Status {
+	case jobs.StatusSucceeded:
+		return append(logEvents, ansible.Event{Type: "done", Text: "complete"})
+	case jobs.StatusCancelled:
+		return append(logEvents, ansible.Event{Type: "fail", Text: "cancelled"})
+	default:
+		text := snap.Error
+		if text == "" {
+			text = "failed"
+		}
+		return append(logEvents, ansible.Event{Type: "fail", Text: text})
+	}
+}
+
+// tallyOkFail counts the ok/fail events for the record's summary
+// columns.
+func tallyOkFail(logEvents []ansible.Event) (okCount, failCount int) {
+	for _, e := range logEvents {
+		switch e.Type {
+		case "ok":
+			okCount++
+		case "fail":
+			failCount++
+		}
+	}
+	return okCount, failCount
 }
 
 func writeJobEvent(conn *websocket.Conn, e jobs.Event) error {

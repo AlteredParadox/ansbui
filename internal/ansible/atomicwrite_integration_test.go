@@ -140,92 +140,123 @@ func TestAtomicWriteScript_PreservesMode(t *testing.T) {
 	}
 }
 
-// TestConfineToWorkDir_SymlinkedDirEscape exercises the confinement
-// preamble against a local bash: a symlinked directory inside the
-// workDir that points outside the tree must be refused (exit 3) for
-// both reads and writes, while a normal in-tree path still works.
-// This is the physical-path check that validateRelPath's lexical
-// rules can't provide.
-func TestConfineToWorkDir_SymlinkedDirEscape(t *testing.T) {
-	t.Parallel()
+// The confinement tests below exercise the preamble against a local
+// bash: a symlinked directory inside the workDir that points outside
+// the tree must be refused (exit 3) for both reads and writes, an
+// in-tree symlink destination must hit the writer's exit-2 refusal,
+// and a normal in-tree path must still work. This is the
+// physical-path check that validateRelPath's lexical rules can't
+// provide. Shared layout comes from newConfineFixture; runConfined
+// centralises the bash invocation.
+
+// confineFixture is the on-disk layout: work/ (the confined tree,
+// containing linkdir → outside/) and outside/ (holding secret.yml).
+type confineFixture struct {
+	work, outside string
+}
+
+func newConfineFixture(t *testing.T) confineFixture {
+	t.Helper()
 	if _, err := exec.LookPath("bash"); err != nil {
 		t.Skip(bashNotAvailable)
 	}
-
 	dir := t.TempDir()
-	work := filepath.Join(dir, "work")
-	outside := filepath.Join(dir, "outside")
-	for _, d := range []string{work, outside} {
+	f := confineFixture{work: filepath.Join(dir, "work"), outside: filepath.Join(dir, "outside")}
+	for _, d := range []string{f.work, f.outside} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			t.Fatalf("mkdir %s: %v", d, err)
 		}
 	}
-	if err := os.Symlink(outside, filepath.Join(work, "linkdir")); err != nil {
+	if err := os.Symlink(f.outside, filepath.Join(f.work, "linkdir")); err != nil {
 		t.Fatalf("symlink: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(outside, "secret.yml"), []byte("secret\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(f.outside, "secret.yml"), []byte("secret\n"), 0o644); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
+	return f
+}
 
-	// Write through the symlinked dir → refused, nothing lands outside.
-	writeScript := confineParentToWorkDirScript(work, "linkdir/evil.yml") + `; ` + atomicWriteScriptFor(`"$TGT"`)
-	cmd := exec.Command("bash", "-c", writeScript)
-	cmd.Stdin = strings.NewReader("pwned")
+// runConfined executes script under bash with the given stdin and
+// returns stderr plus the exit code (0 = success).
+func runConfined(t *testing.T, script, stdin string) (string, int) {
+	t.Helper()
+	cmd := exec.Command("bash", "-c", script)
+	if stdin != "" {
+		cmd.Stdin = strings.NewReader(stdin)
+	}
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	err := cmd.Run()
+	if err == nil {
+		return stderr.String(), 0
+	}
 	var exitErr *exec.ExitError
-	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 3 {
-		t.Fatalf("expected exit 3, got %v (stderr=%q)", err, stderr.String())
+	if !errors.As(err, &exitErr) {
+		t.Fatalf("bash did not run: %v", err)
 	}
-	if !strings.Contains(stderr.String(), "outside the configured workDir") {
-		t.Fatalf("expected confinement message, stderr=%q", stderr.String())
+	return stderr.String(), exitErr.ExitCode()
+}
+
+// Write through the symlinked dir → refused, nothing lands outside.
+func TestConfinedWrite_SymlinkedDirEscapeRefused(t *testing.T) {
+	t.Parallel()
+	f := newConfineFixture(t)
+	script := confineParentToWorkDirScript(f.work, "linkdir/evil.yml") + `; ` + atomicWriteScriptFor(`"$TGT"`)
+	stderr, code := runConfined(t, script, "pwned")
+	if code != 3 || !strings.Contains(stderr, "outside the configured workDir") {
+		t.Fatalf("expected exit 3 with confinement message, got %d (stderr=%q)", code, stderr)
 	}
-	if _, statErr := os.Stat(filepath.Join(outside, "evil.yml")); !os.IsNotExist(statErr) {
+	if _, err := os.Stat(filepath.Join(f.outside, "evil.yml")); !os.IsNotExist(err) {
 		t.Fatal("write escaped the workDir through the symlinked directory")
 	}
+}
 
-	// Read through the symlinked dir → refused too.
-	readScript := confineToWorkDirScript(work, "linkdir/secret.yml") + `; cat -- "$TGT"`
-	out, err := exec.Command("bash", "-c", readScript).CombinedOutput()
+// Read through the symlinked dir → refused too.
+func TestConfinedRead_SymlinkedDirEscapeRefused(t *testing.T) {
+	t.Parallel()
+	f := newConfineFixture(t)
+	script := confineToWorkDirScript(f.work, "linkdir/secret.yml") + `; cat -- "$TGT"`
+	out, err := exec.Command("bash", "-c", script).CombinedOutput()
 	if err == nil || strings.Contains(string(out), "secret") {
 		t.Fatalf("read escaped the workDir: err=%v out=%q", err, out)
 	}
+}
 
-	// A final-component symlink (even fully in-tree) must hit the
-	// writer's exit-2 refusal, not be resolved and followed — the
-	// parent-only confinement is what keeps [ -L "$TGT" ] honest.
-	inTreeTarget := filepath.Join(work, "real.yml")
-	if err := os.WriteFile(inTreeTarget, []byte("keep me\n"), 0o644); err != nil {
+// A final-component symlink (even fully in-tree) must hit the
+// writer's exit-2 refusal, not be resolved and followed — the
+// parent-only confinement is what keeps [ -L "$TGT" ] honest.
+func TestConfinedWrite_InTreeSymlinkDestinationRefused(t *testing.T) {
+	t.Parallel()
+	f := newConfineFixture(t)
+	target := filepath.Join(f.work, "real.yml")
+	if err := os.WriteFile(target, []byte("keep me\n"), 0o644); err != nil {
 		t.Fatalf("seed in-tree target: %v", err)
 	}
-	if err := os.Symlink(inTreeTarget, filepath.Join(work, "alias.yml")); err != nil {
+	if err := os.Symlink(target, filepath.Join(f.work, "alias.yml")); err != nil {
 		t.Fatalf("in-tree symlink: %v", err)
 	}
-	linkScript := confineParentToWorkDirScript(work, "alias.yml") + `; ` + atomicWriteScriptFor(`"$TGT"`)
-	cmd = exec.Command("bash", "-c", linkScript)
-	cmd.Stdin = strings.NewReader("clobber")
-	stderr.Reset()
-	cmd.Stderr = &stderr
-	err = cmd.Run()
-	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 2 {
-		t.Fatalf("expected exit 2 for in-tree symlink destination, got %v (stderr=%q)", err, stderr.String())
+	script := confineParentToWorkDirScript(f.work, "alias.yml") + `; ` + atomicWriteScriptFor(`"$TGT"`)
+	stderr, code := runConfined(t, script, "clobber")
+	if code != 2 {
+		t.Fatalf("expected exit 2 for in-tree symlink destination, got %d (stderr=%q)", code, stderr)
 	}
-	if got, _ := os.ReadFile(inTreeTarget); string(got) != "keep me\n" {
+	if got, _ := os.ReadFile(target); string(got) != "keep me\n" {
 		t.Fatalf("in-tree symlink target was modified: %q", got)
 	}
+}
 
-	// Plain in-tree write (including a new file in a real subdir) still works.
-	if err := os.MkdirAll(filepath.Join(work, "sub"), 0o755); err != nil {
+// Plain in-tree write (including a new file in a real subdir) works.
+func TestConfinedWrite_InTreeSucceeds(t *testing.T) {
+	t.Parallel()
+	f := newConfineFixture(t)
+	if err := os.MkdirAll(filepath.Join(f.work, "sub"), 0o755); err != nil {
 		t.Fatalf("mkdir sub: %v", err)
 	}
-	okScript := confineParentToWorkDirScript(work, "sub/ok.yml") + `; ` + atomicWriteScriptFor(`"$TGT"`)
-	cmd = exec.Command("bash", "-c", okScript)
-	cmd.Stdin = strings.NewReader("fine\n")
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("in-tree write failed: %v\n%s", err, out)
+	script := confineParentToWorkDirScript(f.work, "sub/ok.yml") + `; ` + atomicWriteScriptFor(`"$TGT"`)
+	if stderr, code := runConfined(t, script, "fine\n"); code != 0 {
+		t.Fatalf("in-tree write failed: exit %d (stderr=%q)", code, stderr)
 	}
-	got, err := os.ReadFile(filepath.Join(work, "sub", "ok.yml"))
+	got, err := os.ReadFile(filepath.Join(f.work, "sub", "ok.yml"))
 	if err != nil || string(got) != "fine\n" {
 		t.Fatalf("in-tree write content: %q err=%v", got, err)
 	}

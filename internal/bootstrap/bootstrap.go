@@ -743,31 +743,32 @@ func connectAndPrecheck(ctx context.Context, req Request, hostKeys *HostKeyStore
 		sudoPw = req.SudoPassword
 	}
 	hostport := net.JoinHostPort(req.IP, strconv.Itoa(req.Port))
-	expected := normalizeFingerprint(req.HostKeyFingerprint)
-	expectedSrc := "the operator-pinned fingerprint"
-	if expected == "" {
+	expect := hostKeyExpectation{
+		fp:  normalizeFingerprint(req.HostKeyFingerprint),
+		src: "the operator-pinned fingerprint",
+	}
+	if expect.fp == "" {
 		stored, ok, err := hostKeys.Get(hostport)
 		if err != nil {
 			emit("fail", err.Error())
 			return nil, err
 		}
 		if ok {
-			expected = stored
-			expectedSrc = "the fingerprint recorded by a previous bootstrap (" + hostKeys.Path() + ")"
+			expect = hostKeyExpectation{fp: stored, src: "the fingerprint recorded by a previous bootstrap (" + hostKeys.Path() + ")"}
 		}
 	}
-	if expected == "" && hostKeyRequired() {
+	if expect.fp == "" && hostKeyRequired() {
 		err := fmt.Errorf("%s is set and no host key fingerprint is pinned or recorded for %s — get it from the provider console (ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub) and supply it in the form", requireHostKeyEnv, hostport)
 		emit("fail", err.Error())
 		return nil, err
 	}
-	target, err := dialPasswordTarget(ctx, req.IP, req.Port, req.Username, req.Password, sudoPw, expected, expectedSrc)
+	target, err := dialPasswordTarget(ctx, req.IP, req.Port, req.Username, req.Password, sudoPw, expect)
 	if err != nil {
 		emit("fail", err.Error())
 		return nil, err
 	}
-	if expected != "" {
-		emit("ok", "host key verified against "+expectedSrc+" ("+target.fingerprint()+")")
+	if expect.fp != "" {
+		emit("ok", "host key verified against "+expect.src+" ("+target.fingerprint()+")")
 	} else {
 		emit("meta", "⚠ first contact — host key accepted on trust: "+target.fingerprint()+
 			" — compare it against the provider console (ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub). It is now recorded; future bootstraps of this target must present the same key")

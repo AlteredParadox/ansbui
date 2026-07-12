@@ -89,41 +89,47 @@ func startHangingSSHServer(t *testing.T) int {
 	}
 	t.Cleanup(func() { _ = ln.Close() })
 
-	go func() {
-		for {
-			nConn, err := ln.Accept()
-			if err != nil {
-				return
-			}
-			go func(c net.Conn) {
-				defer c.Close()
-				sc, chans, reqs, err := ssh.NewServerConn(c, conf)
-				if err != nil {
-					return
-				}
-				defer sc.Close()
-				go ssh.DiscardRequests(reqs)
-				for newChan := range chans {
-					ch, chReqs, err := newChan.Accept()
-					if err != nil {
-						continue
-					}
-					// Acknowledge every request (incl. exec) but never
-					// write an exit-status and never close the channel:
-					// the client's Wait() blocks until IT closes.
-					go func(in <-chan *ssh.Request) {
-						for req := range in {
-							if req.WantReply {
-								_ = req.Reply(true, nil)
-							}
-						}
-					}(chReqs)
-					_ = ch
-				}
-			}(nConn)
-		}
-	}()
+	go acceptHangingConns(ln, conf)
 	return ln.Addr().(*net.TCPAddr).Port
+}
+
+func acceptHangingConns(ln net.Listener, conf *ssh.ServerConfig) {
+	for {
+		nConn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		go serveHangingConn(nConn, conf)
+	}
+}
+
+func serveHangingConn(c net.Conn, conf *ssh.ServerConfig) {
+	defer c.Close()
+	sc, chans, reqs, err := ssh.NewServerConn(c, conf)
+	if err != nil {
+		return
+	}
+	defer sc.Close()
+	go ssh.DiscardRequests(reqs)
+	for newChan := range chans {
+		ch, chReqs, err := newChan.Accept()
+		if err != nil {
+			continue
+		}
+		// Acknowledge every request (incl. exec) but never write an
+		// exit-status and never close the channel: the client's
+		// Wait() blocks until IT closes.
+		go ackChannelRequests(chReqs)
+		_ = ch
+	}
+}
+
+func ackChannelRequests(in <-chan *ssh.Request) {
+	for req := range in {
+		if req.WantReply {
+			_ = req.Reply(true, nil)
+		}
+	}
 }
 
 // writeClientKey generates an ed25519 client key and writes it in

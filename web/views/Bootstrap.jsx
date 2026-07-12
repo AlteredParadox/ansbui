@@ -73,6 +73,12 @@ const bootDuration = (startIso, endIso) => {
   return `${Math.round(secs / 60)}m`;
 };
 const JOB_DOT_CLASS = { succeeded: 'ok', failed: 'err', cancelled: 'warn', running: 'run' };
+
+// Pills have no 'run' variant — running jobs use the 'info' pill.
+function jobPillClass(status) {
+  const dot = JOB_DOT_CLASS[status] || 'warn';
+  return dot === 'run' ? 'info' : dot;
+}
 const classifyAddress = (s) => {
   if (!s || s.length > 253) return '';
   if (s.includes(':')) return ADDR_IPV6_RE.test(s) ? 'ipv6' : '';
@@ -636,7 +642,7 @@ function BootstrapView() {
                   <span className="mute mono" style={{ marginLeft: 'auto', fontSize: 11 }}>{bootAgo(j.startedAt)}</span>
                 </div>
                 <div className="history-row-bot">
-                  <span className={`pill ${JOB_DOT_CLASS[j.status] === 'run' ? 'info' : (JOB_DOT_CLASS[j.status] || 'warn')}`}>{j.status}</span>
+                  <span className={`pill ${jobPillClass(j.status)}`}>{j.status}</span>
                   {bootDuration(j.startedAt, j.endedAt) && <span className="mute mono" style={{ fontSize: 11 }}>{bootDuration(j.startedAt, j.endedAt)}</span>}
                   {j.status === 'failed' && j.error && (
                     <span className="mono" style={{ color: 'var(--err)', fontSize: 11, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>

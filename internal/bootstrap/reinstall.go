@@ -169,38 +169,10 @@ func runReinstall(ctx context.Context, target *targetSession, req Request, pubKe
 		return nil, err
 	}
 
-	emit("meta", "Ensuring curl is available on target (needed by reinstall.sh)...")
-	if _, stderr, err := target.runRoot(ctx, ensureCurlScript(), ""); err != nil {
-		return nil, fmt.Errorf("prepare reinstall curl dependency: %s: %w", strings.TrimSpace(stderr), err)
-	}
-	emit("ok", "curl available")
-
-	emit("meta", fmt.Sprintf("Running reinstall.sh %s %s on target (this prepares the new install — actual reinstall happens after reboot)...", opts.OS, opts.Version))
-
-	heartbeat := startHeartbeat(ctx, "reinstall.sh still running", emit)
-	defer heartbeat() // belt-and-suspenders against future early returns
-	// The prep phase gets its own deadline: it normally takes 1-3
-	// minutes, and the only ways past 15 are a stalled mirror or a
-	// dead-but-undetected connection. Without the bound (jobs carry
-	// no global timeout) a stall here idles the run indefinitely.
-	prepCtx, cancelPrep := context.WithTimeout(ctx, reinstallPrepBudget)
-	stdout, stderr, err := target.runRoot(prepCtx, reinstallPrepScript(opts, pubKey), "")
-	cancelPrep()
-	heartbeat()
+	stdout, err := runReinstallPrep(ctx, target, opts, pubKey, emit)
 	if err != nil {
-		if errors.Is(prepCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
-			return nil, fmt.Errorf("reinstall.sh prep did not finish within %s — a download from the pinned repo or the OS image mirror likely stalled; re-run bootstrap to retry", friendly(reinstallPrepBudget))
-		}
-		detail := reinstallFailureDetail(stdout, stderr)
-		if detail == "" {
-			return nil, fmt.Errorf("reinstall.sh failed: %w", err)
-		}
-		return nil, fmt.Errorf("reinstall.sh failed: %w\n%s", err, detail)
+		return nil, err
 	}
-	if tail := tailLines(stdout, 6); tail != "" {
-		emit("meta", "reinstall.sh tail:\n"+tail)
-	}
-	emit("ok", "reinstall.sh prepared the new install")
 
 	// Pre-reboot network cross-check. reinstall.sh bakes the network
 	// config it auto-detected on the OLD system into the installer
@@ -213,26 +185,7 @@ func runReinstall(ctx context.Context, target *targetSession, req Request, pubKe
 	// wrong address: a guaranteed 45-minute timeout and possibly a
 	// console-rescue job. Abort now instead, while the old system
 	// is still alive and untouched.
-	//
-	// stdout is a TAIL buffer (targetStdoutMax) and the script prints
-	// its Network Info block early in prep — enough later output
-	// (verbose mirrors, progress spam) could push some or all of the
-	// block out of the tail and weaken this check via its fail-open
-	// paths. The tee'd prep log still holds the complete transcript
-	// and the box is alive pre-reboot, so whenever the tail was
-	// truncated — not just when it parsed to nothing, since a partial
-	// tail can retain one address family or a stale occurrence — the
-	// complete log is re-read and preferred over whatever the tail
-	// happened to keep.
-	netInfo := parseReinstallNetInfo(stdout)
-	if outputWasTruncated(stdout) || len(netInfo.ips()) == 0 {
-		if out, _, lerr := target.runRoot(ctx, netInfoFromLogScript, ""); lerr == nil {
-			if recovered := parseReinstallNetInfo(out); len(recovered.ips()) > 0 {
-				emit("meta", "prep output tail was incomplete — using the network detection re-read from "+reinstallPrepLog)
-				netInfo = recovered
-			}
-		}
-	}
+	netInfo := resolvePrepNetInfo(ctx, target, stdout, emit)
 	if err := verifyReinstallNetconf(ctx, netInfo, req.IP, emit); err != nil {
 		return nil, err
 	}
@@ -291,6 +244,74 @@ func runReinstall(ctx context.Context, target *targetSession, req Request, pubKe
 		emit("ok", "new host key recorded for "+newHostport)
 	}
 	return newTarget, nil
+}
+
+// runReinstallPrep ensures curl on the target, then downloads,
+// verifies, pins, and runs reinstall.sh under the prep budget (see
+// reinstallPrepBudget — the jobs carry no global timeout, so a
+// stalled mirror would otherwise idle the run indefinitely). Returns
+// the prep stdout (a tail — see resolvePrepNetInfo) for the network
+// cross-check. Extracted from runReinstall to keep the orchestrator
+// under the cognitive-complexity ceiling (S3776).
+func runReinstallPrep(ctx context.Context, target *targetSession, opts ReinstallOpts, pubKey string, emit func(typ, text string)) (string, error) {
+	emit("meta", "Ensuring curl is available on target (needed by reinstall.sh)...")
+	if _, stderr, err := target.runRoot(ctx, ensureCurlScript(), ""); err != nil {
+		return "", fmt.Errorf("prepare reinstall curl dependency: %s: %w", strings.TrimSpace(stderr), err)
+	}
+	emit("ok", "curl available")
+
+	emit("meta", fmt.Sprintf("Running reinstall.sh %s %s on target (this prepares the new install — actual reinstall happens after reboot)...", opts.OS, opts.Version))
+
+	heartbeat := startHeartbeat(ctx, "reinstall.sh still running", emit)
+	defer heartbeat()
+	prepCtx, cancelPrep := context.WithTimeout(ctx, reinstallPrepBudget)
+	stdout, stderr, err := target.runRoot(prepCtx, reinstallPrepScript(opts, pubKey), "")
+	cancelPrep()
+	heartbeat()
+	if err != nil {
+		if errors.Is(prepCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
+			return "", fmt.Errorf("reinstall.sh prep did not finish within %s — a download from the pinned repo or the OS image mirror likely stalled; re-run bootstrap to retry", friendly(reinstallPrepBudget))
+		}
+		detail := reinstallFailureDetail(stdout, stderr)
+		if detail == "" {
+			return "", fmt.Errorf("reinstall.sh failed: %w", err)
+		}
+		return "", fmt.Errorf("reinstall.sh failed: %w\n%s", err, detail)
+	}
+	if tail := tailLines(stdout, 6); tail != "" {
+		emit("meta", "reinstall.sh tail:\n"+tail)
+	}
+	emit("ok", "reinstall.sh prepared the new install")
+	return stdout, nil
+}
+
+// resolvePrepNetInfo parses the detected network config out of the
+// prep stdout, recovering from the tee'd prep log when needed.
+//
+// stdout is a TAIL buffer (targetStdoutMax) and the script prints
+// its Network Info block early in prep — enough later output
+// (verbose mirrors, progress spam) could push some or all of the
+// block out of the tail and weaken the pre-reboot check via its
+// fail-open paths. The tee'd prep log still holds the complete
+// transcript and the box is alive pre-reboot, so whenever the tail
+// was truncated — not just when it parsed to nothing, since a
+// partial tail can retain one address family or a stale occurrence —
+// the complete log is re-read and preferred over whatever the tail
+// happened to keep.
+func resolvePrepNetInfo(ctx context.Context, target *targetSession, stdout string, emit func(typ, text string)) reinstallNetInfo {
+	netInfo := parseReinstallNetInfo(stdout)
+	if !outputWasTruncated(stdout) && len(netInfo.ips()) > 0 {
+		return netInfo
+	}
+	out, _, err := target.runRoot(ctx, netInfoFromLogScript, "")
+	if err != nil {
+		return netInfo
+	}
+	if recovered := parseReinstallNetInfo(out); len(recovered.ips()) > 0 {
+		emit("meta", "prep output tail was incomplete — using the network detection re-read from "+reinstallPrepLog)
+		return recovered
+	}
+	return netInfo
 }
 
 // detachedRebootCmd triggers a reboot that survives its SSH session

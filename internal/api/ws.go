@@ -312,12 +312,35 @@ func eventBytes(evt ansible.Event) int {
 	return len(evt.Text) + len(evt.Host) + len(evt.Status) + len(evt.Stream) + len(evt.Type)
 }
 
+// historyLog accumulates the redacted, capped copy of a run's events
+// destined for runs.json. Redaction happens here — the live peer
+// already got the real value, but the persisted copy must not carry
+// passwords/passphrases to disk. Once either cap trips, further
+// events are dropped behind an explicit truncation marker.
+type historyLog struct {
+	events    []ansible.Event
+	bytes     int
+	truncated bool
+}
+
+func (h *historyLog) add(evt ansible.Event) {
+	if h.truncated {
+		return
+	}
+	red := capEventStrings(ansible.RedactEvent(evt))
+	if len(h.events) >= maxLogEvents || h.bytes+eventBytes(red) > maxLogBytes {
+		h.truncated = true
+		h.events = append(h.events, ansible.Event{Type: "meta", Text: fmt.Sprintf("… history log truncated (caps: %d events / %d bytes) — the remaining output was streamed live but not retained", maxLogEvents, maxLogBytes)})
+		return
+	}
+	h.bytes += eventBytes(red)
+	h.events = append(h.events, red)
+}
+
 func consumeAndPersist(conn *websocket.Conn, events <-chan ansible.Event, run *ansible.RunRecord, rec *ansible.Recorder) {
-	logBuf := make([]ansible.Event, 0, 256)
+	hist := historyLog{events: make([]ansible.Event, 0, 256)}
 	clientAlive := true
 	cancelled := false
-	logBytes := 0
-	logTruncated := false
 	for evt := range events {
 		if clientAlive {
 			if err := wsWriteJSON(conn, evt); err != nil {
@@ -329,24 +352,11 @@ func consumeAndPersist(conn *websocket.Conn, events <-chan ansible.Event, run *a
 			cancelled = true
 		}
 		tallyEvent(run, evt)
-		if logTruncated {
-			continue
-		}
-		// Redact before buffering: the live peer (above) already
-		// got the real value, but the copy destined for runs.json
-		// must not persist passwords/passphrases to disk.
-		red := capEventStrings(ansible.RedactEvent(evt))
-		if len(logBuf) >= maxLogEvents || logBytes+eventBytes(red) > maxLogBytes {
-			logTruncated = true
-			logBuf = append(logBuf, ansible.Event{Type: "meta", Text: fmt.Sprintf("… history log truncated (caps: %d events / %d bytes) — the remaining output was streamed live but not retained", maxLogEvents, maxLogBytes)})
-			continue
-		}
-		logBytes += eventBytes(red)
-		logBuf = append(logBuf, red)
+		hist.add(evt)
 	}
 	run.EndedAt = time.Now().UTC()
 	run.Duration = run.EndedAt.Sub(run.StartedAt).Round(time.Millisecond).String()
-	run.Log = logBuf
+	run.Log = hist.events
 	run.Status = finalStatus(run, cancelled)
 	if err := rec.Append(*run); err != nil {
 		log.Printf("persist run: %v", err)
