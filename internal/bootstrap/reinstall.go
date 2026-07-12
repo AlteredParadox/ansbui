@@ -213,7 +213,23 @@ func runReinstall(ctx context.Context, target *targetSession, req Request, pubKe
 	// wrong address: a guaranteed 45-minute timeout and possibly a
 	// console-rescue job. Abort now instead, while the old system
 	// is still alive and untouched.
+	//
+	// stdout is a TAIL buffer (targetStdoutMax) and the script prints
+	// its Network Info block early in prep — enough later output
+	// (verbose mirrors, progress spam) could push the block out of
+	// the tail and silently disarm this check via its fail-open
+	// paths. The tee'd /tmp/reinstall.log still holds the complete
+	// transcript and the box is alive pre-reboot, so re-extract the
+	// field lines from it whenever the in-memory tail yielded none.
 	netInfo := parseReinstallNetInfo(stdout)
+	if len(netInfo.ips()) == 0 {
+		if out, _, lerr := target.runRoot(ctx, netInfoFromLogScript, ""); lerr == nil {
+			if recovered := parseReinstallNetInfo(out); len(recovered.ips()) > 0 {
+				emit("meta", "network detection was not in the buffered output tail — recovered it from /tmp/reinstall.log")
+				netInfo = recovered
+			}
+		}
+	}
 	if err := verifyReinstallNetconf(ctx, netInfo, req.IP, emit); err != nil {
 		return nil, err
 	}
@@ -297,6 +313,15 @@ func scheduleDetachedReboot(ctx context.Context, target *targetSession, emit fun
 		emit("ok", "reboot scheduled")
 	}
 }
+
+// netInfoFromLogScript re-extracts the Network Info field lines from
+// the tee'd prep log for parseReinstallNetInfo. \r progress spam is
+// flattened first; the grep is case-insensitive and unanchored (the
+// parser skips anything that doesn't prefix-match after trimming),
+// and tail bounds the reply. The trailing `true` keeps a no-match
+// grep (exit 1) from surfacing as a step failure — recovery is
+// best-effort on top of verifyReinstallNetconf's fail-open paths.
+const netInfoFromLogScript = `tr -d '\r' < /tmp/reinstall.log 2>/dev/null | grep -aiE '(IPv4|IPv6) (Address|Gateway):' | tail -n 20; true`
 
 // reinstallNetInfo is the network config reinstall.sh reports
 // detecting during prep, parsed from the plain-text "Network Info"

@@ -391,3 +391,30 @@ func TestOSReleaseField(t *testing.T) {
 		t.Fatalf("MISSING = %q, want empty", got)
 	}
 }
+
+// The netinfo-recovery path feeds parseReinstallNetInfo the output
+// of netInfoFromLogScript — grep-extracted lines from the tee'd prep
+// log: indented, mixed-case, possibly including mid-line matches the
+// unanchored grep let through. The parser must read the field lines
+// and skip the noise, keeping last-occurrence-wins semantics.
+func TestParseReinstallNetInfo_FromGreppedLog(t *testing.T) {
+	t.Parallel()
+	out := "" +
+		"  IPv4 Address: 10.0.0.5/24\n" + // early collect_netconf run
+		"some log line mentioning IPv4 Address: garbage mid-line\n" + // unanchored grep noise
+		"IPv4 Address: 203.0.113.42/24\n" + // final run wins
+		"\tIPv4 Gateway: 203.0.113.1\n" +
+		"ipv6 address: 2001:db8::42/64\n" + // lower-case variant
+		"IPv6 Gateway: 2001:db8::1\n"
+	nc := parseReinstallNetInfo(out)
+	if nc.ipv4Addr != "203.0.113.42/24" {
+		t.Fatalf("ipv4Addr = %q (last occurrence must win)", nc.ipv4Addr)
+	}
+	if nc.ipv4Gateway != "203.0.113.1" || nc.ipv6Gateway != "2001:db8::1" {
+		t.Fatalf("gateways = %q / %q", nc.ipv4Gateway, nc.ipv6Gateway)
+	}
+	ips := nc.ips()
+	if len(ips) != 2 || ips[0].String() != "203.0.113.42" || ips[1].String() != "2001:db8::42" {
+		t.Fatalf("ips = %v", ips)
+	}
+}
