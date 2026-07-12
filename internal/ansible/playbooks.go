@@ -75,7 +75,7 @@ func ListPlaybooks(ctx context.Context, pool *sshpool.Pool, srv config.Server) (
 			"-printf '%%P\\t%%s\\t%%T@\\n'",
 		shellQuote(srv.WorkDir),
 	)
-	stdout, stderr, err := sshpool.Run(cli, cmd)
+	stdout, stderr, err := sshpool.Run(ctx, cli, cmd)
 	if err != nil {
 		return nil, fmt.Errorf("list playbooks: %w (stderr: %s)", err, strings.TrimSpace(stderr))
 	}

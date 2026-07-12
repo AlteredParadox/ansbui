@@ -27,6 +27,7 @@ import (
 
 	"github.com/AlteredParadox/ansbui/internal/ansible"
 	"github.com/AlteredParadox/ansbui/internal/api"
+	"github.com/AlteredParadox/ansbui/internal/bootstrap"
 	"github.com/AlteredParadox/ansbui/internal/config"
 	"github.com/AlteredParadox/ansbui/internal/jobs"
 	"github.com/AlteredParadox/ansbui/internal/sshpool"
@@ -83,6 +84,10 @@ func main() {
 		Jobs:    jobMgr,
 		WebRoot: webSub,
 		Addr:    *addr,
+		// The bootstrap TOFU store lives next to runs.json so it lands
+		// in the deployment's writable data dir (ReadWritePaths in the
+		// systemd unit covers it).
+		BootstrapHostKeys: bootstrap.NewHostKeyStore(filepath.Join(filepath.Dir(runsPath), "bootstrap_known_hosts.json")),
 	}
 
 	httpSrv := &http.Server{

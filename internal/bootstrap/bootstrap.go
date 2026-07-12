@@ -141,7 +141,7 @@ func lockDNSRecord(recordType, fqdn string) *sync.Mutex {
 // includes the operator's password — the redact pass guards
 // against future debug-log regressions and against the live event
 // landing in browser memory in a recoverable form.
-func Run(ctx context.Context, pool *sshpool.Pool, srv config.Server, req Request, ctrlPrivKeyPath string, rawEmit func(typ, text string)) error {
+func Run(ctx context.Context, pool *sshpool.Pool, srv config.Server, req Request, ctrlPrivKeyPath string, hostKeys *HostKeyStore, rawEmit func(typ, text string)) error {
 	emit := func(t, text string) {
 		rawEmit(t, ansible.RedactText(text))
 	}
@@ -208,7 +208,7 @@ func Run(ctx context.Context, pool *sshpool.Pool, srv config.Server, req Request
 	emit("ok", "public key loaded")
 
 	emit("meta", fmt.Sprintf("Connecting to %s@%s:%d...", req.Username, req.IP, req.Port))
-	target, err := connectAndPrecheck(ctx, req, emit)
+	target, err := connectAndPrecheck(ctx, req, hostKeys, emit)
 	if err != nil {
 		return err
 	}
@@ -225,6 +225,7 @@ func Run(ctx context.Context, pool *sshpool.Pool, srv config.Server, req Request
 			ctrlPrivKeyPath: ctrlPrivKeyPath,
 			pool:            pool,
 			srv:             srv,
+			hostKeys:        hostKeys,
 		}, emit)
 		if err != nil {
 			emit("fail", err.Error())
@@ -648,6 +649,7 @@ type reinstallInputs struct {
 	ctrlPrivKeyPath string
 	pool            *sshpool.Pool
 	srv             config.Server
+	hostKeys        *HostKeyStore
 }
 
 // doReinstall reads the configured private key from the control
@@ -666,7 +668,7 @@ func doReinstall(ctx context.Context, target *targetSession, req Request, in rei
 		return nil, err
 	}
 	emit("ok", "private key loaded")
-	return runReinstall(ctx, target, req, in.pubKey, privKey, emit)
+	return runReinstall(ctx, target, req, in.pubKey, privKey, in.hostKeys, emit)
 }
 
 // readControlNodePrivkey reads the SSH private key file from the
@@ -722,27 +724,56 @@ func readControlNodePrivkey(ctx context.Context, pool *sshpool.Pool, srv config.
 // orchestrator's cognitive-complexity budget stays under the
 // Sonar S3776 ceiling. The caller closes the returned session.
 //
-// Host-key posture: an operator-supplied fingerprint (if any) is
-// enforced inside the dial; otherwise this is trust-on-first-use,
-// and the accepted fingerprint is emitted prominently so the
-// operator can compare it against the provider console and knows
-// how to pin the next run.
-func connectAndPrecheck(ctx context.Context, req Request, emit func(string, string)) (*targetSession, error) {
+// Host-key posture, strongest available expectation first:
+//
+//  1. operator-supplied fingerprint (form field) — enforced in the
+//     dial, and recorded on success so it becomes the standing
+//     expectation. Supplying a new pin is also the remediation path
+//     after a legitimate out-of-band reinstall.
+//  2. TOFU-store record from a previous bootstrap of this host:port
+//     — enforced the same way; a changed key fails the dial before
+//     the password is transmitted.
+//  3. nothing known — genuine first contact. Refused outright when
+//     ANSBUI_BOOTSTRAP_REQUIRE_HOSTKEY is set; otherwise accepted
+//     loudly, and the fingerprint is recorded so this happens at
+//     most once per target.
+func connectAndPrecheck(ctx context.Context, req Request, hostKeys *HostKeyStore, emit func(string, string)) (*targetSession, error) {
 	sudoPw := ""
 	if req.UseSudo {
 		sudoPw = req.SudoPassword
 	}
-	pin := normalizeFingerprint(req.HostKeyFingerprint)
-	target, err := dialPasswordTarget(ctx, req.IP, req.Port, req.Username, req.Password, sudoPw, pin)
+	hostport := net.JoinHostPort(req.IP, strconv.Itoa(req.Port))
+	expected := normalizeFingerprint(req.HostKeyFingerprint)
+	expectedSrc := "the operator-pinned fingerprint"
+	if expected == "" {
+		stored, ok, err := hostKeys.Get(hostport)
+		if err != nil {
+			emit("fail", err.Error())
+			return nil, err
+		}
+		if ok {
+			expected = stored
+			expectedSrc = "the fingerprint recorded by a previous bootstrap (" + hostKeys.Path() + ")"
+		}
+	}
+	if expected == "" && hostKeyRequired() {
+		err := fmt.Errorf("%s is set and no host key fingerprint is pinned or recorded for %s — get it from the provider console (ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub) and supply it in the form", requireHostKeyEnv, hostport)
+		emit("fail", err.Error())
+		return nil, err
+	}
+	target, err := dialPasswordTarget(ctx, req.IP, req.Port, req.Username, req.Password, sudoPw, expected, expectedSrc)
 	if err != nil {
 		emit("fail", err.Error())
 		return nil, err
 	}
-	if pin != "" {
-		emit("ok", "host key verified against the pinned fingerprint ("+target.fingerprint()+")")
+	if expected != "" {
+		emit("ok", "host key verified against "+expectedSrc+" ("+target.fingerprint()+")")
 	} else {
-		emit("meta", "⚠ host key accepted on first use (NOT verified): "+target.fingerprint()+
-			" — compare it against the provider console (ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub) and supply it as the host key fingerprint next time to pin it")
+		emit("meta", "⚠ first contact — host key accepted on trust: "+target.fingerprint()+
+			" — compare it against the provider console (ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub). It is now recorded; future bootstraps of this target must present the same key")
+	}
+	if perr := hostKeys.Put(hostport, target.fingerprint()); perr != nil {
+		emit("meta", "could not record the host key fingerprint ("+perr.Error()+") — verification will fall back to first-use trust next run")
 	}
 	if err := target.requireSudo(ctx); err != nil {
 		_ = target.Close()

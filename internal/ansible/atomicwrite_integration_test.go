@@ -168,7 +168,7 @@ func TestConfineToWorkDir_SymlinkedDirEscape(t *testing.T) {
 	}
 
 	// Write through the symlinked dir → refused, nothing lands outside.
-	writeScript := confineToWorkDirScript(work, "linkdir/evil.yml") + `; ` + atomicWriteScriptFor(`"$TGT"`)
+	writeScript := confineParentToWorkDirScript(work, "linkdir/evil.yml") + `; ` + atomicWriteScriptFor(`"$TGT"`)
 	cmd := exec.Command("bash", "-c", writeScript)
 	cmd.Stdin = strings.NewReader("pwned")
 	var stderr bytes.Buffer
@@ -192,11 +192,34 @@ func TestConfineToWorkDir_SymlinkedDirEscape(t *testing.T) {
 		t.Fatalf("read escaped the workDir: err=%v out=%q", err, out)
 	}
 
+	// A final-component symlink (even fully in-tree) must hit the
+	// writer's exit-2 refusal, not be resolved and followed — the
+	// parent-only confinement is what keeps [ -L "$TGT" ] honest.
+	inTreeTarget := filepath.Join(work, "real.yml")
+	if err := os.WriteFile(inTreeTarget, []byte("keep me\n"), 0o644); err != nil {
+		t.Fatalf("seed in-tree target: %v", err)
+	}
+	if err := os.Symlink(inTreeTarget, filepath.Join(work, "alias.yml")); err != nil {
+		t.Fatalf("in-tree symlink: %v", err)
+	}
+	linkScript := confineParentToWorkDirScript(work, "alias.yml") + `; ` + atomicWriteScriptFor(`"$TGT"`)
+	cmd = exec.Command("bash", "-c", linkScript)
+	cmd.Stdin = strings.NewReader("clobber")
+	stderr.Reset()
+	cmd.Stderr = &stderr
+	err = cmd.Run()
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 2 {
+		t.Fatalf("expected exit 2 for in-tree symlink destination, got %v (stderr=%q)", err, stderr.String())
+	}
+	if got, _ := os.ReadFile(inTreeTarget); string(got) != "keep me\n" {
+		t.Fatalf("in-tree symlink target was modified: %q", got)
+	}
+
 	// Plain in-tree write (including a new file in a real subdir) still works.
 	if err := os.MkdirAll(filepath.Join(work, "sub"), 0o755); err != nil {
 		t.Fatalf("mkdir sub: %v", err)
 	}
-	okScript := confineToWorkDirScript(work, "sub/ok.yml") + `; ` + atomicWriteScriptFor(`"$TGT"`)
+	okScript := confineParentToWorkDirScript(work, "sub/ok.yml") + `; ` + atomicWriteScriptFor(`"$TGT"`)
 	cmd = exec.Command("bash", "-c", okScript)
 	cmd.Stdin = strings.NewReader("fine\n")
 	if out, err := cmd.CombinedOutput(); err != nil {

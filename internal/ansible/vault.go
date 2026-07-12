@@ -78,7 +78,7 @@ func ListVaultFiles(ctx context.Context, pool *sshpool.Pool, srv config.Server) 
 		"cd %s && grep -rlm1 -E '^[[:space:]]*\\$ANSIBLE_VAULT;[0-9]+\\.[0-9]+;' . 2>/dev/null || true",
 		shellQuote(srv.WorkDir),
 	)
-	stdout, _, err := sshpool.Run(cli, cmd)
+	stdout, _, err := sshpool.Run(ctx, cli, cmd)
 	if err != nil {
 		return nil, fmt.Errorf("list vault files: %w", err)
 	}
@@ -108,7 +108,7 @@ func annotateVaultFiles(ctx context.Context, pool *sshpool.Pool, srv config.Serv
 	if err != nil {
 		return
 	}
-	stdout, _, err := sshpool.Run(cli, vaultAnnotateCmd(srv.WorkDir, files))
+	stdout, _, err := sshpool.Run(ctx, cli, vaultAnnotateCmd(srv.WorkDir, files))
 	if err != nil {
 		return
 	}

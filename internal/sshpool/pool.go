@@ -135,18 +135,45 @@ func (p *Pool) Close() {
 	}
 }
 
-// Run opens a session, runs cmd, and returns stdout/stderr.
-func Run(client *ssh.Client, cmd string) (stdout, stderr string, err error) {
-	sess, err := client.NewSession()
-	if err != nil {
-		return "", "", fmt.Errorf("new session: %w", err)
+// Bounds for Run. Output is collected in memory per call, and the
+// callers are HTTP handlers — an unbounded buffer let one verbose
+// remote command (or a hostile control node) grow the heap without
+// limit, and no deadline meant a stalled command pinned the handler
+// goroutine forever. 8 MiB comfortably covers a large ansible
+// inventory JSON; commands with bigger output should stream instead.
+const (
+	runMaxStdout      = 8 << 20
+	runMaxStderr      = 256 << 10
+	runDefaultTimeout = 2 * time.Minute
+)
+
+// cappedBuffer fails the write (rather than truncating) once the cap
+// is hit: partial JSON is useless to every Run caller, and the write
+// error aborts the SSH session's copy loop so the remote command is
+// torn down instead of continuing to stream into a void.
+type cappedBuffer struct {
+	name string
+	max  int
+	buf  bytes.Buffer
+}
+
+func (b *cappedBuffer) Write(p []byte) (int, error) {
+	if b.buf.Len()+len(p) > b.max {
+		return 0, fmt.Errorf("remote %s exceeded %d bytes — aborting", b.name, b.max)
 	}
-	defer sess.Close()
-	var outBuf, errBuf bytes.Buffer
-	sess.Stdout = &outBuf
-	sess.Stderr = &errBuf
-	runErr := sess.Run(cmd)
-	return outBuf.String(), errBuf.String(), runErr
+	return b.buf.Write(p)
+}
+
+// Run opens a session, runs cmd, and returns stdout/stderr. The run
+// is cancelled when ctx ends and always bounded by runDefaultTimeout;
+// stdout/stderr are capped (see cappedBuffer).
+func Run(ctx context.Context, client *ssh.Client, cmd string) (stdout, stderr string, err error) {
+	ctx, cancel := context.WithTimeout(ctx, runDefaultTimeout)
+	defer cancel()
+	so := &cappedBuffer{name: "stdout", max: runMaxStdout}
+	se := &cappedBuffer{name: "stderr", max: runMaxStderr}
+	err = Stream(ctx, client, cmd, nil, so, se)
+	return so.buf.String(), se.buf.String(), err
 }
 
 // Stream opens a session and runs cmd, forwarding stdout and stderr to

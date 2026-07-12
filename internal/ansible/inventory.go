@@ -56,7 +56,7 @@ func FetchInventory(ctx context.Context, pool *sshpool.Pool, srv config.Server) 
 		return Inventory{}, err
 	}
 	cmd := buildInventoryCmd(srv)
-	stdout, stderr, err := sshpool.Run(cli, cmd)
+	stdout, stderr, err := sshpool.Run(ctx, cli, cmd)
 	if err != nil {
 		return Inventory{}, fmt.Errorf("ansible-inventory failed: %w (stderr: %s)", err, strings.TrimSpace(stderr))
 	}

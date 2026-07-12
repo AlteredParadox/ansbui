@@ -45,6 +45,12 @@ const wsMaxMessageBytes = 64 * 1024
 // case enough that ctx-cancel can clean up promptly.
 const wsWriteWait = 10 * time.Second
 
+// wsHandshakeWait bounds how long a freshly-upgraded run socket may
+// idle before sending its request JSON. The run slot is already held
+// at that point (see runWebSocket), so a client that upgrades and
+// goes quiet would otherwise pin run capacity indefinitely.
+const wsHandshakeWait = 10 * time.Second
+
 // wsWriteJSON applies the write deadline before delegating to
 // gorilla's WriteJSON. Centralised so every WS write site picks up
 // the bound; gorilla's connection-level timeout knob doesn't exist.
@@ -127,6 +133,16 @@ func runWebSocket[T any](
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	// Reserve the run slot BEFORE upgrading: acquiring after the
+	// upgrade let clients open unlimited upgraded-but-idle sockets
+	// (each holding a goroutine and buffers) that never submitted a
+	// run and so never touched the semaphore. Slot-first means excess
+	// connections cost one plain 503 and nothing else.
+	if !s.acquireRunSlot() {
+		writeError(w, http.StatusServiceUnavailable, fmt.Errorf("too many concurrent runs (limit %d) — wait for one to finish and retry", maxConcurrentRuns))
+		return
+	}
+	defer s.releaseRunSlot()
 	conn, err := wsUpgrader.Upgrade(w, r, nil)
 	if err != nil {
 		return
@@ -134,17 +150,18 @@ func runWebSocket[T any](
 	defer conn.Close()
 	conn.SetReadLimit(wsMaxMessageBytes)
 
+	// The held slot also means a peer that upgrades and then stalls
+	// is now occupying run capacity, so the first read gets a short
+	// deadline: send the request promptly or lose the connection.
+	// Cleared after the read — the run's own lifetime is governed by
+	// watchPeer + ctx from here on.
 	var req T
+	_ = conn.SetReadDeadline(time.Now().Add(wsHandshakeWait))
 	if err := conn.ReadJSON(&req); err != nil {
 		_ = wsWriteJSON(conn, ansible.Event{Type: "error", Text: "decode request: " + err.Error()})
 		return
 	}
-
-	if !s.acquireRunSlot() {
-		_ = wsWriteJSON(conn, ansible.Event{Type: "error", Text: fmt.Sprintf("too many concurrent runs (limit %d) — wait for one to finish and retry", maxConcurrentRuns)})
-		return
-	}
-	defer s.releaseRunSlot()
+	_ = conn.SetReadDeadline(time.Time{})
 
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
@@ -269,16 +286,30 @@ func watchPeer(ctx context.Context, conn *websocket.Conn, cancel context.CancelF
 // a shortened log can't be mistaken for a complete one.
 const (
 	maxLogEvents    = 2000
-	maxLogBytes     = 1 << 20  // total Text bytes per run record
+	maxLogBytes     = 1 << 20  // total string bytes per run record, ALL fields
 	maxLogEventText = 64 << 10 // per-event Text ceiling
+	maxLogEventHost = 1 << 10  // per-event Host ceiling (legit hostnames are ≤253)
 )
 
-// capEventText bounds one persisted event's Text, marking the cut.
-func capEventText(evt ansible.Event) ansible.Event {
+// capEventStrings bounds every operator-controllable string field of
+// one persisted event, marking the cut. Host matters too: classify's
+// regexes capture it from raw output lines, so a hostile line can
+// put ~1 MiB into Host while Text stays small — capping Text alone
+// left the advertised byte budget off by orders of magnitude.
+func capEventStrings(evt ansible.Event) ansible.Event {
 	if len(evt.Text) > maxLogEventText {
 		evt.Text = evt.Text[:maxLogEventText] + "… [event truncated for history]"
 	}
+	if len(evt.Host) > maxLogEventHost {
+		evt.Host = evt.Host[:maxLogEventHost] + "…"
+	}
 	return evt
+}
+
+// eventBytes is the retained-size accounting for one event: every
+// string field counts against maxLogBytes, not just Text.
+func eventBytes(evt ansible.Event) int {
+	return len(evt.Text) + len(evt.Host) + len(evt.Status) + len(evt.Stream) + len(evt.Type)
 }
 
 func consumeAndPersist(conn *websocket.Conn, events <-chan ansible.Event, run *ansible.RunRecord, rec *ansible.Recorder) {
@@ -304,13 +335,13 @@ func consumeAndPersist(conn *websocket.Conn, events <-chan ansible.Event, run *a
 		// Redact before buffering: the live peer (above) already
 		// got the real value, but the copy destined for runs.json
 		// must not persist passwords/passphrases to disk.
-		red := capEventText(ansible.RedactEvent(evt))
-		if len(logBuf) >= maxLogEvents || logBytes+len(red.Text) > maxLogBytes {
+		red := capEventStrings(ansible.RedactEvent(evt))
+		if len(logBuf) >= maxLogEvents || logBytes+eventBytes(red) > maxLogBytes {
 			logTruncated = true
 			logBuf = append(logBuf, ansible.Event{Type: "meta", Text: fmt.Sprintf("… history log truncated (caps: %d events / %d bytes) — the remaining output was streamed live but not retained", maxLogEvents, maxLogBytes)})
 			continue
 		}
-		logBytes += len(red.Text)
+		logBytes += eventBytes(red)
 		logBuf = append(logBuf, red)
 	}
 	run.EndedAt = time.Now().UTC()

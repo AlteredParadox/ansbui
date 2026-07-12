@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/AlteredParadox/ansbui/internal/ansible"
+	"github.com/AlteredParadox/ansbui/internal/bootstrap"
 	"github.com/AlteredParadox/ansbui/internal/config"
 	"github.com/AlteredParadox/ansbui/internal/jobs"
 	"github.com/AlteredParadox/ansbui/internal/sshpool"
@@ -52,6 +53,11 @@ type Server struct {
 	// created so Server stays constructible as a plain literal.
 	runSlots     chan struct{}
 	runSlotsOnce sync.Once
+
+	// BootstrapHostKeys is the persistent TOFU store for bootstrap
+	// target host keys (see bootstrap.HostKeyStore). Nil disables
+	// recording (tests); main wires the real store.
+	BootstrapHostKeys *bootstrap.HostKeyStore
 }
 
 func (s *Server) geoResolver() *geoResolver {

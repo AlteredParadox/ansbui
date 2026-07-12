@@ -84,8 +84,9 @@ func (s *Server) httpBootstrapStart(w http.ResponseWriter, r *http.Request) {
 	// reference, and a config edit mid-run can't change which
 	// privkey the post-reinstall reconnect uses.
 	ctrlPrivKey := s.Config.Snapshot().ControlPrivKeyPath
+	hostKeys := s.BootstrapHostKeys
 	job, err := s.Jobs.Start("bootstrap", summary, func(ctx context.Context, emit func(typ, text string)) error {
-		return bootstrap.Run(ctx, pool, srv, req, ctrlPrivKey, emit)
+		return bootstrap.Run(ctx, pool, srv, req, ctrlPrivKey, hostKeys, emit)
 	})
 	if err != nil {
 		// Running-cap hit: 503 so the operator's retry hits a

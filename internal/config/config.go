@@ -11,6 +11,8 @@
 package config
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -272,6 +274,14 @@ func (m *Manager) UpsertServer(in Server) (Server, error) {
 	defer m.mu.Unlock()
 	in = normaliseServer(in)
 	next := cloneStore(m.store)
+	// An empty ID is a CREATE: mint a random id under the lock.
+	// IDs used to be slugs of (name, host, user), which silently
+	// turned "two connections differing only by port / key /
+	// workDir" into an overwrite of the first one. Random ids make
+	// a submitted-ID match an unambiguous, intentional update.
+	if in.ID == "" {
+		in.ID = newServerID(next.Servers)
+	}
 	replaced := false
 	for i, s := range next.Servers {
 		if s.ID == in.ID {
@@ -291,6 +301,31 @@ func (m *Manager) UpsertServer(in Server) (Server, error) {
 		return Server{}, err
 	}
 	return in, nil
+}
+
+// newServerID mints a "srv-xxxxxxxx" id that doesn't collide with
+// any existing server. 32 random bits over a list of at most dozens
+// of entries makes the retry loop effectively one-shot; the
+// timestamp fallback only fires if crypto/rand is broken.
+func newServerID(existing []Server) string {
+	inUse := func(id string) bool {
+		for _, s := range existing {
+			if s.ID == id {
+				return true
+			}
+		}
+		return false
+	}
+	for range 8 {
+		var b [4]byte
+		if _, err := rand.Read(b[:]); err != nil {
+			break
+		}
+		if id := "srv-" + hex.EncodeToString(b[:]); !inUse(id) {
+			return id
+		}
+	}
+	return fmt.Sprintf("srv-%d", time.Now().UnixNano())
 }
 
 // DeleteServer removes a server by id.
@@ -525,33 +560,12 @@ func normaliseServer(s Server) Server {
 	s.KeyPath = strings.TrimSpace(s.KeyPath)
 	s.WorkDir = strings.TrimSpace(s.WorkDir)
 	s.Inventory = strings.TrimSpace(s.Inventory)
-	if s.ID == "" {
-		s.ID = slugify(s.Name, s.Host, s.User)
-	}
+	// ID is deliberately NOT derived here: creation ids are minted
+	// randomly in UpsertServer under the lock (see newServerID).
 	if s.Name == "" {
 		s.Name = fmt.Sprintf("%s@%s", s.User, s.Host)
 	}
 	return s
-}
-
-func slugify(parts ...string) string {
-	var buf strings.Builder
-	for _, p := range parts {
-		for _, r := range strings.ToLower(p) {
-			switch {
-			case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
-				buf.WriteRune(r)
-			case r == '-', r == '_', r == '.':
-				buf.WriteRune('-')
-			}
-		}
-		buf.WriteByte('-')
-	}
-	out := strings.Trim(buf.String(), "-")
-	if out == "" {
-		out = fmt.Sprintf("server-%d", time.Now().Unix())
-	}
-	return out
 }
 
 func cloneStore(s Store) Store {

@@ -505,7 +505,7 @@ function BootstrapView() {
           <label htmlFor="boot-hostkey" className="cm-field-label">Host key fingerprint <span className="mute">(optional)</span></label>
           <input id="boot-hostkey" className="input mono" placeholder="SHA256:… (from the provider console: ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub)" value={hostKeyFingerprint} onChange={e => setHostKeyFingerprint(e.target.value)} disabled={running}/>
           <div className="mute" style={{ fontSize: 11, marginTop: 4 }}>
-            Pins the target&rsquo;s SSH host key for first contact; a mismatch aborts the run. Left empty, the key is trusted on first use and its fingerprint is shown in the log.
+            Pins the target&rsquo;s SSH host key; a mismatch aborts before the password is sent. Left empty, the key is trusted on FIRST contact only &mdash; it&rsquo;s recorded server-side and enforced on every later bootstrap of the same address. Supply a new fingerprint here after an out-of-band reinstall to update the record.
           </div>
         </div>
 

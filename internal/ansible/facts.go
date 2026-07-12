@@ -48,7 +48,7 @@ func GatherFacts(ctx context.Context, pool *sshpool.Pool, srv config.Server, hos
 		b.WriteString(shellQuote(srv.Inventory))
 	}
 	b.WriteString(" 2>&1")
-	stdout, _, err := sshpool.Run(cli, b.String())
+	stdout, _, err := sshpool.Run(ctx, cli, b.String())
 	if err != nil {
 		return FactsResult{}, fmt.Errorf("gather facts for %s: %w (ansible output: %s)", host, err, truncate(stdout, 400))
 	}

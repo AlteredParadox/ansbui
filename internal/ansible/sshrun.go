@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"path"
 	"strings"
 	"time"
 
@@ -72,6 +73,28 @@ func readFileInWorkDir(ctx context.Context, cli *ssh.Client, workDir, rel string
 	return runRemoteScript(ctx, cli, script, "")
 }
 
+// confineParentToWorkDirScript is the WRITE-side confinement: it
+// physically resolves rel's parent directory against workDir and
+// re-attaches the final component UNRESOLVED. The full-path variant
+// (confineToWorkDirScript) would resolve a final symlink too, which
+// silently defeated the writer's `[ -L "$TGT" ]` refusal — the check
+// ran against the link's target, so an in-tree symlink was followed
+// and its target overwritten instead of being refused. With only the
+// parents resolved, containment still holds for every directory
+// component, and a symlink at the destination itself is caught by
+// the writer's refusal, restoring the documented contract.
+func confineParentToWorkDirScript(workDir, rel string) string {
+	if workDir == "" {
+		workDir = "."
+	}
+	// validateRelPath guarantees rel has no "", ".", ".." segments,
+	// so Dir/Base split cleanly ("." parent for top-level files).
+	return `WD=$(realpath -e -- ` + shellQuote(workDir) + `) || { echo "workDir not found on control node" >&2; exit 3; }; ` +
+		`TGTD=$(realpath -m -- "$WD"/` + shellQuote(path.Dir(rel)) + `) || { echo "cannot resolve target directory" >&2; exit 3; }; ` +
+		`case "$TGTD"/ in "$WD"/*) ;; *) echo "refusing: path resolves outside the configured workDir (symlinked directory?)" >&2; exit 3;; esac; ` +
+		`TGT="$TGTD"/` + shellQuote(path.Base(rel))
+}
+
 // writeFileAtomicInWorkDir overwrites rel (resolved against workDir
 // with symlink confinement — see confineToWorkDirScript) with
 // `content`, streamed over the session's stdin (so it sidesteps the
@@ -108,7 +131,10 @@ func writeFileAtomicInWorkDir(ctx context.Context, cli *ssh.Client, workDir, rel
 	// to apply implicitly via runRemoteScript.
 	ctx, cancel := context.WithTimeout(ctx, remoteWriteTimeout)
 	defer cancel()
-	script := confineToWorkDirScript(workDir, rel) + `; ` + atomicWriteScriptFor(`"$TGT"`)
+	// Parent-only confinement so the writer's own final-symlink
+	// refusal still fires on the real destination — see
+	// confineParentToWorkDirScript.
+	script := confineParentToWorkDirScript(workDir, rel) + `; ` + atomicWriteScriptFor(`"$TGT"`)
 	_, stderr, err = runRemoteScript(ctx, cli, script, content)
 	return stderr, err
 }
@@ -127,16 +153,24 @@ func atomicWriteScript(full string) string {
 // shell token for the destination — either a shellQuote'd literal
 // path or a double-quoted variable reference like `"$TGT"` set by a
 // confinement preamble.
+//
+// Durability mirrors the local config/history writers: the temp file
+// is fsync'd (coreutils `sync FILE` = fsync) before the rename, and
+// the parent directory after it, so a control-node power loss can't
+// silently revert a write the API already reported as successful.
 func atomicWriteScriptFor(q string) string {
 	return fmt.Sprintf(
 		`set -eo pipefail; trap '[ -n "${TMP:-}" ] && rm -f "$TMP"' EXIT; `+
 			`if [ -L %s ]; then echo "refusing to write through symlink" >&2; exit 2; fi; `+
 			`if [ -e %s ]; then PERM=$(stat -c '%%a' %s); else PERM=0644; fi; `+
+			`D=$(dirname -- %s); `+
 			`TMP=%s.tmp.$$; `+
 			`cat > "$TMP"; `+
 			`chmod "$PERM" "$TMP"; `+
-			`mv "$TMP" %s`,
-		q, q, q, q, q,
+			`sync -- "$TMP"; `+
+			`mv "$TMP" %s; `+
+			`sync -- "$D"`,
+		q, q, q, q, q, q,
 	)
 }
 

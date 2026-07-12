@@ -51,15 +51,19 @@ func normalizeFingerprint(s string) string {
 // recordFingerprintCallback builds the HostKeyCallback for target
 // dials: it always records the presented key's fingerprint into
 // *observed, and when expected is non-empty (an operator-supplied
-// pin, already normalized) it rejects any other key. With no pin the
-// callback accepts anything — explicit TOFU; callers must surface
-// the observed fingerprint to the operator.
-func recordFingerprintCallback(expected string, observed *string) ssh.HostKeyCallback {
+// pin or a TOFU-store record, already normalized) it rejects any
+// other key BEFORE any credential is transmitted — the callback runs
+// during key exchange, ahead of SSH auth. expectedSrc names where
+// the expectation came from so the mismatch error tells the operator
+// the right remediation. With no expectation the callback accepts
+// anything — first contact; callers must surface and record the
+// observed fingerprint.
+func recordFingerprintCallback(expected, expectedSrc string, observed *string) ssh.HostKeyCallback {
 	return func(_ string, _ net.Addr, key ssh.PublicKey) error {
 		fp := ssh.FingerprintSHA256(key)
 		*observed = fp
 		if expected != "" && fp != expected {
-			return fmt.Errorf("host key mismatch: target presented %s but the form pinned %s — possible MITM or wrong target address; verify the box's key out of band (provider console: ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub) before retrying", fp, expected)
+			return fmt.Errorf("host key mismatch: target presented %s but %s expects %s — if the box was reinstalled or replaced out of band, supply its new fingerprint in the form to update the record; otherwise treat this as a possible MITM and verify via the provider console (ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub)", fp, expectedSrc, expected)
 		}
 		return nil
 	}
@@ -69,14 +73,15 @@ func recordFingerprintCallback(expected string, observed *string) ssh.HostKeyCal
 // password auth. sudoPassword == "" means the user is root and no
 // sudo wrapping is needed; otherwise runRoot will prefix commands
 // with `sudo -S` and feed the password on stdin. expectedFP, when
-// non-empty, pins the host key (see recordFingerprintCallback).
-func dialPasswordTarget(ctx context.Context, host string, port int, user, password, sudoPassword, expectedFP string) (*targetSession, error) {
+// non-empty, pins the host key (see recordFingerprintCallback);
+// expectedSrc describes its origin for error messages.
+func dialPasswordTarget(ctx context.Context, host string, port int, user, password, sudoPassword, expectedFP, expectedSrc string) (*targetSession, error) {
 	cfg := &ssh.ClientConfig{
 		User:    user,
 		Auth:    []ssh.AuthMethod{ssh.Password(password)},
 		Timeout: 15 * time.Second,
 	}
-	return dialTargetWithConfig(ctx, host, port, sudoPassword, expectedFP, cfg)
+	return dialTargetWithConfig(ctx, host, port, sudoPassword, expectedFP, expectedSrc, cfg)
 }
 
 // dialKeyTarget opens an SSH connection to host:port as root using
@@ -102,7 +107,7 @@ func dialKeyTarget(ctx context.Context, host string, port int, privKey []byte) (
 		Auth:    []ssh.AuthMethod{ssh.PublicKeys(signer)},
 		Timeout: 15 * time.Second,
 	}
-	return dialTargetWithConfig(ctx, host, port, "", "", cfg)
+	return dialTargetWithConfig(ctx, host, port, "", "", "", cfg)
 }
 
 // dialTargetWithConfig is the shared dial path. Centralising
@@ -110,9 +115,9 @@ func dialKeyTarget(ctx context.Context, host string, port int, privKey []byte) (
 // from the auth method. It owns the HostKeyCallback (recording +
 // optional pin — see recordFingerprintCallback) so no dial can
 // accidentally ship without at least fingerprint capture.
-func dialTargetWithConfig(ctx context.Context, host string, port int, sudoPassword, expectedFP string, cfg *ssh.ClientConfig) (*targetSession, error) {
+func dialTargetWithConfig(ctx context.Context, host string, port int, sudoPassword, expectedFP, expectedSrc string, cfg *ssh.ClientConfig) (*targetSession, error) {
 	var observedFP string
-	cfg.HostKeyCallback = recordFingerprintCallback(expectedFP, &observedFP)
+	cfg.HostKeyCallback = recordFingerprintCallback(expectedFP, expectedSrc, &observedFP)
 	addr := net.JoinHostPort(host, fmt.Sprintf("%d", port))
 	dialer := net.Dialer{Timeout: cfg.Timeout}
 	conn, err := dialer.DialContext(ctx, "tcp", addr)

@@ -138,6 +138,14 @@ Optional env vars worth knowing about:
 - `ANSBUI_INSECURE_SSH=1` — skip SSH host-key verification.
   **Lab only.** MITM attacks become undetectable. The startup
   log emits a one-time warning when this is set.
+- `ANSBUI_BOOTSTRAP_REQUIRE_HOSTKEY=1` — refuse bootstrap first
+  contacts without a host key fingerprint. By default the first
+  bootstrap of a target trusts whatever key it presents, records
+  the fingerprint in `data/bootstrap_known_hosts.json`, and
+  enforces it on every later run; with this set, the operator
+  must supply the fingerprint (from the provider console) up
+  front, so even the first contact is authenticated. Recommended
+  wherever the provider exposes host keys out of band.
 
 ## 8. Backup & restore
 
@@ -148,6 +156,13 @@ Two paths matter:
 - `/opt/ansbui/data/runs.json` — run history. Grows over time;
   bounded to ~200 records by `Recorder.limit`. Lossy backup is
   fine.
+- `/opt/ansbui/data/bootstrap_known_hosts.json` — SSH host key
+  fingerprints recorded by bootstrap (TOFU store). Losing it
+  means the next bootstrap of each target silently re-trusts on
+  first use, so back it up with the rest; to deliberately reset
+  trust for one target (e.g. after an out-of-band reinstall),
+  remove its `"host:port"` entry or supply the new fingerprint
+  in the bootstrap form.
 
 A nightly tar-and-restic of `/opt/ansbui/data/` covers both. To
 restore: stop the service, replace the directory, restart.
