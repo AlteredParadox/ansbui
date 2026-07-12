@@ -156,6 +156,29 @@ code, pre, .mono { font-family: var(--font-mono); font-feature-settings: 'calt' 
 .dot.run { background: var(--info); box-shadow: 0 0 0 3px oklch(0.72 0.14 235 / 0.16); animation: pulse 1.2s infinite; }
 .dot.cancelled { background: var(--text-4); box-shadow: 0 0 0 3px oklch(0.6 0 0 / 0.16); }
 
+/* Run-status indicators (History, recent runs, playbook last-run,
+   bootstrap history) — deliberately NOT the same palette as the
+   host-health dots above. For a run, "changed" is the desired,
+   healthy outcome, so it reads GREEN; a plain no-op success is
+   BLUE (informational, nothing changed); a failure is RED. Host
+   dots keep ok=green=reachable, which is why these are a separate
+   rs-* class set rather than a remap of .dot.ok / .pill.ok.
+     rs-ok   → blue   (success, no changes)
+     rs-warn → green  (changed — the good case)
+     rs-err  → red    (failed)
+     rs-cancelled / rs-run inherit the neutral / pulsing styles */
+.pill.rs-ok { color: var(--info); background: oklch(0.72 0.14 235 / 0.14); border-color: oklch(0.72 0.14 235 / 0.3); }
+.pill.rs-warn { color: var(--ok); background: oklch(0.75 0.16 150 / 0.12); border-color: oklch(0.75 0.16 150 / 0.3); }
+.pill.rs-err { color: var(--err); background: oklch(0.66 0.21 25 / 0.14); border-color: oklch(0.66 0.21 25 / 0.3); }
+.pill.rs-cancelled { color: var(--text-2); background: oklch(0.6 0 0 / 0.12); border-color: oklch(0.6 0 0 / 0.3); }
+.pill.rs-run { color: var(--info); background: oklch(0.72 0.14 235 / 0.14); border-color: oklch(0.72 0.14 235 / 0.3); }
+
+.dot.rs-ok { background: var(--info); box-shadow: 0 0 0 3px oklch(0.72 0.14 235 / 0.16); }
+.dot.rs-warn { background: var(--ok); box-shadow: 0 0 0 3px oklch(0.75 0.16 150 / 0.16); }
+.dot.rs-err { background: var(--err); box-shadow: 0 0 0 3px oklch(0.66 0.21 25 / 0.16); }
+.dot.rs-cancelled { background: var(--text-4); box-shadow: 0 0 0 3px oklch(0.6 0 0 / 0.16); }
+.dot.rs-run { background: var(--info); box-shadow: 0 0 0 3px oklch(0.72 0.14 235 / 0.16); animation: pulse 1.2s infinite; }
+
 @keyframes pulse {
   0%, 100% { box-shadow: 0 0 0 3px oklch(0.72 0.14 235 / 0.16); }
   50% { box-shadow: 0 0 0 6px oklch(0.72 0.14 235 / 0.08); }

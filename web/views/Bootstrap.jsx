@@ -72,12 +72,14 @@ const bootDuration = (startIso, endIso) => {
   if (secs < 90) return `${Math.round(secs)}s`;
   return `${Math.round(secs / 60)}m`;
 };
-const JOB_DOT_CLASS = { succeeded: 'ok', failed: 'err', cancelled: 'warn', running: 'run' };
+// Bootstrap jobs share the run-status (rs-*) palette: a success is
+// blue (nothing "changed" in the ansible sense — the box was set
+// up), a failure red, cancelled grey, running pulses blue. Unknown
+// statuses fall back to the neutral grey.
+const JOB_DOT_CLASS = { succeeded: 'rs-ok', failed: 'rs-err', cancelled: 'rs-cancelled', running: 'rs-run' };
 
-// Pills have no 'run' variant — running jobs use the 'info' pill.
-function jobPillClass(status) {
-  const dot = JOB_DOT_CLASS[status] || 'warn';
-  return dot === 'run' ? 'info' : dot;
+function jobStatusClass(status) {
+  return JOB_DOT_CLASS[status] || 'rs-cancelled';
 }
 
 // Hover text for a recent-job row: blocked while a run is active,
@@ -641,7 +643,7 @@ function BootstrapView() {
               disabled={running}
               title={jobRowTitle(running, j.status)}
             >
-              <span className={`dot ${JOB_DOT_CLASS[j.status] || 'warn'}`}/>
+              <span className={`dot ${jobStatusClass(j.status)}`}/>
               <div className="history-row-main">
                 <div className="history-row-top">
                   <span className="mono">{j.summary?.hostname || j.summary?.ip || j.id}</span>
@@ -649,7 +651,7 @@ function BootstrapView() {
                   <span className="mute mono" style={{ marginLeft: 'auto', fontSize: 11 }}>{bootAgo(j.startedAt)}</span>
                 </div>
                 <div className="history-row-bot">
-                  <span className={`pill ${jobPillClass(j.status)}`}>{j.status}</span>
+                  <span className={`pill ${jobStatusClass(j.status)}`}>{j.status}</span>
                   {bootDuration(j.startedAt, j.endedAt) && <span className="mute mono" style={{ fontSize: 11 }}>{bootDuration(j.startedAt, j.endedAt)}</span>}
                   {j.status === 'failed' && j.error && (
                     <span className="mono" style={{ color: 'var(--err)', fontSize: 11, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>

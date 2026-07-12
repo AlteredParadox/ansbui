@@ -92,7 +92,7 @@ function HistoryView({ onOpenPlaybook, onRunPlaybook, onOpenAdhoc }) {
         <aside className="history-list card">
           {rows.map(r => (
             <button type="button" key={r.id} className={`history-row ${selectedId === r.id ? 'active' : ''}`} onClick={() => setSelectedId(r.id)}>
-              <span className={`dot ${r.status}`}/>
+              <span className={`dot rs-${r.status}`}/>
               <div className="history-row-main">
                 <div className="history-row-top">
                   <span className="mono">{r.id}</span>
@@ -100,8 +100,8 @@ function HistoryView({ onOpenPlaybook, onRunPlaybook, onOpenAdhoc }) {
                 </div>
                 <div className="history-row-mid mono mute">{r.pb}</div>
                 <div className="history-row-bot">
-                  <span className="mono" style={{ color: 'var(--ok)' }}>{r.ok} ok</span>
-                  {r.changed > 0 && <span className="mono" style={{ color: 'var(--warn)' }}>· {r.changed} ch</span>}
+                  <span className="mono" style={{ color: 'var(--info)' }}>{r.ok} ok</span>
+                  {r.changed > 0 && <span className="mono" style={{ color: 'var(--ok)' }}>· {r.changed} ch</span>}
                   {r.failed > 0 && <span className="mono" style={{ color: 'var(--err)' }}>· {r.failed} fail</span>}
                   <span className="mute mono" style={{ marginLeft: 'auto', fontSize: 11 }}>{r.duration}</span>
                 </div>
@@ -192,12 +192,12 @@ function HistoryView({ onOpenPlaybook, onRunPlaybook, onOpenAdhoc }) {
           </div>
 
           <div className="run-stats">
-            <div className="run-stat"><span className="section-title">ok</span><span className="mono" style={{ color: 'var(--ok)' }}>{run.ok}</span></div>
-            <div className="run-stat"><span className="section-title">changed</span><span className="mono" style={{ color: 'var(--warn)' }}>{run.changed}</span></div>
+            <div className="run-stat"><span className="section-title">ok</span><span className="mono" style={{ color: 'var(--info)' }}>{run.ok}</span></div>
+            <div className="run-stat"><span className="section-title">changed</span><span className="mono" style={{ color: 'var(--ok)' }}>{run.changed}</span></div>
             <div className="run-stat"><span className="section-title">failed</span><span className="mono" style={{ color: 'var(--err)' }}>{run.failed}</span></div>
             <div className="run-stat"><span className="section-title">skipped</span><span className="mono">{run.skipped}</span></div>
             <div className="run-stat"><span className="section-title">duration</span><span className="mono">{run.duration}</span></div>
-            <div className="run-stat"><span className="section-title">status</span><span className={`pill ${run.status}`}>{runStatusLabel(run.status)}</span></div>
+            <div className="run-stat"><span className="section-title">status</span><span className={`pill rs-${run.status}`}>{runStatusLabel(run.status)}</span></div>
           </div>
 
           <div className="section-title" style={{ margin: '14px 0 6px' }}>Output</div>

@@ -41,7 +41,7 @@ function PlaybookLibrary({ playbooks, selectedId, onSelect, onNew }) {
           <button type="button" key={p.id} className={`pb-lib-item ${selectedId === p.id ? 'active' : ''}`} onClick={() => onSelect(p.id)}>
             <div className="pb-lib-row-1">
               <span className="pb-lib-name mono">{p.name}</span>
-              <span className={`dot ${p.lastStatus}`} title={`last: ${p.lastStatus}`}/>
+              <span className={`dot rs-${p.lastStatus}`} title={`last: ${p.lastStatus}`}/>
             </div>
             <div className="pb-lib-row-2 mute">{p.title}</div>
             <div className="pb-lib-row-3">
@@ -419,7 +419,7 @@ function PlaybooksView({ initialId, runnerPrefill }) {
               </div>
               <div className="pb-head-stats">
                 <div><span className="section-title">Targets</span><div className="mono">{pb.targets || '—'}</div></div>
-                <div><span className="section-title">Last run</span><div>{pb.lastRun || '—'} {pb.lastStatus && <span className={`dot ${pb.lastStatus}`} style={{ marginLeft: 6 }}/>}</div></div>
+                <div><span className="section-title">Last run</span><div>{pb.lastRun || '—'} {pb.lastStatus && <span className={`dot rs-${pb.lastStatus}`} style={{ marginLeft: 6 }}/>}</div></div>
                 <div><span className="section-title">Modified</span><div className="mono" style={{ fontSize: 12 }}>{pb.modified ? new Date(pb.modified).toLocaleString() : '—'}</div></div>
               </div>
             </div>
@@ -1184,11 +1184,11 @@ function PlaybookHistoryDialog({ open, pb, onClose }) {
           <tbody>
             {runs.map(r => (
               <tr key={r.id}>
-                <td><span className={`dot ${r.status}`}/></td>
+                <td><span className={`dot rs-${r.status}`}/></td>
                 <td className="mono" style={{ fontSize: 12 }}>{r.startedAt ? new Date(r.startedAt).toLocaleString() : '—'}</td>
                 <td className="mono">{r.duration || '—'}</td>
-                <td className="mono" style={{ color: 'var(--ok)' }}>{r.ok || 0}</td>
-                <td className="mono" style={{ color: 'var(--warn)' }}>{r.changed || 0}</td>
+                <td className="mono" style={{ color: 'var(--info)' }}>{r.ok || 0}</td>
+                <td className="mono" style={{ color: 'var(--ok)' }}>{r.changed || 0}</td>
                 <td className="mono" style={{ color: r.failed ? 'var(--err)' : undefined }}>{r.failed || 0}</td>
                 <td className="mute">{r.who || ''}</td>
               </tr>

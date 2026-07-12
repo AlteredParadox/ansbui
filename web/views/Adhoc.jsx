@@ -518,7 +518,7 @@ function AdhocRecentDialog({ open, onClose, onPick }) {
         <div className="adhoc-recent-list">
           {runs.slice(0, 40).map(r => (
             <button type="button" key={r.id} className="adhoc-recent-row" onClick={() => onPick(r)}>
-              <span className={`dot ${r.status}`}/>
+              <span className={`dot rs-${r.status}`}/>
               <div className="adhoc-recent-main">
                 <div className="mono" style={{ fontSize: 12.5, fontWeight: 550 }}>
                   {r.module || '—'} <span className="mute mono" style={{ fontWeight: 400 }}>on {r.target || '—'}</span>

@@ -162,7 +162,7 @@ function DashboardView({ onNavigate, onOpenAdhoc }) {
                   // dashboard preview and a button is the
                   // semantically correct affordance.
                   <tr key={r.id}>
-                    <td><span className={`dot ${r.status}`}/></td>
+                    <td><span className={`dot rs-${r.status}`}/></td>
                     <td className="mono">
                       <button
                         type="button"
@@ -174,8 +174,8 @@ function DashboardView({ onNavigate, onOpenAdhoc }) {
                       </button>
                     </td>
                     <td className="mono">{r.pb || '—'}</td>
-                    <td className="mono" style={{ color: 'var(--ok)' }}>{r.ok}</td>
-                    <td className="mono" style={{ color: 'var(--warn)' }}>{r.changed}</td>
+                    <td className="mono" style={{ color: 'var(--info)' }}>{r.ok}</td>
+                    <td className="mono" style={{ color: 'var(--ok)' }}>{r.changed}</td>
                     <td className="mono" style={{ color: r.failed ? 'var(--err)' : undefined }}>{r.failed}</td>
                     <td className="mono">{r.duration}</td>
                     <td className="mute">{r.when}</td>
