@@ -174,7 +174,7 @@ function DashboardView({ onNavigate, onOpenAdhoc }) {
                       </button>
                     </td>
                     <td className="mono">{r.pb || '—'}</td>
-                    <td className="mono" style={{ color: 'var(--info)' }}>{r.ok}</td>
+                    <td className="mono" style={{ color: 'var(--ok)' }}>{r.ok}</td>
                     <td className="mono" style={{ color: 'var(--ok)' }}>{r.changed}</td>
                     <td className="mono" style={{ color: r.failed ? 'var(--err)' : undefined }}>{r.failed}</td>
                     <td className="mono">{r.duration}</td>

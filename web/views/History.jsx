@@ -100,7 +100,7 @@ function HistoryView({ onOpenPlaybook, onRunPlaybook, onOpenAdhoc }) {
                 </div>
                 <div className="history-row-mid mono mute">{r.pb}</div>
                 <div className="history-row-bot">
-                  <span className="mono" style={{ color: 'var(--info)' }}>{r.ok} ok</span>
+                  <span className="mono" style={{ color: 'var(--ok)' }}>{r.ok} ok</span>
                   {r.changed > 0 && <span className="mono" style={{ color: 'var(--ok)' }}>· {r.changed} ch</span>}
                   {r.failed > 0 && <span className="mono" style={{ color: 'var(--err)' }}>· {r.failed} fail</span>}
                   <span className="mute mono" style={{ marginLeft: 'auto', fontSize: 11 }}>{r.duration}</span>
@@ -192,7 +192,7 @@ function HistoryView({ onOpenPlaybook, onRunPlaybook, onOpenAdhoc }) {
           </div>
 
           <div className="run-stats">
-            <div className="run-stat"><span className="section-title">ok</span><span className="mono" style={{ color: 'var(--info)' }}>{run.ok}</span></div>
+            <div className="run-stat"><span className="section-title">ok</span><span className="mono" style={{ color: 'var(--ok)' }}>{run.ok}</span></div>
             <div className="run-stat"><span className="section-title">changed</span><span className="mono" style={{ color: 'var(--ok)' }}>{run.changed}</span></div>
             <div className="run-stat"><span className="section-title">failed</span><span className="mono" style={{ color: 'var(--err)' }}>{run.failed}</span></div>
             <div className="run-stat"><span className="section-title">skipped</span><span className="mono">{run.skipped}</span></div>

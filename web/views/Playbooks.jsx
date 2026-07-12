@@ -1187,7 +1187,7 @@ function PlaybookHistoryDialog({ open, pb, onClose }) {
                 <td><span className={`dot rs-${r.status}`}/></td>
                 <td className="mono" style={{ fontSize: 12 }}>{r.startedAt ? new Date(r.startedAt).toLocaleString() : '—'}</td>
                 <td className="mono">{r.duration || '—'}</td>
-                <td className="mono" style={{ color: 'var(--info)' }}>{r.ok || 0}</td>
+                <td className="mono" style={{ color: 'var(--ok)' }}>{r.ok || 0}</td>
                 <td className="mono" style={{ color: 'var(--ok)' }}>{r.changed || 0}</td>
                 <td className="mono" style={{ color: r.failed ? 'var(--err)' : undefined }}>{r.failed || 0}</td>
                 <td className="mute">{r.who || ''}</td>
