@@ -240,15 +240,17 @@ func runReinstall(ctx context.Context, target *targetSession, req Request, pubKe
 	emit("ok", "old system went down — reboot confirmed")
 
 	emit("meta", fmt.Sprintf("Waiting for the installer on :%d to finish writing %s %s to disk (--hold 2 parks it there for verification; timeout %s)...", reinstallSSHPort, opts.OS, opts.Version, friendly(reinstallWaitBudget)))
-	if err := runInstallerHoldStage(ctx, req.IP, privKey, netInfo, opts.OS, emit); err != nil {
+	verifiedInstall, err := runInstallerHoldStage(ctx, req.IP, privKey, netInfo, opts.OS, emit)
+	if err != nil {
 		return nil, err
 	}
 
 	emit("meta", fmt.Sprintf("Waiting for the first boot of %s %s on :%d (timeout %s)...", opts.OS, opts.Version, reinstallSSHPort, friendly(reinstallBootBudget)))
 	probe := reinstallReadyProbe{
-		expectedOS:      opts.OS,
-		expectedVersion: opts.Version,
-		oldMachineID:    oldMachineID,
+		expectedOS:             opts.OS,
+		expectedVersion:        opts.Version,
+		oldMachineID:           oldMachineID,
+		requireMachineIDChange: !verifiedInstall,
 	}
 	newTarget, err := waitForReinstallTarget(ctx, req.IP, reinstallSSHPort, privKey, probe, reinstallBootBudget, emit)
 	if err != nil {
@@ -686,23 +688,23 @@ func evalInstallerProbe(out, expectedOS string) (int, string) {
 // trigger the reboot into the new system. Failing here leaves the
 // box HELD and reachable for inspection instead of rebooting it
 // into a possibly-unreachable first boot.
-func runInstallerHoldStage(ctx context.Context, host string, privKey []byte, netInfo reinstallNetInfo, expectedOS string, emit func(typ, text string)) error {
+func runInstallerHoldStage(ctx context.Context, host string, privKey []byte, netInfo reinstallNetInfo, expectedOS string, emit func(typ, text string)) (bool, error) {
 	holdTarget, alreadyFinal, err := waitForInstallerDone(ctx, host, reinstallSSHPort, privKey, expectedOS, emit)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if alreadyFinal {
 		emit("meta", "target already answers as the final OS — skipping installer-env verification (rebooted out-of-band?)")
-		return nil
+		return false, nil
 	}
 	defer func() { _ = holdTarget.Close() }()
 	emit("ok", "installer finished writing the new system — verifying before first boot...")
 	if err := verifyInstalledSystem(ctx, holdTarget, host, netInfo, emit); err != nil {
-		return err
+		return false, err
 	}
 	emit("meta", "triggering reboot into the freshly-installed system...")
 	scheduleDetachedReboot(ctx, holdTarget, emit)
-	return nil
+	return true, nil
 }
 
 // waitForInstallerDone polls the installer env on (host:port) until
@@ -875,14 +877,16 @@ func sleepCtx(ctx context.Context, d time.Duration) error {
 //   - expectedVersion: VERSION_ID must match when present — a box
 //     that boots back into an old same-family install answers
 //     honestly here.
-//   - oldMachineID: when non-empty, /etc/machine-id must DIFFER —
-//     positive proof a reinstall happened, catching the
-//     boots-back-into-the-old-system case even when the versions
-//     coincide.
+//   - oldMachineID: when requireMachineIDChange is true and this is
+//     non-empty, /etc/machine-id must differ. This guards the fallback
+//     path where the final OS appeared before we observed and verified
+//     the held installer. Cloud images may reuse a template machine-id,
+//     so equality is not negative proof after a verified HOLD 2 stage.
 type reinstallReadyProbe struct {
-	expectedOS      string
-	expectedVersion string
-	oldMachineID    string
+	expectedOS             string
+	expectedVersion        string
+	oldMachineID           string
+	requireMachineIDChange bool
 }
 
 // reinstallProbeMarker separates the sections of
@@ -1035,7 +1039,7 @@ func evalReinstallProbe(out string, probe reinstallReadyProbe) (bool, string) {
 	if got := osReleaseField(osRelease, "VERSION_ID"); got != "" && got != strings.TrimSpace(probe.expectedVersion) {
 		return false, fmt.Sprintf("%s answered but reports version %s (want %s) — wrong system, still waiting", probe.expectedOS, got, probe.expectedVersion)
 	}
-	if probe.oldMachineID != "" && machineID != "" && machineID == probe.oldMachineID {
+	if probe.requireMachineIDChange && probe.oldMachineID != "" && machineID != "" && machineID == probe.oldMachineID {
 		return false, "reachable, but /etc/machine-id is unchanged — this is still the pre-reinstall system (did it boot back into the old install?)"
 	}
 	switch sysState {

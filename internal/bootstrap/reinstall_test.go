@@ -26,9 +26,10 @@ const (
 
 func TestEvalReinstallProbe(t *testing.T) {
 	probe := reinstallReadyProbe{
-		expectedOS:      "debian",
-		expectedVersion: "13",
-		oldMachineID:    "aaaa1111",
+		expectedOS:             "debian",
+		expectedVersion:        "13",
+		oldMachineID:           "aaaa1111",
+		requireMachineIDChange: true,
 	}
 	cases := []struct {
 		name       string
@@ -69,6 +70,12 @@ func TestEvalReinstallProbe(t *testing.T) {
 			probe:      probe,
 			wantReady:  false,
 			wantStatus: "machine-id is unchanged",
+		},
+		{
+			name:      "verified install may reuse cloud image machine-id",
+			out:       probeOut(debian13Release, "running", "aaaa1111"),
+			probe:     reinstallReadyProbe{expectedOS: "debian", expectedVersion: "13", oldMachineID: "aaaa1111"},
+			wantReady: true,
 		},
 		{
 			name:       "wrong version answered",
