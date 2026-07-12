@@ -216,16 +216,19 @@ func runReinstall(ctx context.Context, target *targetSession, req Request, pubKe
 	//
 	// stdout is a TAIL buffer (targetStdoutMax) and the script prints
 	// its Network Info block early in prep — enough later output
-	// (verbose mirrors, progress spam) could push the block out of
-	// the tail and silently disarm this check via its fail-open
-	// paths. The tee'd /tmp/reinstall.log still holds the complete
-	// transcript and the box is alive pre-reboot, so re-extract the
-	// field lines from it whenever the in-memory tail yielded none.
+	// (verbose mirrors, progress spam) could push some or all of the
+	// block out of the tail and weaken this check via its fail-open
+	// paths. The tee'd prep log still holds the complete transcript
+	// and the box is alive pre-reboot, so whenever the tail was
+	// truncated — not just when it parsed to nothing, since a partial
+	// tail can retain one address family or a stale occurrence — the
+	// complete log is re-read and preferred over whatever the tail
+	// happened to keep.
 	netInfo := parseReinstallNetInfo(stdout)
-	if len(netInfo.ips()) == 0 {
+	if outputWasTruncated(stdout) || len(netInfo.ips()) == 0 {
 		if out, _, lerr := target.runRoot(ctx, netInfoFromLogScript, ""); lerr == nil {
 			if recovered := parseReinstallNetInfo(out); len(recovered.ips()) > 0 {
-				emit("meta", "network detection was not in the buffered output tail — recovered it from /tmp/reinstall.log")
+				emit("meta", "prep output tail was incomplete — using the network detection re-read from "+reinstallPrepLog)
 				netInfo = recovered
 			}
 		}
@@ -314,6 +317,20 @@ func scheduleDetachedReboot(ctx context.Context, target *targetSession, emit fun
 	}
 }
 
+// reinstallPrepDir is the working directory for the prep phase on
+// the OLD (multi-user) system. It must NOT live in /tmp: the prep
+// runs as root and /tmp is world-writable, so predictable names
+// there let any unprivileged local user pre-create reinstall.log as
+// a symlink (root's tee then clobbers an arbitrary file) or plant an
+// attacker-owned file whose contents the netinfo recovery would
+// read. /run is root-owned tmpfs on every supported distro; the dir
+// is recreated 0700 at the top of each prep run and umask 077 keeps
+// every file inside it 0600.
+const (
+	reinstallPrepDir = "/run/ansbui-reinstall"
+	reinstallPrepLog = reinstallPrepDir + "/reinstall.log"
+)
+
 // netInfoFromLogScript re-extracts the Network Info field lines from
 // the tee'd prep log for parseReinstallNetInfo. \r progress spam is
 // flattened first; the grep is case-insensitive and unanchored (the
@@ -321,7 +338,7 @@ func scheduleDetachedReboot(ctx context.Context, target *targetSession, emit fun
 // and tail bounds the reply. The trailing `true` keeps a no-match
 // grep (exit 1) from surfacing as a step failure — recovery is
 // best-effort on top of verifyReinstallNetconf's fail-open paths.
-const netInfoFromLogScript = `tr -d '\r' < /tmp/reinstall.log 2>/dev/null | grep -aiE '(IPv4|IPv6) (Address|Gateway):' | tail -n 20; true`
+const netInfoFromLogScript = `tr -d '\r' < ` + reinstallPrepLog + ` 2>/dev/null | grep -aiE '(IPv4|IPv6) (Address|Gateway):' | tail -n 20; true`
 
 // reinstallNetInfo is the network config reinstall.sh reports
 // detecting during prep, parsed from the plain-text "Network Info"
@@ -611,10 +628,15 @@ func ensureCurlScript() string {
 // landed (a silently unapplied sed would otherwise reintroduce the
 // hole on the next upstream refactor) before bash runs the script.
 //
-// Output is teed to /tmp/reinstall.log so the prep transcript is
-// inspectable if the run fails before the reboot. It does NOT
-// survive the reinstall — the install erases the disk — so anything
-// worth keeping must come out through the emit stream.
+// Output is teed to reinstallPrepLog so the prep transcript is
+// inspectable if the run fails before the reboot, and so the
+// netinfo recovery path can re-read it. It does NOT survive the
+// reinstall — the install erases the disk — so anything worth
+// keeping must come out through the emit stream.
+//
+// Everything happens inside reinstallPrepDir (root-owned, 0700,
+// recreated per run, umask 077) — see that constant for why /tmp
+// is off limits for root-written predictable filenames.
 func reinstallPrepScript(opts ReinstallOpts, pubKey string) string {
 	// --ci forces cloud-image mode for both matrix distros. Upstream
 	// already forces it for ubuntu, but debian otherwise defaults to
@@ -641,11 +663,13 @@ func reinstallPrepScript(opts ReinstallOpts, pubKey string) string {
 		` --user root` +
 		` --ssh-port ` + fmt.Sprintf("%d", reinstallSSHPort) +
 		` --ssh-key ` + shellQuote(pubKey) +
-		` 2>&1 | tee /tmp/reinstall.log`
+		` 2>&1 | tee ` + reinstallPrepLog
 	return strings.Join([]string{
 		`set -e`,
-		`cd /tmp`,
-		`rm -f reinstall.sh`,
+		`umask 077`,
+		`rm -rf ` + reinstallPrepDir,
+		`mkdir -m 0700 ` + reinstallPrepDir,
+		`cd ` + reinstallPrepDir,
 		`if command -v curl >/dev/null 2>&1; then curl -fsSLO ` + shellQuote(reinstallScriptURL) +
 			`; elif command -v wget >/dev/null 2>&1; then wget -q ` + shellQuote(reinstallScriptURL) +
 			`; else echo "neither curl nor wget available" >&2; exit 1; fi`,

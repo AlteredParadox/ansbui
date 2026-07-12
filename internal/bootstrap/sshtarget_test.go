@@ -83,3 +83,19 @@ func TestStepContext(t *testing.T) {
 		t.Fatalf("caller-budgeted deadline not preserved: got %v ok=%v want %v", got, ok, parentDL)
 	}
 }
+
+// outputWasTruncated must recognise exactly what tailBuffer.String()
+// emits on overflow — the reinstall netinfo recovery keys off it.
+func TestOutputWasTruncated(t *testing.T) {
+	t.Parallel()
+	b := &tailBuffer{max: 4}
+	_, _ = b.Write([]byte("12345678"))
+	if !outputWasTruncated(b.String()) {
+		t.Fatalf("truncated output not detected: %q", b.String())
+	}
+	ok := &tailBuffer{max: 64}
+	_, _ = ok.Write([]byte("IPv4 Address: 1.2.3.4/24"))
+	if outputWasTruncated(ok.String()) {
+		t.Fatal("clean output misdetected as truncated")
+	}
+}

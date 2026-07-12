@@ -359,6 +359,16 @@ func (b *tailBuffer) String() string {
 	return string(b.buf)
 }
 
+// outputWasTruncated reports whether a run() stdout/stderr string
+// carries the tailBuffer truncation notice — i.e. the step's output
+// exceeded the ring buffer and only the most recent bytes survive.
+// Callers that parse positional content out of step output (e.g. the
+// reinstall netinfo block, printed early) use this to know the front
+// of the transcript is gone.
+func outputWasTruncated(s string) bool {
+	return strings.HasPrefix(s, "[output exceeded ")
+}
+
 // run executes cmd with the given stdin. Returns stdout + trimmed
 // stderr + the underlying error. Execution is bounded in time and
 // buffered output — see the constants above.
