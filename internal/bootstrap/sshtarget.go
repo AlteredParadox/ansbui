@@ -1,7 +1,6 @@
 package bootstrap
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"net"
@@ -293,17 +292,88 @@ func (s *targetSession) requireSudo(ctx context.Context) error {
 	return nil
 }
 
+// Bounds for target command execution. The target is the LEAST
+// trusted machine ansbui talks to — a fresh box that could be
+// stalled, hostile, or mid-compromise — so both the step duration
+// and the buffered output must be capped here rather than trusted
+// to callers:
+//
+//   - defaultStepTimeout applies only when the caller's ctx carries
+//     no deadline of its own (the job ctx never does). Steps with a
+//     real budget (reinstall prep's 15 minutes) keep it. Ten minutes
+//     covers the slowest legitimate unbudgeted step — apt update+
+//     install with retries on a loaded first boot — while ending a
+//     stall well before it monopolises one of the four job slots
+//     forever.
+//   - output is kept in tail-keeping ring buffers instead of failing
+//     on overflow (unlike sshpool.Run): bootstrap steps run for many
+//     minutes and their output is only used for diagnostics and
+//     tail-parsing, so aborting a 14-minute prep over verbose
+//     progress spam would hurt more than bounding what we keep. The
+//     tails are what parseReinstallNetInfo and the failure-detail
+//     helpers read anyway.
+const (
+	defaultStepTimeout  = 10 * time.Minute
+	targetStdoutMax     = 2 << 20
+	targetStderrMax     = 256 << 10
+	truncationNoticeFmt = "[output exceeded %d bytes — showing the most recent]\n"
+)
+
+// stepContext applies defaultStepTimeout unless ctx already carries
+// a deadline. Split out so the policy is unit-testable.
+func stepContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if _, ok := ctx.Deadline(); ok {
+		return context.WithCancel(ctx)
+	}
+	return context.WithTimeout(ctx, defaultStepTimeout)
+}
+
+// tailBuffer keeps the most recent max bytes written to it, dropping
+// the oldest on overflow. Not safe for concurrent use — each session
+// wires one per stream.
+type tailBuffer struct {
+	max       int
+	buf       []byte
+	truncated bool
+}
+
+func (b *tailBuffer) Write(p []byte) (int, error) {
+	n := len(p)
+	if n >= b.max {
+		b.buf = append(b.buf[:0], p[n-b.max:]...)
+		b.truncated = true
+		return n, nil
+	}
+	if drop := len(b.buf) + n - b.max; drop > 0 {
+		b.buf = append(b.buf[:0], b.buf[drop:]...)
+		b.truncated = true
+	}
+	b.buf = append(b.buf, p...)
+	return n, nil
+}
+
+func (b *tailBuffer) String() string {
+	if b.truncated {
+		return fmt.Sprintf(truncationNoticeFmt, b.max) + string(b.buf)
+	}
+	return string(b.buf)
+}
+
 // run executes cmd with the given stdin. Returns stdout + trimmed
-// stderr + the underlying error.
+// stderr + the underlying error. Execution is bounded in time and
+// buffered output — see the constants above.
 func (s *targetSession) run(ctx context.Context, cmd, stdin string) (string, string, error) {
+	ctx, cancel := stepContext(ctx)
+	defer cancel()
 	sess, err := s.client.NewSession()
 	if err != nil {
 		return "", "", fmt.Errorf("new session: %w", err)
 	}
 	defer sess.Close()
-	var so, se bytes.Buffer
-	sess.Stdout = &so
-	sess.Stderr = &se
+	so := &tailBuffer{max: targetStdoutMax}
+	se := &tailBuffer{max: targetStderrMax}
+	sess.Stdout = so
+	sess.Stderr = se
 	if stdin != "" {
 		sess.Stdin = strings.NewReader(stdin)
 	}
