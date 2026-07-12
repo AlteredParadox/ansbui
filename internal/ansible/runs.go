@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -87,7 +88,18 @@ func NewRecorder(path string) (*Recorder, error) {
 		return nil, fmt.Errorf("create runs dir: %w", err)
 	}
 	r := &Recorder{path: path, limit: 200, lastPlay: make(map[string]LastPlay)}
-	if data, err := os.ReadFile(path); err == nil {
+	data, err := os.ReadFile(path)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		// First run — start with empty history.
+	case err != nil:
+		// Any other read failure (permissions, I/O error) must NOT be
+		// treated like a missing file: the history may be perfectly
+		// intact on disk, and continuing with an empty in-memory list
+		// would let the next Append overwrite it. Fail startup so the
+		// operator fixes the underlying problem instead.
+		return nil, fmt.Errorf("read run history %s: %w", path, err)
+	default:
 		if jerr := json.Unmarshal(data, &r.runs); jerr != nil {
 			r.runs = nil
 			quarantined := fmt.Sprintf("%s.bad-%s", path, time.Now().UTC().Format("20060102T150405"))

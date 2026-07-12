@@ -142,6 +142,7 @@ code, pre, .mono { font-family: var(--font-mono); font-feature-settings: 'calt' 
 .pill.warn { color: var(--warn); background: oklch(0.82 0.14 82 / 0.14); border-color: oklch(0.82 0.14 82 / 0.3); }
 .pill.err { color: var(--err); background: oklch(0.66 0.21 25 / 0.14); border-color: oklch(0.66 0.21 25 / 0.3); }
 .pill.info { color: var(--info); background: oklch(0.72 0.14 235 / 0.14); border-color: oklch(0.72 0.14 235 / 0.3); }
+.pill.cancelled { color: var(--text-2); background: oklch(0.6 0 0 / 0.12); border-color: oklch(0.6 0 0 / 0.3); }
 
 .dot {
   width: 8px; height: 8px; border-radius: 50%;
@@ -153,6 +154,7 @@ code, pre, .mono { font-family: var(--font-mono); font-feature-settings: 'calt' 
 .dot.warn { background: var(--warn); box-shadow: 0 0 0 3px oklch(0.82 0.14 82 / 0.16); }
 .dot.err { background: var(--err); box-shadow: 0 0 0 3px oklch(0.66 0.21 25 / 0.16); }
 .dot.run { background: var(--info); box-shadow: 0 0 0 3px oklch(0.72 0.14 235 / 0.16); animation: pulse 1.2s infinite; }
+.dot.cancelled { background: var(--text-4); box-shadow: 0 0 0 3px oklch(0.6 0 0 / 0.16); }
 
 @keyframes pulse {
   0%, 100% { box-shadow: 0 0 0 3px oklch(0.72 0.14 235 / 0.16); }

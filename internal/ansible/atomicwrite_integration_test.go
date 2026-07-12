@@ -139,3 +139,71 @@ func TestAtomicWriteScript_PreservesMode(t *testing.T) {
 		t.Fatalf("mode after rewrite = %o, want 0600 (preservation broken)", st.Mode().Perm())
 	}
 }
+
+// TestConfineToWorkDir_SymlinkedDirEscape exercises the confinement
+// preamble against a local bash: a symlinked directory inside the
+// workDir that points outside the tree must be refused (exit 3) for
+// both reads and writes, while a normal in-tree path still works.
+// This is the physical-path check that validateRelPath's lexical
+// rules can't provide.
+func TestConfineToWorkDir_SymlinkedDirEscape(t *testing.T) {
+	t.Parallel()
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip(bashNotAvailable)
+	}
+
+	dir := t.TempDir()
+	work := filepath.Join(dir, "work")
+	outside := filepath.Join(dir, "outside")
+	for _, d := range []string{work, outside} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", d, err)
+		}
+	}
+	if err := os.Symlink(outside, filepath.Join(work, "linkdir")); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(outside, "secret.yml"), []byte("secret\n"), 0o644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	// Write through the symlinked dir → refused, nothing lands outside.
+	writeScript := confineToWorkDirScript(work, "linkdir/evil.yml") + `; ` + atomicWriteScriptFor(`"$TGT"`)
+	cmd := exec.Command("bash", "-c", writeScript)
+	cmd.Stdin = strings.NewReader("pwned")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 3 {
+		t.Fatalf("expected exit 3, got %v (stderr=%q)", err, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "outside the configured workDir") {
+		t.Fatalf("expected confinement message, stderr=%q", stderr.String())
+	}
+	if _, statErr := os.Stat(filepath.Join(outside, "evil.yml")); !os.IsNotExist(statErr) {
+		t.Fatal("write escaped the workDir through the symlinked directory")
+	}
+
+	// Read through the symlinked dir → refused too.
+	readScript := confineToWorkDirScript(work, "linkdir/secret.yml") + `; cat -- "$TGT"`
+	out, err := exec.Command("bash", "-c", readScript).CombinedOutput()
+	if err == nil || strings.Contains(string(out), "secret") {
+		t.Fatalf("read escaped the workDir: err=%v out=%q", err, out)
+	}
+
+	// Plain in-tree write (including a new file in a real subdir) still works.
+	if err := os.MkdirAll(filepath.Join(work, "sub"), 0o755); err != nil {
+		t.Fatalf("mkdir sub: %v", err)
+	}
+	okScript := confineToWorkDirScript(work, "sub/ok.yml") + `; ` + atomicWriteScriptFor(`"$TGT"`)
+	cmd = exec.Command("bash", "-c", okScript)
+	cmd.Stdin = strings.NewReader("fine\n")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("in-tree write failed: %v\n%s", err, out)
+	}
+	got, err := os.ReadFile(filepath.Join(work, "sub", "ok.yml"))
+	if err != nil || string(got) != "fine\n" {
+		t.Fatalf("in-tree write content: %q err=%v", got, err)
+	}
+}

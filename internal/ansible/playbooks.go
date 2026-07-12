@@ -136,9 +136,7 @@ func LoadPlaybook(ctx context.Context, pool *sshpool.Pool, srv config.Server, re
 	if err != nil {
 		return Playbook{}, err
 	}
-	full := path.Join(srv.WorkDir, rel)
-	cmd := fmt.Sprintf("cat %s", shellQuote(full))
-	stdout, stderr, err := sshpool.Run(cli, cmd)
+	stdout, stderr, err := readFileInWorkDir(ctx, cli, srv.WorkDir, rel)
 	if err != nil {
 		return Playbook{}, fmt.Errorf("read playbook %s: %w (stderr: %s)", rel, err, strings.TrimSpace(stderr))
 	}
@@ -155,7 +153,8 @@ func LoadPlaybook(ctx context.Context, pool *sshpool.Pool, srv config.Server, re
 // SavePlaybook writes YAML back to the remote file via the shared
 // atomic-write helper: stat+chmod preserves the playbook's mode,
 // the symlink guard refuses to clobber an operator-placed link,
-// and the tempfile+rename keeps a half-streamed save from
+// workDir confinement resolves symlinked parents on the control
+// node, and the tempfile+rename keeps a half-streamed save from
 // truncating the working file. YAML rides over the SSH session's
 // stdin so big playbooks don't hit MAX_ARG_STRLEN.
 func SavePlaybook(ctx context.Context, pool *sshpool.Pool, srv config.Server, rel, yaml string) error {
@@ -166,8 +165,7 @@ func SavePlaybook(ctx context.Context, pool *sshpool.Pool, srv config.Server, re
 	if err != nil {
 		return err
 	}
-	full := path.Join(srv.WorkDir, rel)
-	stderr, err := writeFileAtomicViaStdin(ctx, cli, full, yaml)
+	stderr, err := writeFileAtomicInWorkDir(ctx, cli, srv.WorkDir, rel, yaml)
 	if err != nil {
 		if stderr == "" {
 			stderr = err.Error()

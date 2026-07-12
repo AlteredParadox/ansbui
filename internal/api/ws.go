@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net/http"
 	"net/url"
@@ -86,6 +87,28 @@ type buildRecordFunc[T any] func(srv config.Server, req *T, id string) ansible.R
 // operator sees the prep result in the live log.
 type prepFunc[T any] func(ctx context.Context, pool *sshpool.Pool, srv config.Server, req *T) ansible.Event
 
+// maxConcurrentRuns bounds adhoc + playbook runs executing at once
+// across the whole process. Each run holds an SSH session, two
+// scanner goroutines, and an in-memory log buffer; without a cap a
+// scripted client (or a stuck tab retrying) could start unbounded
+// remote ansible processes. Bootstrap jobs have their own 4-job cap
+// in the jobs manager; 8 is generous for human-driven use.
+const maxConcurrentRuns = 8
+
+// acquireRunSlot reserves one of the maxConcurrentRuns slots without
+// blocking. Callers must releaseRunSlot when the run finishes.
+func (s *Server) acquireRunSlot() bool {
+	s.runSlotsOnce.Do(func() { s.runSlots = make(chan struct{}, maxConcurrentRuns) })
+	select {
+	case s.runSlots <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *Server) releaseRunSlot() { <-s.runSlots }
+
 // runWebSocket is the shared WS handler behind /api/adhoc/stream and
 // /api/playbook/stream. It owns the handshake, request decoding,
 // cancellation wiring, logging, and persistence; the only per-kind
@@ -116,6 +139,12 @@ func runWebSocket[T any](
 		_ = wsWriteJSON(conn, ansible.Event{Type: "error", Text: "decode request: " + err.Error()})
 		return
 	}
+
+	if !s.acquireRunSlot() {
+		_ = wsWriteJSON(conn, ansible.Event{Type: "error", Text: fmt.Sprintf("too many concurrent runs (limit %d) — wait for one to finish and retry", maxConcurrentRuns)})
+		return
+	}
+	defer s.releaseRunSlot()
 
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
@@ -231,9 +260,33 @@ func watchPeer(ctx context.Context, conn *websocket.Conn, cancel context.CancelF
 	}()
 }
 
+// History retention caps for a single run's persisted log. The live
+// stream is never capped — these bound what runs.json retains, since
+// every record is also held in memory for the recorder's 200-run
+// window. Line count alone was not enough: the scanner permits lines
+// up to 1 MiB, so 2000 "lines" could legally be gigabytes. Events
+// past either cap are dropped with an explicit truncation marker so
+// a shortened log can't be mistaken for a complete one.
+const (
+	maxLogEvents    = 2000
+	maxLogBytes     = 1 << 20  // total Text bytes per run record
+	maxLogEventText = 64 << 10 // per-event Text ceiling
+)
+
+// capEventText bounds one persisted event's Text, marking the cut.
+func capEventText(evt ansible.Event) ansible.Event {
+	if len(evt.Text) > maxLogEventText {
+		evt.Text = evt.Text[:maxLogEventText] + "… [event truncated for history]"
+	}
+	return evt
+}
+
 func consumeAndPersist(conn *websocket.Conn, events <-chan ansible.Event, run *ansible.RunRecord, rec *ansible.Recorder) {
 	logBuf := make([]ansible.Event, 0, 256)
 	clientAlive := true
+	cancelled := false
+	logBytes := 0
+	logTruncated := false
 	for evt := range events {
 		if clientAlive {
 			if err := wsWriteJSON(conn, evt); err != nil {
@@ -241,18 +294,29 @@ func consumeAndPersist(conn *websocket.Conn, events <-chan ansible.Event, run *a
 				clientAlive = false
 			}
 		}
-		tallyEvent(run, evt)
-		if len(logBuf) < 2000 {
-			// Redact before buffering: the live peer (above) already
-			// got the real value, but the copy destined for runs.json
-			// must not persist passwords/passphrases to disk.
-			logBuf = append(logBuf, ansible.RedactEvent(evt))
+		if evt.Type == "cancelled" {
+			cancelled = true
 		}
+		tallyEvent(run, evt)
+		if logTruncated {
+			continue
+		}
+		// Redact before buffering: the live peer (above) already
+		// got the real value, but the copy destined for runs.json
+		// must not persist passwords/passphrases to disk.
+		red := capEventText(ansible.RedactEvent(evt))
+		if len(logBuf) >= maxLogEvents || logBytes+len(red.Text) > maxLogBytes {
+			logTruncated = true
+			logBuf = append(logBuf, ansible.Event{Type: "meta", Text: fmt.Sprintf("… history log truncated (caps: %d events / %d bytes) — the remaining output was streamed live but not retained", maxLogEvents, maxLogBytes)})
+			continue
+		}
+		logBytes += len(red.Text)
+		logBuf = append(logBuf, red)
 	}
 	run.EndedAt = time.Now().UTC()
 	run.Duration = run.EndedAt.Sub(run.StartedAt).Round(time.Millisecond).String()
 	run.Log = logBuf
-	run.Status = finalStatus(run)
+	run.Status = finalStatus(run, cancelled)
 	if err := rec.Append(*run); err != nil {
 		log.Printf("persist run: %v", err)
 		// The run is still in memory (Append commits regardless), so it
@@ -298,10 +362,16 @@ func tallyEvent(run *ansible.RunRecord, evt ansible.Event) {
 	}
 }
 
-func finalStatus(run *ansible.RunRecord) string {
+// finalStatus derives the persisted status. Hard failures win;
+// otherwise a cancelled run must NOT fall through to "ok"/"warn" —
+// tasks that never ran would be indistinguishable from a clean
+// finish in History.
+func finalStatus(run *ansible.RunRecord, cancelled bool) string {
 	switch {
 	case run.Failed > 0:
 		return "err"
+	case cancelled:
+		return "cancelled"
 	case run.Changed > 0:
 		return "warn"
 	default:

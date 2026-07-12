@@ -147,11 +147,26 @@ func (m *Manager) load() error {
 }
 
 func (m *Manager) persistLocked() error {
-	data, err := json.MarshalIndent(m.store, "", "  ")
+	return m.persistAndCommitLocked(m.store)
+}
+
+// persistAndCommitLocked writes the prospective store to disk and
+// only commits it to memory once the write succeeded. Mutators build
+// their change on a clone and hand it here — mutating m.store first
+// and persisting after meant a failed write (read-only FS, disk
+// full) returned an error to the API but left the rejected state
+// live in memory, where the next unrelated mutation would silently
+// persist it. Caller must hold m.mu.
+func (m *Manager) persistAndCommitLocked(next Store) error {
+	data, err := json.MarshalIndent(next, "", "  ")
 	if err != nil {
 		return fmt.Errorf("encode config: %w", err)
 	}
-	return atomicWrite(m.path, data)
+	if err := atomicWrite(m.path, data); err != nil {
+		return err
+	}
+	m.store = next
+	return nil
 }
 
 // atomicWrite writes data to a sibling tmp file, fsyncs, then renames
@@ -256,21 +271,23 @@ func (m *Manager) UpsertServer(in Server) (Server, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	in = normaliseServer(in)
-	for i, s := range m.store.Servers {
+	next := cloneStore(m.store)
+	replaced := false
+	for i, s := range next.Servers {
 		if s.ID == in.ID {
 			in.CreatedAt = s.CreatedAt
-			m.store.Servers[i] = in
-			if err := m.persistLocked(); err != nil {
-				return Server{}, err
-			}
-			return in, nil
+			next.Servers[i] = in
+			replaced = true
+			break
 		}
 	}
-	if in.CreatedAt == "" {
-		in.CreatedAt = time.Now().UTC().Format(time.RFC3339)
+	if !replaced {
+		if in.CreatedAt == "" {
+			in.CreatedAt = time.Now().UTC().Format(time.RFC3339)
+		}
+		next.Servers = append(next.Servers, in)
 	}
-	m.store.Servers = append(m.store.Servers, in)
-	if err := m.persistLocked(); err != nil {
+	if err := m.persistAndCommitLocked(next); err != nil {
 		return Server{}, err
 	}
 	return in, nil
@@ -280,17 +297,18 @@ func (m *Manager) UpsertServer(in Server) (Server, error) {
 func (m *Manager) DeleteServer(id string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	filtered := m.store.Servers[:0]
-	for _, s := range m.store.Servers {
+	next := cloneStore(m.store)
+	filtered := next.Servers[:0]
+	for _, s := range next.Servers {
 		if s.ID != id {
 			filtered = append(filtered, s)
 		}
 	}
-	m.store.Servers = filtered
-	if m.store.ActiveServerID == id {
-		m.store.ActiveServerID = ""
+	next.Servers = filtered
+	if next.ActiveServerID == id {
+		next.ActiveServerID = ""
 	}
-	return m.persistLocked()
+	return m.persistAndCommitLocked(next)
 }
 
 // SetActive marks the given server as active.
@@ -299,8 +317,9 @@ func (m *Manager) SetActive(id string) error {
 	defer m.mu.Unlock()
 	for _, s := range m.store.Servers {
 		if s.ID == id {
-			m.store.ActiveServerID = id
-			return m.persistLocked()
+			next := cloneStore(m.store)
+			next.ActiveServerID = id
+			return m.persistAndCommitLocked(next)
 		}
 	}
 	return fmt.Errorf("unknown server id %q", id)
@@ -473,14 +492,15 @@ func (m *Manager) SetSettings(u SettingsUpdate) error {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.store.PrometheusURL = normalisedURL
+	next := cloneStore(m.store)
+	next.PrometheusURL = normalisedURL
 	if label != "" {
-		m.store.PrometheusLabel = label
+		next.PrometheusLabel = label
 	}
-	m.store.AutoGatherFacts = u.AutoGatherFacts
-	m.store.GeoIPEnabled = u.GeoIPEnabled
-	m.store.ControlPrivKeyPath = strings.TrimSpace(u.ControlPrivKeyPath)
-	return m.persistLocked()
+	next.AutoGatherFacts = u.AutoGatherFacts
+	next.GeoIPEnabled = u.GeoIPEnabled
+	next.ControlPrivKeyPath = strings.TrimSpace(u.ControlPrivKeyPath)
+	return m.persistAndCommitLocked(next)
 }
 
 func validateServer(s Server) error {

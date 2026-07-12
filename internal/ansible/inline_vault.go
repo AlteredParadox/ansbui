@@ -3,7 +3,6 @@ package ansible
 import (
 	"context"
 	"fmt"
-	"path"
 	"regexp"
 	"strings"
 
@@ -76,8 +75,8 @@ func extractCiphertext(content string, key InlineVaultKey) string {
 }
 
 // readRemoteFile reads the file at rel (relative to srv.WorkDir) over
-// SSH. No decryption — just a `cat`. Used to grab inline vault files
-// for parsing and patching.
+// SSH. No decryption — just a `cat`, confined to the workDir tree
+// (symlinked components resolved and checked on the control node).
 func readRemoteFile(ctx context.Context, pool *sshpool.Pool, srv config.Server, rel string) (string, error) {
 	if err := validateRelPath(rel); err != nil {
 		return "", err
@@ -86,9 +85,7 @@ func readRemoteFile(ctx context.Context, pool *sshpool.Pool, srv config.Server, 
 	if err != nil {
 		return "", err
 	}
-	full := path.Join(srv.WorkDir, rel)
-	cmd := fmt.Sprintf("cat %s", shellQuote(full))
-	stdout, stderr, err := sshpool.Run(cli, cmd)
+	stdout, stderr, err := readFileInWorkDir(ctx, cli, srv.WorkDir, rel)
 	if err != nil {
 		msg := strings.TrimSpace(stderr)
 		if msg == "" {
@@ -236,8 +233,7 @@ func spliceInlineSnippet(content, varName, snippet string) string {
 // stdin-streaming helper and wraps the error with the rel path so
 // the UI surfaces a useful message.
 func writeInlineVaultFile(ctx context.Context, cli *ssh.Client, srv config.Server, rel, content string) error {
-	full := path.Join(srv.WorkDir, rel)
-	stderr, err := writeFileAtomicViaStdin(ctx, cli, full, content)
+	stderr, err := writeFileAtomicInWorkDir(ctx, cli, srv.WorkDir, rel, content)
 	if err != nil {
 		if stderr == "" {
 			stderr = err.Error()

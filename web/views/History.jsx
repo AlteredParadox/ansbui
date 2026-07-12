@@ -7,7 +7,7 @@
 
 const { useState: useStateH, useEffect: useEffectH } = React;
 
-const STATUS_LABELS = { ok: 'success', warn: 'changed', err: 'failed' };
+const STATUS_LABELS = { ok: 'success', warn: 'changed', err: 'failed', cancelled: 'cancelled' };
 
 function runStatusLabel(status) {
   return STATUS_LABELS[status] || status;
@@ -80,6 +80,7 @@ function HistoryView({ onOpenPlaybook, onRunPlaybook, onOpenAdhoc }) {
             <button type="button" className={filter === 'ok' ? 'on' : ''} onClick={() => setFilter('ok')}>Success</button>
             <button type="button" className={filter === 'warn' ? 'on' : ''} onClick={() => setFilter('warn')}>Warn</button>
             <button type="button" className={filter === 'err' ? 'on' : ''} onClick={() => setFilter('err')}>Failed</button>
+            <button type="button" className={filter === 'cancelled' ? 'on' : ''} onClick={() => setFilter('cancelled')}>Cancelled</button>
           </div>
           <button type="button" className="btn small" onClick={() => exportRuns(RUNS)} disabled={RUNS.length === 0}>
             <Icon name="download" size={12}/> Export

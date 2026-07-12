@@ -19,8 +19,10 @@ export default [
     ignores: [
       'node_modules/**',
       'dist/**',
-      // Generated / vendored elsewhere — none today, but protect
-      // against later accidental glob expansion.
+      // Vendored third-party runtime (React/ReactDOM/Babel) served
+      // from the embedded bundle — minified upstream artifacts, not
+      // ours to lint.
+      'web/vendor/**',
     ],
   },
   {

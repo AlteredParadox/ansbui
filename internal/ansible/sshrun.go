@@ -18,35 +18,73 @@ import (
 // session can't hang the orchestrator forever.
 const remoteWriteTimeout = 5 * time.Minute
 
-// WriteRemoteFile is the exported entry point to the same atomic
-// write helper inline-vault edits use — the bootstrap package
-// calls it to persist a modified inventory file. Returns trimmed
-// stderr so callers can surface "refusing to write through symlink"
-// or other shell-level diagnostics. Wraps the underlying error in
-// the caller's context.
-func WriteRemoteFile(ctx context.Context, cli *ssh.Client, full, content string) error {
-	stderr, err := writeFileAtomicViaStdin(ctx, cli, full, content)
+// WriteFileInWorkDir is the exported entry point to the confined
+// atomic write helper — the bootstrap package calls it to persist a
+// modified inventory file. rel is resolved against workDir ON THE
+// CONTROL NODE (realpath) and the write is refused if the physical
+// target escapes the tree; see confineToWorkDirScript. Returns a
+// wrapped error carrying trimmed stderr so callers can surface
+// "refusing to write through symlink" and confinement diagnostics.
+func WriteFileInWorkDir(ctx context.Context, cli *ssh.Client, workDir, rel, content string) error {
+	stderr, err := writeFileAtomicInWorkDir(ctx, cli, workDir, rel, content)
 	if err != nil {
 		if stderr == "" {
 			stderr = err.Error()
 		}
-		return fmt.Errorf("write %s: %s", full, stderr)
+		return fmt.Errorf("write %s: %s", rel, stderr)
 	}
 	return nil
 }
 
-// writeFileAtomicViaStdin overwrites the absolute path `full` on the
-// remote with `content`, streamed over the session's stdin (so it
-// sidesteps the 128 KB MAX_ARG_STRLEN ceiling that any base64-in-argv
-// approach would hit). Also creates the file if it doesn't exist —
-// the playbook Import flow relies on this to write a new file under
-// the workdir.
+// confineToWorkDirScript emits the shell preamble every workDir-
+// scoped read/write runs first on the control node: resolve workDir
+// and the target to their PHYSICAL paths (realpath follows every
+// symlinked component) and refuse when the target leaves the tree.
+// On success $TGT holds the resolved absolute path for the command
+// that follows.
 //
-// Hardening:
+// validateRelPath already rejects `..` and absolute paths lexically,
+// but a symlinked intermediate directory (workDir/linkdir → /etc)
+// only escapes physically — path.Join can't see it, and the writer's
+// final-destination symlink check misses link PARENTS. realpath on
+// the control node is the ground truth. The cost is that operator
+// setups which deliberately symlink directories out of the workDir
+// tree are no longer reachable through the UI; that's the boundary
+// working as intended.
+//
+// realpath -m (target) tolerates a not-yet-existing final component
+// so imports can create new files; -e (workDir) requires the root to
+// exist. An empty workDir means "the SSH user's home" (the session
+// cwd), matching the historical path.Join behaviour.
+func confineToWorkDirScript(workDir, rel string) string {
+	if workDir == "" {
+		workDir = "."
+	}
+	return `WD=$(realpath -e -- ` + shellQuote(workDir) + `) || { echo "workDir not found on control node" >&2; exit 3; }; ` +
+		`TGT=$(realpath -m -- "$WD"/` + shellQuote(rel) + `) || { echo "cannot resolve target path" >&2; exit 3; }; ` +
+		`case "$TGT" in "$WD"/*) ;; *) echo "refusing: path resolves outside the configured workDir (symlinked directory?)" >&2; exit 3;; esac`
+}
+
+// readFileInWorkDir cats rel (confined to workDir — see
+// confineToWorkDirScript) and returns stdout + trimmed stderr.
+func readFileInWorkDir(ctx context.Context, cli *ssh.Client, workDir, rel string) (string, string, error) {
+	script := confineToWorkDirScript(workDir, rel) + `; cat -- "$TGT"`
+	return runRemoteScript(ctx, cli, script, "")
+}
+
+// writeFileAtomicInWorkDir overwrites rel (resolved against workDir
+// with symlink confinement — see confineToWorkDirScript) with
+// `content`, streamed over the session's stdin (so it sidesteps the
+// 128 KB MAX_ARG_STRLEN ceiling that any base64-in-argv approach
+// would hit). Also creates the file if it doesn't exist — the
+// playbook Import flow relies on this to write a new file under the
+// workdir.
+//
+// Hardening (see atomicWriteScriptFor for the script itself):
 //   - `set -eo pipefail` so any pipeline failure aborts before chmod/mv.
 //   - EXIT trap removes the `*.tmp.$$` if anything goes wrong midway
 //     (other than SIGKILL, which bash can't trap).
-//   - `[ -L "$FULL" ]` refuses to write when the destination is a
+//   - `[ -L "$TGT" ]` refuses to write when the destination is a
 //     symlink. rename(2) wouldn't follow the link at the destination
 //     (it would replace the symlink with a regular file), so this is
 //     defense-in-depth against an honest-mistake symlink being
@@ -63,26 +101,33 @@ func WriteRemoteFile(ctx context.Context, cli *ssh.Client, full, content string)
 // Returns trimmed stderr (empty if the run succeeded) plus any
 // underlying error from the SSH execution. Callers should wrap the
 // error with their own context (e.g. "write playbook %s: %s").
-func writeFileAtomicViaStdin(ctx context.Context, cli *ssh.Client, full, content string) (stderr string, err error) {
+func writeFileAtomicInWorkDir(ctx context.Context, cli *ssh.Client, workDir, rel, content string) (stderr string, err error) {
 	// Atomic file writes get their own bound (5 min) so a slow
 	// inventory-update step at the end of a long bootstrap
 	// run doesn't fail under the 30s vaultRunTimeout that used
 	// to apply implicitly via runRemoteScript.
 	ctx, cancel := context.WithTimeout(ctx, remoteWriteTimeout)
 	defer cancel()
-	_, stderr, err = runRemoteScript(ctx, cli, atomicWriteScript(full), content)
+	script := confineToWorkDirScript(workDir, rel) + `; ` + atomicWriteScriptFor(`"$TGT"`)
+	_, stderr, err = runRemoteScript(ctx, cli, script, content)
 	return stderr, err
 }
 
-// atomicWriteScript is the bash one-liner writeFileAtomicViaStdin
-// hands to the remote shell. Extracted so the symlink-refusal
-// branch can be exercised by integration tests against a local
-// bash without standing up a full SSH server. The contract is the
-// same on the wire: stdin = file content, exit 2 + stderr message
-// when the destination is a symlink, exit 0 + atomic rename
-// otherwise.
+// atomicWriteScript is the bash one-liner form for a literal
+// destination path. Kept so the symlink-refusal branch can be
+// exercised by integration tests against a local bash without
+// standing up a full SSH server. The contract is the same on the
+// wire: stdin = file content, exit 2 + stderr message when the
+// destination is a symlink, exit 0 + atomic rename otherwise.
 func atomicWriteScript(full string) string {
-	q := shellQuote(full)
+	return atomicWriteScriptFor(shellQuote(full))
+}
+
+// atomicWriteScriptFor builds the script body around an already-safe
+// shell token for the destination — either a shellQuote'd literal
+// path or a double-quoted variable reference like `"$TGT"` set by a
+// confinement preamble.
+func atomicWriteScriptFor(q string) string {
 	return fmt.Sprintf(
 		`set -eo pipefail; trap '[ -n "${TMP:-}" ] && rm -f "$TMP"' EXIT; `+
 			`if [ -L %s ]; then echo "refusing to write through symlink" >&2; exit 2; fi; `+

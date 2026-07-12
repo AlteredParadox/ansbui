@@ -27,6 +27,7 @@ import (
 	"fmt"
 	"net"
 	"path"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -41,16 +42,23 @@ import (
 // Request is the operator-supplied form payload for one
 // bootstrap run.
 type Request struct {
-	Provider      string        `json:"provider"`
-	IP            string        `json:"ip"`
-	Port          int           `json:"port"`
-	Username      string        `json:"username"`
-	Password      string        `json:"password"`
-	UseSudo       bool          `json:"useSudo"`
-	SudoPassword  string        `json:"sudoPassword"`
-	Hostname      string        `json:"hostname"`
-	VaultPassword string        `json:"vaultPassword"`
-	Reinstall     ReinstallOpts `json:"reinstall"`
+	Provider      string `json:"provider"`
+	IP            string `json:"ip"`
+	Port          int    `json:"port"`
+	Username      string `json:"username"`
+	Password      string `json:"password"`
+	UseSudo       bool   `json:"useSudo"`
+	SudoPassword  string `json:"sudoPassword"`
+	Hostname      string `json:"hostname"`
+	VaultPassword string `json:"vaultPassword"`
+	// HostKeyFingerprint optionally pins the target's SSH host key
+	// for the first (password) connection: a SHA256:… fingerprint
+	// obtained out of band (provider console / dashboard). When set,
+	// a target presenting any other key fails the dial instead of
+	// being trusted-on-first-use. Left empty, the observed
+	// fingerprint is emitted loudly so the operator can eyeball it.
+	HostKeyFingerprint string        `json:"hostKeyFingerprint,omitempty"`
+	Reinstall          ReinstallOpts `json:"reinstall"`
 }
 
 // Defaults: where porkbun creds live, what they're named, where
@@ -272,6 +280,9 @@ func Validate(req Request) error {
 	if err := validateVaultRequirement(req); err != nil {
 		return err
 	}
+	if err := validateHostKeyFingerprint(req.HostKeyFingerprint); err != nil {
+		return err
+	}
 	// Per-field length caps — every value here is summarised /
 	// retained in the in-memory job registry, and the redact pass
 	// on event text doesn't bound size. 256 bytes is comfortably
@@ -328,6 +339,28 @@ func validateAuthPasswords(req Request) error {
 	}
 	if strings.ContainsAny(req.VaultPassword, "\r\n") {
 		return errors.New("vault password must not contain newlines")
+	}
+	return nil
+}
+
+// hostKeyFPRE matches a normalized OpenSSH SHA256 host key
+// fingerprint: the "SHA256:" prefix plus 43 unpadded base64 chars
+// (32 hash bytes). normalizeFingerprint has already added the prefix
+// and stripped padding by the time this runs.
+var hostKeyFPRE = regexp.MustCompile(`^SHA256:[A-Za-z0-9+/]{43}$`)
+
+// validateHostKeyFingerprint accepts an empty value (no pin) or a
+// well-formed SHA256 fingerprint. Anything else — an MD5-style
+// colon-hex string, a truncated paste — is rejected at the form
+// boundary: a malformed pin would otherwise just never match and
+// surface 30 seconds later as a confusing "host key mismatch".
+func validateHostKeyFingerprint(s string) error {
+	norm := normalizeFingerprint(s)
+	if norm == "" {
+		return nil
+	}
+	if !hostKeyFPRE.MatchString(norm) {
+		return errors.New("host key fingerprint must be an OpenSSH SHA256 fingerprint (e.g. SHA256:nThbg6kXUpJWGl7E1IGOCspRomTxdCARLviKw6E5SY8) — get it via ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub on the provider console")
 	}
 	return nil
 }
@@ -688,15 +721,28 @@ func readControlNodePrivkey(ctx context.Context, pool *sshpool.Pool, srv config.
 // reachable for non-root sessions. Extracted from Run so the
 // orchestrator's cognitive-complexity budget stays under the
 // Sonar S3776 ceiling. The caller closes the returned session.
+//
+// Host-key posture: an operator-supplied fingerprint (if any) is
+// enforced inside the dial; otherwise this is trust-on-first-use,
+// and the accepted fingerprint is emitted prominently so the
+// operator can compare it against the provider console and knows
+// how to pin the next run.
 func connectAndPrecheck(ctx context.Context, req Request, emit func(string, string)) (*targetSession, error) {
 	sudoPw := ""
 	if req.UseSudo {
 		sudoPw = req.SudoPassword
 	}
-	target, err := dialPasswordTarget(ctx, req.IP, req.Port, req.Username, req.Password, sudoPw)
+	pin := normalizeFingerprint(req.HostKeyFingerprint)
+	target, err := dialPasswordTarget(ctx, req.IP, req.Port, req.Username, req.Password, sudoPw, pin)
 	if err != nil {
 		emit("fail", err.Error())
 		return nil, err
+	}
+	if pin != "" {
+		emit("ok", "host key verified against the pinned fingerprint ("+target.fingerprint()+")")
+	} else {
+		emit("meta", "⚠ host key accepted on first use (NOT verified): "+target.fingerprint()+
+			" — compare it against the provider console (ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub) and supply it as the host key fingerprint next time to pin it")
 	}
 	if err := target.requireSudo(ctx); err != nil {
 		_ = target.Close()
@@ -930,7 +976,7 @@ func updateInventoryFile(ctx context.Context, pool *sshpool.Pool, srv config.Ser
 	if bytes.Equal(updated, so.Bytes()) {
 		return nil // already present, nothing to write
 	}
-	return ansible.WriteRemoteFile(ctx, cli, full, string(updated))
+	return ansible.WriteFileInWorkDir(ctx, cli, srv.WorkDir, srv.Inventory, string(updated))
 }
 
 // generatePassword returns a 32-character base64-url-encoded

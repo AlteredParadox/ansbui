@@ -14,27 +14,69 @@ import (
 
 // targetSession is an SSH connection to a freshly-supplied server.
 // Auth is password-only (we typically don't have a key on the box
-// yet), and host-key verification is intentionally disabled — the
-// whole point of bootstrap is the operator's first contact with
-// the machine, before any key is on record.
+// yet). Host-key verification is trust-on-first-use by default —
+// bootstrap is the operator's first contact with the machine, before
+// any key is on record — but every accepted key's fingerprint is
+// recorded (hostKeyFP) so the orchestrator can surface it loudly,
+// and the operator can pin an expected fingerprint up front via the
+// form (Request.HostKeyFingerprint), which turns a mismatch into a
+// hard dial failure instead of a silent MITM.
 type targetSession struct {
 	client        *ssh.Client
 	sudoPassword  string
+	hostKeyFP     string // SHA256:… fingerprint of the accepted host key
 	stopKeepalive func()
+}
+
+// fingerprint returns the SHA256 fingerprint of the host key this
+// session accepted during its handshake.
+func (s *targetSession) fingerprint() string { return s.hostKeyFP }
+
+// normalizeFingerprint canonicalises an operator-entered SHA256 host
+// key fingerprint to the exact form ssh.FingerprintSHA256 emits:
+// surrounding space trimmed, "SHA256:" prefix ensured, base64 padding
+// stripped (OpenSSH prints it unpadded; operators often paste a
+// padded variant). Empty input stays empty (no pin).
+func normalizeFingerprint(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	if !strings.HasPrefix(s, "SHA256:") {
+		s = "SHA256:" + s
+	}
+	return strings.TrimRight(s, "=")
+}
+
+// recordFingerprintCallback builds the HostKeyCallback for target
+// dials: it always records the presented key's fingerprint into
+// *observed, and when expected is non-empty (an operator-supplied
+// pin, already normalized) it rejects any other key. With no pin the
+// callback accepts anything — explicit TOFU; callers must surface
+// the observed fingerprint to the operator.
+func recordFingerprintCallback(expected string, observed *string) ssh.HostKeyCallback {
+	return func(_ string, _ net.Addr, key ssh.PublicKey) error {
+		fp := ssh.FingerprintSHA256(key)
+		*observed = fp
+		if expected != "" && fp != expected {
+			return fmt.Errorf("host key mismatch: target presented %s but the form pinned %s — possible MITM or wrong target address; verify the box's key out of band (provider console: ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub) before retrying", fp, expected)
+		}
+		return nil
+	}
 }
 
 // dialPasswordTarget opens an SSH connection to host:port, with
 // password auth. sudoPassword == "" means the user is root and no
 // sudo wrapping is needed; otherwise runRoot will prefix commands
-// with `sudo -S` and feed the password on stdin.
-func dialPasswordTarget(ctx context.Context, host string, port int, user, password, sudoPassword string) (*targetSession, error) {
+// with `sudo -S` and feed the password on stdin. expectedFP, when
+// non-empty, pins the host key (see recordFingerprintCallback).
+func dialPasswordTarget(ctx context.Context, host string, port int, user, password, sudoPassword, expectedFP string) (*targetSession, error) {
 	cfg := &ssh.ClientConfig{
-		User:            user,
-		Auth:            []ssh.AuthMethod{ssh.Password(password)},
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(), //nolint:gosec // first-contact bootstrap — see package doc
-		Timeout:         15 * time.Second,
+		User:    user,
+		Auth:    []ssh.AuthMethod{ssh.Password(password)},
+		Timeout: 15 * time.Second,
 	}
-	return dialTargetWithConfig(ctx, host, port, sudoPassword, cfg)
+	return dialTargetWithConfig(ctx, host, port, sudoPassword, expectedFP, cfg)
 }
 
 // dialKeyTarget opens an SSH connection to host:port as root using
@@ -45,43 +87,56 @@ func dialPasswordTarget(ctx context.Context, host string, port int, user, passwo
 // rest of the bootstrap steps (ansible user setup, sshd flip if
 // not already on 4242, inventory edit) from this new session.
 //
-// Host-key verification is still disabled — the reinstall replaces
-// the host's keys, so any pin we'd cached pre-reinstall is now
-// stale, and there's no safe way to know the new fingerprint
-// without an out-of-band channel.
+// Host-key verification stays TOFU here — the reinstall replaces
+// the host's keys, so any pin from before it is stale and there's
+// no safe way to know the new fingerprint without an out-of-band
+// channel. The accepted fingerprint is recorded so runReinstall can
+// surface it once the new system is confirmed.
 func dialKeyTarget(ctx context.Context, host string, port int, privKey []byte) (*targetSession, error) {
 	signer, err := ssh.ParsePrivateKey(privKey)
 	if err != nil {
 		return nil, fmt.Errorf("parse private key: %w", err)
 	}
 	cfg := &ssh.ClientConfig{
-		User:            "root",
-		Auth:            []ssh.AuthMethod{ssh.PublicKeys(signer)},
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(), //nolint:gosec // post-reinstall — see comment above
-		Timeout:         15 * time.Second,
+		User:    "root",
+		Auth:    []ssh.AuthMethod{ssh.PublicKeys(signer)},
+		Timeout: 15 * time.Second,
 	}
-	return dialTargetWithConfig(ctx, host, port, "", cfg)
+	return dialTargetWithConfig(ctx, host, port, "", "", cfg)
 }
 
 // dialTargetWithConfig is the shared dial path. Centralising
 // keeps dialPasswordTarget and dialKeyTarget bit-identical apart
-// from the auth method.
-func dialTargetWithConfig(ctx context.Context, host string, port int, sudoPassword string, cfg *ssh.ClientConfig) (*targetSession, error) {
+// from the auth method. It owns the HostKeyCallback (recording +
+// optional pin — see recordFingerprintCallback) so no dial can
+// accidentally ship without at least fingerprint capture.
+func dialTargetWithConfig(ctx context.Context, host string, port int, sudoPassword, expectedFP string, cfg *ssh.ClientConfig) (*targetSession, error) {
+	var observedFP string
+	cfg.HostKeyCallback = recordFingerprintCallback(expectedFP, &observedFP)
 	addr := net.JoinHostPort(host, fmt.Sprintf("%d", port))
 	dialer := net.Dialer{Timeout: cfg.Timeout}
 	conn, err := dialer.DialContext(ctx, "tcp", addr)
 	if err != nil {
 		return nil, fmt.Errorf("dial %s: %w", addr, err)
 	}
+	// cfg.Timeout bounds the TCP connect but NOT the SSH handshake:
+	// ssh.NewClientConn on an already-open conn ignores it, so a peer
+	// that accepts the socket and never sends a banner would park the
+	// bootstrap job forever (no job-level timeout exists). A raw-conn
+	// deadline caps the whole handshake — mirrors sshpool.dial — and
+	// is cleared afterwards so it doesn't leak onto session I/O.
+	_ = conn.SetDeadline(time.Now().Add(cfg.Timeout))
 	sshConn, chans, reqs, err := ssh.NewClientConn(conn, addr, cfg)
 	if err != nil {
 		_ = conn.Close()
 		return nil, fmt.Errorf("ssh handshake %s: %w", addr, err)
 	}
+	_ = conn.SetDeadline(time.Time{})
 	client := ssh.NewClient(sshConn, chans, reqs)
 	return &targetSession{
 		client:        client,
 		sudoPassword:  sudoPassword,
+		hostKeyFP:     observedFP,
 		stopKeepalive: startSSHKeepalive(client),
 	}, nil
 }

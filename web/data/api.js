@@ -161,7 +161,8 @@
     'recap-fail': { t: 'recap-fail' },
     meta: { t: 'meta' },
     line: { t: 'meta' },
-    error: { t: 'fail' }
+    error: { t: 'fail' },
+    cancelled: { t: 'meta' }
   };
 
   // runCommand wraps openStream with the finish-latch, event

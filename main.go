@@ -89,6 +89,22 @@ func main() {
 		Addr:              *addr,
 		Handler:           srv.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
+		// ReadTimeout bounds the whole request read (headers + body) so
+		// a client trickling a body can't hold a goroutine open —
+		// bodies are already capped at 1 MiB, so 60s is generous.
+		// IdleTimeout reaps keep-alive connections between requests.
+		// Both stop applying to the WebSocket run streams the moment
+		// gorilla hijacks the connection; those carry their own write
+		// deadlines (ws.go) and peer-watch cancellation.
+		//
+		// WriteTimeout is deliberately absent: it starts when the
+		// request is read and covers the handler's entire execution,
+		// and several GET handlers legitimately block on SSH round
+		// trips to the control node (inventory fan-out, vault view).
+		// Response-side slow-loris protection is the reverse proxy's
+		// job in the documented deployment posture.
+		ReadTimeout: 60 * time.Second,
+		IdleTimeout: 120 * time.Second,
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

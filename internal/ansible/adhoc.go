@@ -63,6 +63,7 @@ func RunAdhoc(ctx context.Context, pool *sshpool.Pool, srv config.Server, req Ad
 	defer func() { err = recoverRunner(recover(), out, err) }()
 	cmd, berr := buildAdhocCmd(srv, req)
 	if berr != nil {
+		out <- Event{Type: "error", Text: berr.Error()}
 		return berr
 	}
 	return runStreaming(ctx, pool, srv, cmd, "", out)
@@ -89,6 +90,7 @@ func RunPlaybook(ctx context.Context, pool *sshpool.Pool, srv config.Server, req
 	}
 	cmd, berr := buildPlaybookCmd(srv, req)
 	if berr != nil {
+		out <- Event{Type: "error", Text: berr.Error()}
 		return berr
 	}
 	return runStreaming(ctx, pool, srv, cmd, req.VaultPassword, out)
@@ -116,6 +118,10 @@ func recoverRunner(r any, out chan<- Event, prev error) error {
 func runStreaming(ctx context.Context, pool *sshpool.Pool, srv config.Server, cmd, stdin string, out chan<- Event) error {
 	cli, err := pool.Client(ctx, srv)
 	if err != nil {
+		// Every early return must leave an error event behind —
+		// the persisted status is derived solely from the event
+		// stream, so a silent return here recorded the run as "ok".
+		out <- Event{Type: "error", Text: "connect to control node: " + err.Error()}
 		return err
 	}
 	out <- Event{Type: "meta", Text: fmt.Sprintf("$ %s", RedactText(cmd))}
@@ -164,10 +170,22 @@ func runStreaming(ctx context.Context, pool *sshpool.Pool, srv config.Server, cm
 	// scanLines send and panic on "send on closed channel".
 	wg.Wait()
 	close(watchDone)
-	out <- Event{Type: "done", Text: fmt.Sprintf("completed in %.1fs", time.Since(start).Seconds())}
-	if runErr != nil && !errors.Is(runErr, context.Canceled) {
+	elapsed := fmt.Sprintf("%.1fs", time.Since(start).Seconds())
+	// The terminal event decides the persisted status (ws.go's
+	// consumeAndPersist/finalStatus), so every outcome must be
+	// explicit here. Before this, a cancelled run emitted a plain
+	// "done" and a remote failure was only returned to a goroutine
+	// that logged it — both could be recorded as "ok" if no
+	// recognisable per-task failure line happened to land first.
+	if errors.Is(runErr, context.Canceled) || ctx.Err() != nil {
+		out <- Event{Type: "cancelled", Text: "run cancelled after " + elapsed}
+		return context.Canceled
+	}
+	if runErr != nil {
+		out <- Event{Type: "error", Text: fmt.Sprintf("run failed after %s: %v", elapsed, runErr)}
 		return runErr
 	}
+	out <- Event{Type: "done", Text: "completed in " + elapsed}
 	return nil
 }
 
@@ -183,16 +201,34 @@ var (
 	recapLine    = regexp.MustCompile(`^(\S+)\s*:\s+ok=(\d+)\s+changed=(\d+)\s+unreachable=(\d+)\s+failed=(\d+)`)
 )
 
-func scanLines(ctx context.Context, r io.Reader, stream string, out chan<- Event) {
+// maxScanLine caps a single output line. Lines beyond it abort that
+// stream's scan with bufio.ErrTooLong — see scanLines for why that
+// must fail the pipe rather than silently stop reading.
+const maxScanLine = 1024 * 1024
+
+func scanLines(ctx context.Context, r *io.PipeReader, stream string, out chan<- Event) {
 	sc := bufio.NewScanner(r)
-	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	sc.Buffer(make([]byte, 0, 64*1024), maxScanLine)
 	for sc.Scan() {
 		select {
 		case out <- classify(sc.Text(), stream):
 		case <-ctx.Done():
+			_ = r.CloseWithError(ctx.Err())
 			return
 		}
 	}
+	// A scan abort (line over maxScanLine, or any read error) used to
+	// just return, leaving the pipe open with nobody reading: the SSH
+	// session's next Write into it would block forever and the whole
+	// run wedged waiting for a completion that could never come.
+	// Failing the read end makes those writes error so the session
+	// unwinds, and the event tells the operator output was dropped.
+	if err := sc.Err(); err != nil {
+		_ = r.CloseWithError(fmt.Errorf("%s aborted: %w", stream, err))
+		out <- Event{Type: "error", Text: fmt.Sprintf("%s stream aborted: %v (single lines over %d bytes can't be streamed — remaining %s output is dropped)", stream, err, maxScanLine, stream)}
+		return
+	}
+	_ = r.Close()
 }
 
 func classify(line, stream string) Event {

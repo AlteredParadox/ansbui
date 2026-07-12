@@ -46,6 +46,12 @@ type Server struct {
 	// The bundle is baked in at build time and never changes at runtime,
 	// so each hash is computed once. Keyed by asset path.
 	staticETags sync.Map
+
+	// runSlots is the semaphore bounding concurrently executing
+	// adhoc/playbook runs (see maxConcurrentRuns in ws.go). Lazily
+	// created so Server stays constructible as a plain literal.
+	runSlots     chan struct{}
+	runSlotsOnce sync.Once
 }
 
 func (s *Server) geoResolver() *geoResolver {
@@ -138,6 +144,14 @@ func withOriginGuard(h http.Handler, allowedHosts map[string]struct{}) http.Hand
 		if originGuardedRequest(r) && !sameOriginCheck(r) {
 			writeError(w, http.StatusForbidden, errors.New("cross-origin request rejected"))
 			return
+		}
+		if hostGuardedRequest(r) {
+			// API responses carry operator data — inventory, settings,
+			// vault plaintext from /api/vault/view — that must never
+			// land in a browser or proxy cache. Set centrally so a new
+			// endpoint can't forget it; static assets keep their own
+			// ETag + no-cache policy from serveStaticFile.
+			w.Header().Set("Cache-Control", "no-store")
 		}
 		h.ServeHTTP(w, r)
 	})

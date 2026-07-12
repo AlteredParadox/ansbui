@@ -91,6 +91,7 @@ function BootstrapView() {
   const [sudoPassword, setSudoPassword] = useStateBoot('');
   const [hostname, setHostname] = useStateBoot('');
   const [vaultPassword, setVaultPassword] = useStateBoot('');
+  const [hostKeyFingerprint, setHostKeyFingerprint] = useStateBoot('');
   const [reinstallEnabled, setReinstallEnabled] = useStateBoot(false);
   const [reinstallOS, setReinstallOS] = useStateBoot(REINSTALL_OS_LIST[0]);
   const [reinstallVersion, setReinstallVersion] = useStateBoot(REINSTALL_MATRIX[REINSTALL_OS_LIST[0]][0]);
@@ -411,6 +412,7 @@ function BootstrapView() {
       sudoPassword: useSudo ? sudoPassword : '',
       hostname: hostname.trim(),
       vaultPassword,
+      hostKeyFingerprint: hostKeyFingerprint.trim(),
       reinstall: reinstallEnabled
         ? { enabled: true, os: reinstallOS, version: reinstallVersion }
         : { enabled: false }
@@ -490,12 +492,20 @@ function BootstrapView() {
             <label htmlFor="boot-ip" className="cm-field-label">Address</label>
             <input id="boot-ip" className="input mono" placeholder="203.0.113.42, 2001:db8::1, or host.example.com" value={ip} onChange={e => setIp(e.target.value)} disabled={running}/>
             <div className="mute" style={{ fontSize: 11, marginTop: 4 }}>
-              IPv4, IPv6, or DNS hostname. First contact &mdash; the target&rsquo;s SSH host key is not verified, so use a trusted network. Hostnames skip the porkbun DNS step.
+              IPv4, IPv6, or DNS hostname. Hostnames skip the porkbun DNS step.
             </div>
           </div>
           <div>
             <label htmlFor="boot-port" className="cm-field-label">SSH port</label>
             <input id="boot-port" className="input mono" placeholder="22" value={port} onChange={e => setPort(e.target.value)} disabled={running}/>
+          </div>
+        </div>
+
+        <div style={{ marginTop: 10 }}>
+          <label htmlFor="boot-hostkey" className="cm-field-label">Host key fingerprint <span className="mute">(optional)</span></label>
+          <input id="boot-hostkey" className="input mono" placeholder="SHA256:… (from the provider console: ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub)" value={hostKeyFingerprint} onChange={e => setHostKeyFingerprint(e.target.value)} disabled={running}/>
+          <div className="mute" style={{ fontSize: 11, marginTop: 4 }}>
+            Pins the target&rsquo;s SSH host key for first contact; a mismatch aborts the run. Left empty, the key is trusted on first use and its fingerprint is shown in the log.
           </div>
         </div>
 

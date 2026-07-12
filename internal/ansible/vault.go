@@ -209,11 +209,11 @@ func ViewVault(ctx context.Context, pool *sshpool.Pool, srv config.Server, rel, 
 	if err != nil {
 		return "", err
 	}
-	full := path.Join(srv.WorkDir, rel)
-	script := fmt.Sprintf(
-		`PASS=$(cat) && exec 3< <(printf '%%s' "$PASS") && ansible-vault view %s --vault-password-file=/dev/fd/3`,
-		shellQuote(full),
-	)
+	// The confinement preamble resolves rel against workDir on the
+	// control node ($TGT) and refuses symlinked escapes before
+	// ansible-vault touches the file.
+	script := confineToWorkDirScript(srv.WorkDir, rel) +
+		`; PASS=$(cat) && exec 3< <(printf '%s' "$PASS") && ansible-vault view "$TGT" --vault-password-file=/dev/fd/3`
 	return runVaultScript(ctx, cli, script, password)
 }
 
@@ -246,13 +246,12 @@ func WriteVault(ctx context.Context, pool *sshpool.Pool, srv config.Server, rel,
 	if err != nil {
 		return err
 	}
-	full := path.Join(srv.WorkDir, rel)
 	script := `IFS= read -r PASS && exec 3< <(printf '%s' "$PASS") && ansible-vault encrypt --output=- --vault-password-file=/dev/fd/3 -`
 	ciphertext, err := runVaultScript(ctx, cli, script, password+"\n"+plaintext)
 	if err != nil {
 		return err
 	}
-	return WriteRemoteFile(ctx, cli, full, ciphertext)
+	return WriteFileInWorkDir(ctx, cli, srv.WorkDir, rel, ciphertext)
 }
 
 // runVaultScript is a thin wrapper over runRemoteScript that prefixes

@@ -36,7 +36,12 @@ mTLS or oauth2-proxy / authelia are stronger. Whatever you pick,
 the proxy should:
 
 - terminate TLS (let's encrypt or your CA)
-- authenticate every request (including websockets — `/ws/*`)
+- authenticate every request, including the WebSocket run streams.
+  These live under `/api/`, NOT a separate `/ws/` prefix, so a proxy
+  rule that only guards `/ws/*` protects nothing. The upgrade
+  endpoints are `/api/adhoc/stream`, `/api/playbook/stream`, and
+  `/api/bootstrap/jobs/{id}/stream` — a blanket auth rule over `/`
+  (or at minimum `/api/*`) covers them all.
 - keep ansbui bound to loopback
 
 ## 3. TLS
