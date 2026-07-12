@@ -191,7 +191,11 @@ func runReinstall(ctx context.Context, target *targetSession, req Request, pubKe
 		if errors.Is(prepCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
 			return nil, fmt.Errorf("reinstall.sh prep did not finish within %s — a download from the pinned repo or the OS image mirror likely stalled; re-run bootstrap to retry", friendly(reinstallPrepBudget))
 		}
-		return nil, fmt.Errorf("reinstall.sh: %s: %w", strings.TrimSpace(stderr), err)
+		detail := reinstallFailureDetail(stdout, stderr)
+		if detail == "" {
+			return nil, fmt.Errorf("reinstall.sh failed: %w", err)
+		}
+		return nil, fmt.Errorf("reinstall.sh failed: %w\n%s", err, detail)
 	}
 	if tail := tailLines(stdout, 6); tail != "" {
 		emit("meta", "reinstall.sh tail:\n"+tail)
@@ -579,6 +583,11 @@ func reinstallPrepScript(opts ReinstallOpts, pubKey string) string {
 	runCmd := `bash reinstall.sh ` + shellQuote(opts.OS) + ` ` + shellQuote(opts.Version) +
 		` --ci` +
 		` --hold 2` +
+		// Upstream prompts for a username even when --ssh-key is set.
+		// Our SSH exec is deliberately noninteractive, so the prompt's
+		// read sees EOF and set -e exits immediately unless this is
+		// explicit. The reconnect contract below is root key auth.
+		` --user root` +
 		` --ssh-port ` + fmt.Sprintf("%d", reinstallSSHPort) +
 		` --ssh-key ` + shellQuote(pubKey) +
 		` 2>&1 | tee /tmp/reinstall.log`
@@ -1175,6 +1184,39 @@ func tailLines(s string, n int) string {
 		return strings.Join(lines, "\n")
 	}
 	return strings.Join(lines[len(lines)-n:], "\n")
+}
+
+// reinstallFailureDetail returns a bounded, terminal-safe transcript for a
+// failed prep run. reinstall.sh merges stderr into stdout before teeing its
+// log, so looking only at runRoot's stderr loses the upstream error that
+// caused pipefail to return non-zero. Outer wrapper failures (download,
+// checksum, sed) still use stderr, so retain both streams when available.
+func reinstallFailureDetail(stdout, stderr string) string {
+	const maxLines = 12
+	cleanTail := func(s string) string {
+		lines := strings.Split(s, "\n")
+		cleaned := make([]string, 0, len(lines))
+		for _, line := range lines {
+			if line = sanitizeLogLine(line); line != "" {
+				cleaned = append(cleaned, line)
+			}
+		}
+		if len(cleaned) > maxLines {
+			cleaned = cleaned[len(cleaned)-maxLines:]
+		}
+		return strings.Join(cleaned, "\n")
+	}
+
+	stdout = cleanTail(stdout)
+	stderr = cleanTail(stderr)
+	switch {
+	case stdout != "" && stderr != "":
+		return "output:\n" + stdout + "\nstderr:\n" + stderr
+	case stdout != "":
+		return "output:\n" + stdout
+	default:
+		return stderr
+	}
 }
 
 // friendly formats d as e.g. "2m 15s" — matches the cadence of

@@ -1,6 +1,7 @@
 package bootstrap
 
 import (
+	"fmt"
 	"net"
 	"strings"
 	"testing"
@@ -147,6 +148,7 @@ func TestReinstallPrepScriptPinsConfhome(t *testing.T) {
 		"confhome_cn=" + reinstallConfhomeURL,
 		"--ci",
 		"--hold 2",
+		"--user root",
 	} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("prep script missing %q:\n%s", want, script)
@@ -262,6 +264,34 @@ func TestSanitizeLogLine(t *testing.T) {
 	if got := sanitizeLogLine(long); len([]rune(got)) != 161 { // 160 + ellipsis
 		t.Fatalf("long line not truncated: %d runes", len([]rune(got)))
 	}
+}
+
+func TestReinstallFailureDetail(t *testing.T) {
+	t.Run("tee output carries upstream error", func(t *testing.T) {
+		got := reinstallFailureDetail("checking host\n\x1b[31m***** ERROR *****\x1b[0m\nimage not accessible\n", "")
+		want := "output:\nchecking host\n***** ERROR *****\nimage not accessible"
+		if got != want {
+			t.Fatalf("detail = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("outer stderr is retained", func(t *testing.T) {
+		got := reinstallFailureDetail("reinstall.sh: OK\n", "sha256 mismatch\n")
+		if !strings.Contains(got, "output:\nreinstall.sh: OK") || !strings.Contains(got, "stderr:\nsha256 mismatch") {
+			t.Fatalf("detail did not retain both streams: %q", got)
+		}
+	})
+
+	t.Run("tail is bounded", func(t *testing.T) {
+		lines := make([]string, 15)
+		for i := range lines {
+			lines[i] = fmt.Sprintf("line %d", i)
+		}
+		got := reinstallFailureDetail(strings.Join(lines, "\n"), "")
+		if strings.Contains(got, "line 2\n") || !strings.Contains(got, "line 3\n") || !strings.HasSuffix(got, "line 14") {
+			t.Fatalf("unexpected bounded tail: %q", got)
+		}
+	})
 }
 
 // Canonical detected/target addresses used across the netconf
