@@ -61,8 +61,16 @@
         setPhase('login');
       }, []);
 
+      // Set by the 401 handler below so bootstrap() knows a mid-flight
+      // 401 already routed to the login screen and its own phase
+      // transitions must stand down — including when refreshData()'s
+      // per-fetch catches swallow the throw and bootstrap would
+      // otherwise sail on to 'ready'.
+      const sawUnauthorized = useRef(false);
+
       const bootstrap = useCallback(async (options = {}) => {
         setError('');
+        sawUnauthorized.current = false;
         try {
           // Gate on auth first: when a password is set and this
           // session isn't valid, show the login screen instead of
@@ -82,9 +90,11 @@
             return;
           }
           await window.AnsbuiAPI.refreshData();
+          if (sawUnauthorized.current) return;
           setPhase('ready');
           setShowManager(options.keepManagerOpen || false);
         } catch (e) {
+          if (sawUnauthorized.current) return;
           setError(e.message);
           setPhase('picker');
           setShowManager(true);
@@ -94,7 +104,10 @@
       // A 401 from any endpoint (session expired mid-use) drops back
       // to the login screen instead of surfacing a raw error.
       useEffect(() => {
-        window.AnsbuiAPI.setUnauthorizedHandler(() => setPhase('login'));
+        window.AnsbuiAPI.setUnauthorizedHandler(() => {
+          sawUnauthorized.current = true;
+          setPhase('login');
+        });
       }, []);
 
       useEffect(() => { bootstrap(); }, [bootstrap]);
