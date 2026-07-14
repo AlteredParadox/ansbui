@@ -107,6 +107,13 @@ func migrateLegacyDir(newDir string) {
 	_ = os.Rename(legacy, newDir)
 }
 
+// DefaultPath resolves the config file location the same way New
+// does (ANSBUI_CONFIG / RELAY_CONFIG / XDG_CONFIG_HOME / ~/.config).
+// Exported so callers that need a sibling file in the config dir —
+// e.g. the auth credential — can derive it without constructing a
+// Manager or duplicating the resolution.
+func DefaultPath() (string, error) { return defaultPath() }
+
 func defaultPath() (string, error) {
 	if p := os.Getenv("ANSBUI_CONFIG"); p != "" {
 		return p, nil

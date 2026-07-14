@@ -15,8 +15,10 @@ sudo -u ansbui ANSBUI_CONFIG=/opt/ansbui/data/config.json \
 ```
 
 It prompts twice (echo off) and writes an argon2id hash to
-`auth_credential` in the config/data dir (0600). **Restart ansbui**
-for it to take effect. Rotate by re-running the command.
+`auth_credential` **next to `config.json`** (0600) — so pointing
+`ANSBUI_CONFIG` at the same file the service uses is all it needs.
+Set `ANSBUI_AUTH_CREDENTIAL` to override the location. **Restart
+ansbui** for it to take effect. Rotate by re-running the command.
 
 Once a credential exists, every `/api/*` request (reads, writes, and
 the WebSocket run streams) requires a session cookie obtained by

@@ -50,13 +50,13 @@ func main() {
 	if err != nil {
 		log.Fatalf("runs path: %v", err)
 	}
-	// The credential lives in the config/data dir (same dir as
-	// runs.json and the bootstrap TOFU store) so the systemd unit's
-	// ReadWritePaths already covers it.
-	credentialPath := filepath.Join(filepath.Dir(runsPath), "auth_credential")
+	credPath, err := credentialPath()
+	if err != nil {
+		log.Fatalf("credential path: %v", err)
+	}
 
 	if *setPassword {
-		if err := runSetPassword(credentialPath); err != nil {
+		if err := runSetPassword(credPath); err != nil {
 			log.Fatalf("set-password: %v", err)
 		}
 		return
@@ -64,7 +64,7 @@ func main() {
 
 	warnIfExposed(*addr)
 
-	credential, err := auth.LoadCredential(credentialPath)
+	credential, err := auth.LoadCredential(credPath)
 	if err != nil {
 		log.Fatalf("auth credential: %v", err)
 	}
@@ -254,4 +254,21 @@ func runsPath() (string, error) {
 		dir = filepath.Join(home, ".config")
 	}
 	return filepath.Join(dir, "ansbui", "runs.json"), nil
+}
+
+// credentialPath resolves where the auth password hash lives. It
+// sits next to config.json (it's config, not runtime state), so
+// setting ANSBUI_CONFIG alone is enough for `-set-password` — an
+// earlier version keyed off the runs dir, which meant the CLI
+// silently wrote to $HOME/.config unless ANSBUI_RUNS was also set.
+// ANSBUI_AUTH_CREDENTIAL overrides the location outright.
+func credentialPath() (string, error) {
+	if p := os.Getenv("ANSBUI_AUTH_CREDENTIAL"); p != "" {
+		return p, nil
+	}
+	cfgPath, err := config.DefaultPath()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(filepath.Dir(cfgPath), "auth_credential"), nil
 }
