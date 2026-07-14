@@ -74,39 +74,6 @@ type loginRequest struct {
 	Password string `json:"password"`
 }
 
-// Login throttle: after loginFailureThreshold consecutive failures,
-// each further attempt is delayed to loginBackoff from the last, so a
-// brute-force gets ~one guess per interval regardless of how fast the
-// attacker fires. argon2 verification is already ~100ms, but this
-// bounds the aggregate. Any success resets the counter.
-const (
-	loginFailureThreshold = 5
-	loginBackoff          = 3 * time.Second
-)
-
-// checkLoginAllowed reports whether a login attempt may proceed now,
-// per the failure throttle. Caller holds no lock.
-func (s *Server) checkLoginAllowed() bool {
-	s.loginMu.Lock()
-	defer s.loginMu.Unlock()
-	if s.loginFailures < loginFailureThreshold {
-		return true
-	}
-	return time.Now().After(s.loginNextOK)
-}
-
-// recordLoginResult updates the throttle after an attempt.
-func (s *Server) recordLoginResult(ok bool) {
-	s.loginMu.Lock()
-	defer s.loginMu.Unlock()
-	if ok {
-		s.loginFailures = 0
-		return
-	}
-	s.loginFailures++
-	s.loginNextOK = time.Now().Add(loginBackoff)
-}
-
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	if !s.authEnabled() {
 		// Nothing to log into; report success so a stale login page
@@ -114,20 +81,29 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 		return
 	}
-	if !s.checkLoginAllowed() {
-		writeError(w, http.StatusTooManyRequests, errors.New("too many failed attempts — wait a few seconds and retry"))
-		return
-	}
 	var req loginRequest
 	if !decodeJSONBody(w, r, &req) {
 		return
 	}
-	if req.Password == "" || !s.Credential.Verify(req.Password) {
-		s.recordLoginResult(false)
+	// Reserve the attempt before Argon2 runs (see loginlimit.go for
+	// why check-then-verify is not enough); every early return below
+	// the switch must go through loginLimit.end.
+	source := loginSourceKey(r)
+	switch s.loginLimit.begin(source, time.Now()) {
+	case loginBusy:
+		writeError(w, http.StatusTooManyRequests, errors.New("another login attempt is already being verified — retry in a moment"))
+		return
+	case loginThrottled:
+		writeError(w, http.StatusTooManyRequests, errors.New("too many failed attempts — wait a few seconds and retry"))
+		return
+	case loginProceed:
+	}
+	ok := req.Password != "" && s.Credential.Verify(req.Password)
+	s.loginLimit.end(source, ok, time.Now())
+	if !ok {
 		writeError(w, http.StatusUnauthorized, errors.New("invalid password"))
 		return
 	}
-	s.recordLoginResult(true)
 	token, err := s.Sessions.Create()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, errors.New("could not start session"))
@@ -168,7 +144,7 @@ func requestIsHTTPS(r *http.Request) bool {
 }
 
 func setSessionCookie(w http.ResponseWriter, r *http.Request, token string) {
-	http.SetCookie(w, &http.Cookie{
+	http.SetCookie(w, &http.Cookie{ //nolint:gosec // G124: HttpOnly+SameSite are set; Secure is conditional on the hop being HTTPS (requestIsHTTPS) so plain-HTTP LAN logins still work
 		Name:     sessionCookieName,
 		Value:    token,
 		Path:     "/",
@@ -180,7 +156,7 @@ func setSessionCookie(w http.ResponseWriter, r *http.Request, token string) {
 }
 
 func clearSessionCookie(w http.ResponseWriter, r *http.Request) {
-	http.SetCookie(w, &http.Cookie{
+	http.SetCookie(w, &http.Cookie{ //nolint:gosec // G124: same as setSessionCookie — Secure tracks requestIsHTTPS
 		Name:     sessionCookieName,
 		Value:    "",
 		Path:     "/",

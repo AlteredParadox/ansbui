@@ -140,12 +140,42 @@ func TestAuth_LoginThrottle(t *testing.T) {
 			t.Fatal("bad login should not succeed")
 		}
 	}
-	// Next attempt is throttled → 429 even with the RIGHT password.
+	// Next attempt from the same source is throttled → 429 even with
+	// the RIGHT password. (httptest requests share one RemoteAddr.)
 	r := httptest.NewRequest(http.MethodPost, "/api/login", strings.NewReader(`{"password":"pw"}`))
 	w := httptest.NewRecorder()
 	s.handleLogin(w, r)
 	if w.Code != http.StatusTooManyRequests {
 		t.Fatalf("expected 429 after %d failures, got %d", loginFailureThreshold, w.Code)
+	}
+}
+
+// The throttle is per source: an attacker extending their own
+// backoff forever cannot hold the operator's login at 429.
+func TestAuth_LoginThrottleDoesNotLockOutOtherSources(t *testing.T) {
+	s := authTestServer(t, "pw")
+	attempt := func(remoteAddr, password string) int {
+		r := httptest.NewRequest(http.MethodPost, "/api/login", strings.NewReader(`{"password":`+quote(password)+`}`))
+		r.RemoteAddr = remoteAddr
+		w := httptest.NewRecorder()
+		s.handleLogin(w, r)
+		return w.Code
+	}
+	// Attacker fails past the threshold, then keeps hammering (each
+	// throttled request must NOT extend anyone else's window).
+	for range loginFailureThreshold {
+		if code := attempt("203.0.113.7:5000", "nope"); code != http.StatusUnauthorized {
+			t.Fatalf("attacker failure = %d, want 401", code)
+		}
+	}
+	for range 3 {
+		if code := attempt("203.0.113.7:5000", "nope"); code != http.StatusTooManyRequests {
+			t.Fatalf("throttled attacker = %d, want 429", code)
+		}
+	}
+	// Operator on a different IP logs straight in.
+	if code := attempt("10.0.0.5:6000", "pw"); code != http.StatusOK {
+		t.Fatalf("operator login while attacker throttled = %d, want 200", code)
 	}
 }
 

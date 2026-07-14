@@ -69,11 +69,10 @@ type Server struct {
 	// unauthenticated (treated like Credential == nil).
 	Sessions *auth.SessionStore
 
-	// loginThrottle serialises and rate-limits failed login attempts
-	// (see checkLoginAllowed). Lazily initialised.
-	loginMu       sync.Mutex
-	loginFailures int
-	loginNextOK   time.Time
+	// loginLimit bounds concurrent Argon2 verifications and applies
+	// the per-source failure backoff (see loginlimit.go). The zero
+	// value is ready to use.
+	loginLimit loginLimiter
 }
 
 func (s *Server) geoResolver() *geoResolver {
@@ -137,15 +136,17 @@ func (s *Server) Handler() http.Handler {
 }
 
 // withOriginGuard rejects HTTP requests whose Origin header is set
-// and doesn't match the request's Host. ansbui has no auth —
-// anyone reaching the port can already drive ansible-playbook and
-// now SSH-bootstrap fresh boxes — so the deployment posture is
-// "behind a VPN / on localhost". But CORS quirks let a malicious
+// and doesn't match the request's Host. It runs regardless of login
+// state: with no password set anyone reaching the port can drive
+// ansible-playbook and SSH-bootstrap fresh boxes, and even with the
+// built-in login enabled the browser attaches the session cookie to
+// requests a malicious page triggers. CORS quirks let such an
 // origin fire-and-forget POSTs (and, for the bootstrap read
 // endpoints that surface recent target IPs/hostnames, GETs) from
 // the operator's browser if they have ansbui open in another tab.
 // This guard mirrors the same-origin check the WebSocket upgrader
-// enforces.
+// enforces. (SameSite=Strict on the session cookie independently
+// covers the cross-site cases for logged-in deployments.)
 //
 // Two layers, applied independently:
 //
