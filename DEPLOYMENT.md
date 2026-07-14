@@ -26,8 +26,22 @@ logging in through the UI. The cookie is `HttpOnly`, `SameSite=Strict`,
 and `Secure` whenever the browser reached ansbui over HTTPS (direct
 TLS or a proxy that sets `X-Forwarded-Proto: https`). Sessions are
 held in memory — a restart logs the operator out — with a 12h idle
-timeout and a 7-day absolute cap. Five consecutive failed logins trip
-a short backoff.
+timeout and a 7-day absolute cap. Five consecutive failed logins from
+one source IP trip a short backoff for that source (scoped per IP so
+a hostile client can't lock the operator out), and the number of
+concurrently-verifying login attempts is capped globally to bound
+argon2's memory cost. Behind a reverse proxy every client shares the
+proxy's IP, so the per-source throttle degrades to a global one —
+one more reason the proxy should authenticate or rate-limit login
+attempts itself in that posture.
+
+Cookie-session login is deliberately the **only** authentication
+mechanism — there is no separate API-token scheme. Non-browser
+clients (curl, scripts) hitting `/api/*` on a password-protected
+instance must either present a session cookie from `POST /api/login`
+or go through whatever auth the reverse proxy adds. Enabling a
+password will therefore break any unauthenticated API consumer you
+may have pointed at the instance — that's the point.
 
 When **no** credential is set ansbui runs UNAUTHENTICATED (the
 historical posture) and logs a loud startup warning; the reverse
@@ -35,6 +49,15 @@ proxy below is then mandatory, not optional. Built-in login and a
 proxy compose fine — defence in depth. Note the login is
 single-operator with no roles; for multi-user or SSO, terminate auth
 at the proxy (oauth2-proxy / authelia).
+
+After setting the password, add `ANSBUI_AUTH_REQUIRED=1` to the
+service environment (there's a commented line in
+`deploy/ansbui.service`). With it set, ansbui **refuses to start**
+when the credential file is missing instead of silently falling back
+to the unauthenticated posture — which is what would otherwise
+happen after an incomplete restore, an unmounted data dir, or an
+accidental delete. The variable lives in the unit file precisely so
+it survives the loss of the data dir it guards.
 
 ## 1. Loopback bind
 
@@ -199,7 +222,9 @@ Two paths matter:
 - `/opt/ansbui/data/auth_credential` — the argon2id login password
   hash (0600), present only if you ran `-set-password`. Losing it
   disables built-in auth on next start (falls back to the
-  unauthenticated posture); restore it or re-run `-set-password`.
+  unauthenticated posture) — unless `ANSBUI_AUTH_REQUIRED=1` is set
+  in the unit, in which case ansbui refuses to start until you
+  restore it or re-run `-set-password` (see section 0; recommended).
   It's a slow hash, not plaintext, but treat it as sensitive.
 
 A nightly tar-and-restic of `/opt/ansbui/data/` covers both. To

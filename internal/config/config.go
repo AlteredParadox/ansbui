@@ -468,7 +468,7 @@ func CheckPromHost(host, hostport string) error {
 		if isLoopbackHost(host) {
 			return nil
 		}
-		return fmt.Errorf("prometheus host %q is not loopback; set ANSBUI_PROM_ALLOWED_HOSTS=%s to allow it (allowlist required because ansbui has no built-in auth — see config.go normalisePromURL)", host, hostport)
+		return fmt.Errorf("prometheus host %q is not loopback; set ANSBUI_PROM_ALLOWED_HOSTS=%s to allow it (the fetch runs server-side, so the allowlist — not login state — is what bounds SSRF; see config.go normalisePromURL)", host, hostport)
 	}
 	for _, entry := range strings.Split(allow, ",") {
 		entry = strings.TrimSpace(entry)

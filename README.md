@@ -53,6 +53,8 @@ All optional. The security-relevant ones (`ANSBUI_ALLOWED_HOSTS`, `ANSBUI_PROM_A
 | `ANSBUI_ALLOWED_HOSTS` | Comma-separated `host` or `host:port` values the DNS-rebinding guard accepts in the request `Host` header. **Required when behind a reverse proxy that forwards a public hostname** (see below). The port is optional — it's stripped on both sides before matching. | Only loopback (`localhost`, `*.localhost`, IP literals) and the hostname from `-addr` are accepted. |
 | `ANSBUI_PROM_ALLOWED_HOSTS` | Comma-separated `host` or `host:port` allowed as the Prometheus scrape target (SSRF guard). | Loopback only. |
 | `ANSBUI_INSECURE_SSH` | `1` or `true` disables SSH **host-key** verification for connections ansbui itself makes (the bootstrap flow's first contact with a fresh box). Lab-only; MITM is undetectable in this mode and it logs a warning on startup. | Off — host keys are verified against `~/.ssh/known_hosts` (TOFU on first sight, hard fail on mismatch). |
+| `ANSBUI_AUTH_REQUIRED` | `1` or `true` makes ansbui **refuse to start** when no login credential file exists, instead of falling back to the unauthenticated posture. Set it in the service unit after `-set-password` so a lost data dir (bad restore, missing mount, accidental delete) can't silently expose the control plane. | Off — a missing credential file just disables built-in login (with a startup warning). |
+| `ANSBUI_AUTH_CREDENTIAL` | Path to the login password hash written by `-set-password`. | `auth_credential` next to `config.json`. |
 | `ANSBUI_CONFIG` | Path to `config.json`. | `$XDG_CONFIG_HOME/ansbui/config.json` (i.e. `~/.config/ansbui/config.json`). |
 | `ANSBUI_RUNS` | Path to `runs.json` (run history). | Alongside the config file. |
 | `SSH_AUTH_SOCK` | Standard. If set, ansbui uses the running `ssh-agent` for controller auth when no key path is configured. | — |
@@ -61,9 +63,9 @@ All optional. The security-relevant ones (`ANSBUI_ALLOWED_HOSTS`, `ANSBUI_PROM_A
 
 ### Remote access & the DNS-rebinding guard
 
-ansbui binds to loopback by default. Any exposure to another interface should go **through a reverse proxy that terminates TLS and adds auth** — ansbui has none of its own.
+ansbui binds to loopback by default. Before exposing it on another interface, put authentication in front: either the **built-in login** (`ansbui -set-password` — see [Security posture](#security-posture)) or a **reverse proxy that terminates TLS and adds auth**, or both. Note that enabling the built-in login guards **every** `/api/*` endpoint including the WebSocket run streams — cookie sessions are the only mechanism (there are no API tokens), so any unauthenticated script you had pointed at the API will need the proxy route or a session cookie from `POST /api/login`.
 
-Because there's no app-level auth, ansbui defends its API against DNS rebinding (a malicious page that re-resolves its own domain to `127.0.0.1` and then drives the local API from the victim's browser). The guard rejects any `/api/` request whose `Host` header isn't a recognised name. A reverse proxy forwards the browser's original `Host` (e.g. `ansbui.example.com`), which ansbui doesn't know about by default — so **you must list the proxy's public hostname in `ANSBUI_ALLOWED_HOSTS`**, or every API call returns `403` and the UI loads but does nothing. (The static page under `/` stays public so it still loads; only `/api/` is guarded.)
+Independent of login state, ansbui defends its API against DNS rebinding (a malicious page that re-resolves its own domain to `127.0.0.1` and then drives the local API from the victim's browser). The guard rejects any `/api/` request whose `Host` header isn't a recognised name. A reverse proxy forwards the browser's original `Host` (e.g. `ansbui.example.com`), which ansbui doesn't know about by default — so **you must list the proxy's public hostname in `ANSBUI_ALLOWED_HOSTS`**, or every API call returns `403` and the UI loads but does nothing. (The static page under `/` stays public so it still loads; only `/api/` is guarded.)
 
 Example — Caddy in front, ansbui on loopback, run under systemd:
 
