@@ -1,24 +1,55 @@
 # ansbui deployment hardening
 
-ansbui has no built-in authentication. The control plane drives
-ansible-playbook and bootstrap as the configured SSH user, so
-"can reach the port" = "can run anything ansible can". This doc
-is the checklist for getting from `go build` to a production
-deployment.
+ansbui drives ansible-playbook and bootstrap as the configured SSH
+user, so "can reach the port and get past auth" = "can run anything
+ansible can". This doc is the checklist for getting from `go build`
+to a production deployment.
+
+## 0. Built-in login (optional but recommended)
+
+ansbui ships an optional single-operator login. Set a password:
+
+```
+sudo -u ansbui ANSBUI_CONFIG=/opt/ansbui/data/config.json \
+  /opt/ansbui/bin/ansbui -set-password
+```
+
+It prompts twice (echo off) and writes an argon2id hash to
+`auth_credential` in the config/data dir (0600). **Restart ansbui**
+for it to take effect. Rotate by re-running the command.
+
+Once a credential exists, every `/api/*` request (reads, writes, and
+the WebSocket run streams) requires a session cookie obtained by
+logging in through the UI. The cookie is `HttpOnly`, `SameSite=Strict`,
+and `Secure` whenever the browser reached ansbui over HTTPS (direct
+TLS or a proxy that sets `X-Forwarded-Proto: https`). Sessions are
+held in memory — a restart logs the operator out — with a 12h idle
+timeout and a 7-day absolute cap. Five consecutive failed logins trip
+a short backoff.
+
+When **no** credential is set ansbui runs UNAUTHENTICATED (the
+historical posture) and logs a loud startup warning; the reverse
+proxy below is then mandatory, not optional. Built-in login and a
+proxy compose fine — defence in depth. Note the login is
+single-operator with no roles; for multi-user or SSO, terminate auth
+at the proxy (oauth2-proxy / authelia).
 
 ## 1. Loopback bind
 
 The default since `9003515` is `127.0.0.1:8787`. Don't override
-unless there's something authenticated in front. The startup
-warning fires when `-addr` resolves to a non-loopback host —
-treat it as a deployment-time error, not a notice.
+unless there's something authenticated in front (built-in login
+and/or a proxy). The startup warning fires when `-addr` resolves to
+a non-loopback host — treat it as a deployment-time error, not a
+notice.
 
 ## 2. Reverse proxy with auth
 
 Put ansbui behind nginx / Caddy / Apache and require auth on every
-request. ansbui's `withOriginGuard` middleware mitigates browser
-CSRF but doesn't substitute for authentication — anyone who can
-TCP-connect bypasses both.
+request — unless you've set a built-in login password (section 0)
+and accept single-operator access. ansbui's `withOriginGuard`
+middleware mitigates browser CSRF but doesn't substitute for
+authentication — anyone who can TCP-connect to an instance with no
+password set bypasses both.
 
 Caddy is the easiest:
 
@@ -163,6 +194,11 @@ Two paths matter:
   trust for one target (e.g. after an out-of-band reinstall),
   remove its `"host:port"` entry or supply the new fingerprint
   in the bootstrap form.
+- `/opt/ansbui/data/auth_credential` — the argon2id login password
+  hash (0600), present only if you ran `-set-password`. Losing it
+  disables built-in auth on next start (falls back to the
+  unauthenticated posture); restore it or re-run `-set-password`.
+  It's a slow hash, not plaintext, but treat it as sensitive.
 
 A nightly tar-and-restic of `/opt/ansbui/data/` covers both. To
 restore: stop the service, replace the directory, restart.

@@ -165,7 +165,14 @@ const ICON_RENDERERS = {
     </>
   ),
   bolt: () => <path d="M9 2 4 9h3.5l-1 5 5-7h-3.5z"/>,
-  hash: () => <path d="M6 2 4.5 14M11.5 2 10 14M2.5 6h11M2 10h11"/>
+  hash: () => <path d="M6 2 4.5 14M11.5 2 10 14M2.5 6h11M2 10h11"/>,
+  'log-out': () => (
+    <>
+      <path d="M6 2H3v12h3"/>
+      <path d="M10 11l3-3-3-3"/>
+      <path d="M13 8H6"/>
+    </>
+  )
 };
 
 const FALLBACK = () => <rect x="2" y="2" width="12" height="12" rx="2"/>;

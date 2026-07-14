@@ -28,6 +28,7 @@
   <script src="data/api.js"></script>
 
   <script type="text/babel" src="components/Icon.jsx"></script>
+  <script type="text/babel" src="views/Login.jsx"></script>
   <script type="text/babel" src="components/Shell.jsx"></script>
   <script type="text/babel" src="components/CommandPalette.jsx"></script>
   <script type="text/babel" src="components/ConnectionManager.jsx"></script>
@@ -48,10 +49,25 @@
       const [activeId, setActiveId] = useState('');
       const [showManager, setShowManager] = useState(false);
       const [error, setError] = useState('');
+      const [authEnabled, setAuthEnabled] = useState(false);
+
+      const logout = useCallback(async () => {
+        try { await window.AnsbuiAPI.logout(); } catch (e) { /* fall through to login regardless */ }
+        setPhase('login');
+      }, []);
 
       const bootstrap = useCallback(async (options = {}) => {
         setError('');
         try {
+          // Gate on auth first: when a password is set and this
+          // session isn't valid, show the login screen instead of
+          // firing data fetches that would just 401.
+          const auth = await window.AnsbuiAPI.authStatus();
+          setAuthEnabled(auth.enabled);
+          if (auth.enabled && !auth.authenticated) {
+            setPhase('login');
+            return;
+          }
           const res = await window.AnsbuiAPI.listServers();
           setServers(res.servers || []);
           setActiveId(res.activeServerId || '');
@@ -70,7 +86,17 @@
         }
       }, []);
 
+      // A 401 from any endpoint (session expired mid-use) drops back
+      // to the login screen instead of surfacing a raw error.
+      useEffect(() => {
+        window.AnsbuiAPI.setUnauthorizedHandler(() => setPhase('login'));
+      }, []);
+
       useEffect(() => { bootstrap(); }, [bootstrap]);
+
+      if (phase === 'login') {
+        return <window.LoginView onSuccess={() => { setPhase('loading'); bootstrap(); }}/>;
+      }
 
       if (phase === 'loading') {
         return (
@@ -132,7 +158,7 @@
         );
       }
 
-      return <App activeId={activeId} servers={servers} onReload={bootstrap}/>;
+      return <App activeId={activeId} servers={servers} onReload={bootstrap} authEnabled={authEnabled} onLogout={logout}/>;
     }
 
     function BrandMark() {
@@ -146,7 +172,7 @@
       );
     }
 
-    function App({ activeId, servers, onReload }) {
+    function App({ activeId, servers, onReload, authEnabled, onLogout }) {
       const [view, setViewRaw] = useState(() => {
         // Coerce the legacy 'provision' value so an operator who had
         // the Bootstrap view active when this rename shipped lands on
@@ -279,6 +305,8 @@
               breadcrumb={crumb}
               activeName={activeName}
               onManage={() => setManagerOpen(true)}
+              authEnabled={authEnabled}
+              onLogout={onLogout}
             />
             {tweaks.navLayout === 'topnav' && <window.TopLayoutNav view={view} setView={setView}/>}
             <div style={{ minHeight: 0, overflow: 'auto' }}>

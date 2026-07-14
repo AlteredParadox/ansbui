@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/AlteredParadox/ansbui/internal/ansible"
+	"github.com/AlteredParadox/ansbui/internal/auth"
 	"github.com/AlteredParadox/ansbui/internal/bootstrap"
 	"github.com/AlteredParadox/ansbui/internal/config"
 	"github.com/AlteredParadox/ansbui/internal/jobs"
@@ -58,6 +59,21 @@ type Server struct {
 	// target host keys (see bootstrap.HostKeyStore). Nil disables
 	// recording (tests); main wires the real store.
 	BootstrapHostKeys *bootstrap.HostKeyStore
+
+	// Credential is the login password hash, or nil when no password
+	// is configured. Nil puts the auth middleware in pass-through
+	// mode (unauthenticated — the historical posture, behind a proxy).
+	Credential *auth.Credential
+	// Sessions is the live-session store backing the login cookie.
+	// Always non-nil in production; a nil store makes every request
+	// unauthenticated (treated like Credential == nil).
+	Sessions *auth.SessionStore
+
+	// loginThrottle serialises and rate-limits failed login attempts
+	// (see checkLoginAllowed). Lazily initialised.
+	loginMu       sync.Mutex
+	loginFailures int
+	loginNextOK   time.Time
 }
 
 func (s *Server) geoResolver() *geoResolver {
@@ -70,6 +86,9 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /api/health", s.health)
+	mux.HandleFunc("GET /api/auth/status", s.handleAuthStatus)
+	mux.HandleFunc("POST /api/login", limitBody(smallBody, s.handleLogin))
+	mux.HandleFunc("POST /api/logout", limitBody(emptyBody, s.handleLogout))
 	mux.HandleFunc("GET /api/servers", s.listServers)
 	mux.HandleFunc("POST /api/servers", limitBody(smallBody, s.upsertServer))
 	mux.HandleFunc("DELETE /api/servers/{id}", limitBody(emptyBody, s.deleteServer))
@@ -109,7 +128,12 @@ func (s *Server) Handler() http.Handler {
 	})
 	mux.Handle("/", s.staticHandler())
 
-	return withLogging(withOriginGuard(mux, allowedHostnames(s.Addr)))
+	// Order: logging (outermost) → origin/host guard → auth → mux.
+	// The origin guard runs before auth so a cross-origin or
+	// rebinding attempt is rejected regardless of session state, and
+	// auth runs before the mux so no guarded handler executes without
+	// a session.
+	return withLogging(withOriginGuard(s.withAuth(mux), allowedHostnames(s.Addr)))
 }
 
 // withOriginGuard rejects HTTP requests whose Origin header is set
