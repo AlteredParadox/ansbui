@@ -1,6 +1,8 @@
 package auth
 
 import (
+	"bytes"
+	"encoding/base64"
 	"os"
 	"path/filepath"
 	"strings"
@@ -96,6 +98,27 @@ func TestLoadCredential_RejectsMalformedParams(t *testing.T) {
 		}
 		if _, err := LoadCredential(path); err == nil {
 			t.Fatalf("expected error for params %q", params)
+		}
+	}
+}
+
+// Salt length is bounded: this package writes 16 bytes, and
+// anything under 8 or over 64 is corruption, not a credential.
+func TestLoadCredential_RejectsBadSaltLength(t *testing.T) {
+	t.Parallel()
+	const hash = "aGFzaGhhc2hoYXNoaGFzaGhhc2hoYXNoaGFzaGhhc2g" // 32 bytes
+	for name, salt := range map[string]string{
+		"empty": "",
+		"short": base64.RawStdEncoding.EncodeToString([]byte("tiny")),
+		"huge":  base64.RawStdEncoding.EncodeToString(bytes.Repeat([]byte("s"), 65)),
+	} {
+		path := filepath.Join(t.TempDir(), "credential")
+		body := "$argon2id$v=19$m=65536,t=3,p=4$" + salt + "$" + hash
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := LoadCredential(path); err == nil {
+			t.Fatalf("expected error for %s salt", name)
 		}
 	}
 }

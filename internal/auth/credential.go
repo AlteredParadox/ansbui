@@ -119,6 +119,14 @@ func parseEncoded(encoded string) (params, error) {
 	if err != nil {
 		return p, fmt.Errorf("decode hash: %w", err)
 	}
+	// Bound the salt: this code always writes argonSaltLen (16)
+	// bytes, but accept a small range so changing that constant
+	// later doesn't orphan existing credentials. Below 8 bytes is
+	// outside the argon2 RFC's recommendation and means the stored
+	// value was never ours; an oversized one is corruption.
+	if len(salt) < 8 || len(salt) > 64 {
+		return p, fmt.Errorf("unexpected argon2 salt length %d", len(salt))
+	}
 	// Bound the hash length: it's the argon2 output key length and
 	// must round-trip through uint32 in Verify. A pathological
 	// hand-edited hash can't drive a huge allocation this way.
