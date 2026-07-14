@@ -67,21 +67,7 @@ func main() {
 		log.Fatalf("auth credential: %v", err)
 	}
 	warnIfExposed(*addr, credential != nil)
-	if credential == nil {
-		// A deployment that has opted into auth must never silently
-		// fall back to the unauthenticated posture: an incomplete
-		// restore, a missing data mount, or an accidental delete of
-		// the credential file would otherwise expose the control
-		// plane after the next restart. The env var lives in the
-		// service unit, not the data dir, so it survives exactly the
-		// failures it guards against.
-		if authRequired() {
-			log.Fatalf("ANSBUI_AUTH_REQUIRED is set but no credential exists at %s — refusing to start unauthenticated. Restore the file or re-run `ansbui -set-password`.", credPath)
-		}
-		log.Print("⚠  no login password is set — the web UI is UNAUTHENTICATED. Run `ansbui -set-password` to enable built-in auth, or keep it behind a reverse proxy / VPN.")
-	} else {
-		log.Print("built-in authentication is enabled (login required).")
-	}
+	announceAuthPosture(credential, credPath)
 
 	cfg, err := config.New()
 	if err != nil {
@@ -105,15 +91,7 @@ func main() {
 	// Persist finished bootstrap jobs into the same run history the
 	// adhoc/playbook flows write, so a failed run's log survives a
 	// restart (the jobs registry itself is memory-only).
-	jobMgr.OnFinish = func(j *jobs.Job) {
-		rec, ok := api.BootstrapRunRecord(j)
-		if !ok {
-			return
-		}
-		if err := runs.Append(rec); err != nil {
-			log.Printf("persist bootstrap run %s: %v", rec.ID, err)
-		}
-	}
+	jobMgr.OnFinish = func(j *jobs.Job) { persistBootstrapRun(runs, j) }
 	// Trusted reverse proxies for client-IP attribution (login
 	// throttling). A typo here must be loud: silently ignoring a bad
 	// entry would quietly collapse per-source throttling back into
@@ -178,20 +156,57 @@ func main() {
 
 	<-ctx.Done()
 	log.Printf("shutting down…")
+	shutdown(httpSrv, jobMgr)
+}
+
+// persistBootstrapRun appends a finished bootstrap job to the run
+// history; jobs that don't map to a run record (still running, or
+// not a bootstrap) are skipped.
+func persistBootstrapRun(runs *ansible.Recorder, j *jobs.Job) {
+	rec, ok := api.BootstrapRunRecord(j)
+	if !ok {
+		return
+	}
+	if err := runs.Append(rec); err != nil {
+		log.Printf("persist bootstrap run %s: %v", rec.ID, err)
+	}
+}
+
+// announceAuthPosture logs the startup auth state and enforces
+// ANSBUI_AUTH_REQUIRED: a deployment that has opted into auth must
+// never silently fall back to the unauthenticated posture — an
+// incomplete restore, a missing data mount, or an accidental delete
+// of the credential file would otherwise expose the control plane
+// after the next restart. The env var lives in the service unit, not
+// the data dir, so it survives exactly the failures it guards
+// against.
+func announceAuthPosture(credential *auth.Credential, credPath string) {
+	if credential != nil {
+		log.Print("built-in authentication is enabled (login required).")
+		return
+	}
+	if authRequired() {
+		log.Fatalf("ANSBUI_AUTH_REQUIRED is set but no credential exists at %s — refusing to start unauthenticated. Restore the file or re-run `ansbui -set-password`.", credPath)
+	}
+	log.Print("⚠  no login password is set — the web UI is UNAUTHENTICATED. Run `ansbui -set-password` to enable built-in auth, or keep it behind a reverse proxy / VPN.")
+}
+
+// shutdown drains the HTTP server and the job manager in parallel.
+// Sequential ordering is wrong either way:
+//   - jobMgr.Shutdown first leaves the HTTP listener accepting
+//     new POST /api/bootstrap/start requests during the wait
+//     loop, so a job sneaks in past the snapshot.
+//   - httpSrv.Shutdown first blocks until in-flight WS handlers
+//     exit, but those handlers only exit when their job's
+//     events chan closes, which only happens after jobMgr
+//     cancels them.
+//
+// Run in parallel so the listener stops accepting immediately
+// (closing the registry to new starts) while job cancellation
+// frees the WS handlers httpSrv.Shutdown is waiting on.
+func shutdown(httpSrv *http.Server, jobMgr *jobs.Manager) {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	// Run the two shutdowns in parallel. Sequential ordering is
-	// wrong either way:
-	//  - jobMgr.Shutdown first leaves the HTTP listener accepting
-	//    new POST /api/bootstrap/start requests during the wait
-	//    loop, so a job sneaks in past the snapshot.
-	//  - httpSrv.Shutdown first blocks until in-flight WS handlers
-	//    exit, but those handlers only exit when their job's
-	//    events chan closes, which only happens after jobMgr
-	//    cancels them.
-	// Run in parallel so the listener stops accepting immediately
-	// (closing the registry to new starts) while job cancellation
-	// frees the WS handlers httpSrv.Shutdown is waiting on.
 	httpDone := make(chan struct{})
 	go func() {
 		_ = httpSrv.Shutdown(shutdownCtx)
