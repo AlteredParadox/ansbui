@@ -14,6 +14,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/netip"
 	"strings"
 	"sync"
 	"time"
@@ -69,9 +70,15 @@ type Server struct {
 	// unauthenticated (treated like Credential == nil).
 	Sessions *auth.SessionStore
 
+	// TrustedProxies lists reverse proxies (from
+	// ANSBUI_TRUSTED_PROXIES, parsed by main) whose X-Forwarded-For
+	// is believed when attributing login attempts to a source IP.
+	// Empty means RemoteAddr is always the source.
+	TrustedProxies []netip.Prefix
+
 	// loginLimit bounds concurrent Argon2 verifications and applies
-	// the per-source failure backoff (see loginlimit.go). The zero
-	// value is ready to use.
+	// the per-source token-bucket backoff (see loginlimit.go). The
+	// zero value is ready to use.
 	loginLimit loginLimiter
 }
 

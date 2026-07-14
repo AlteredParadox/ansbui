@@ -88,7 +88,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	// Reserve the attempt before Argon2 runs (see loginlimit.go for
 	// why check-then-verify is not enough); every early return below
 	// the switch must go through loginLimit.end.
-	source := loginSourceKey(r)
+	source := s.loginSourceKey(r)
 	switch s.loginLimit.begin(source, time.Now()) {
 	case loginBusy:
 		writeError(w, http.StatusTooManyRequests, errors.New("another login attempt is already being verified — retry in a moment"))
@@ -99,7 +99,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	case loginProceed:
 	}
 	ok := req.Password != "" && s.Credential.Verify(req.Password)
-	s.loginLimit.end(source, ok, time.Now())
+	s.loginLimit.end(source, ok)
 	if !ok {
 		writeError(w, http.StatusUnauthorized, errors.New("invalid password"))
 		return

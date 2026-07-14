@@ -114,6 +114,15 @@ func main() {
 			log.Printf("persist bootstrap run %s: %v", rec.ID, err)
 		}
 	}
+	// Trusted reverse proxies for client-IP attribution (login
+	// throttling). A typo here must be loud: silently ignoring a bad
+	// entry would quietly collapse per-source throttling back into
+	// one shared bucket behind the proxy.
+	trustedProxies, err := api.ParseTrustedProxies(os.Getenv("ANSBUI_TRUSTED_PROXIES"))
+	if err != nil {
+		log.Fatalf("ANSBUI_TRUSTED_PROXIES: %v", err)
+	}
+
 	srv := &api.Server{
 		Config:  cfg,
 		Pool:    pool,
@@ -130,8 +139,9 @@ func main() {
 		// present so login can populate it if a password is set later
 		// without a restart... (a restart is still needed to load a
 		// newly-created credential; documented in DEPLOYMENT.md).
-		Credential: credential,
-		Sessions:   auth.NewSessionStore(),
+		Credential:     credential,
+		Sessions:       auth.NewSessionStore(),
+		TrustedProxies: trustedProxies,
 	}
 
 	httpSrv := &http.Server{

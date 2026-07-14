@@ -26,14 +26,28 @@ logging in through the UI. The cookie is `HttpOnly`, `SameSite=Strict`,
 and `Secure` whenever the browser reached ansbui over HTTPS (direct
 TLS or a proxy that sets `X-Forwarded-Proto: https`). Sessions are
 held in memory — a restart logs the operator out — with a 12h idle
-timeout and a 7-day absolute cap. Five consecutive failed logins from
-one source IP trip a short backoff for that source (scoped per IP so
-a hostile client can't lock the operator out), and the number of
-concurrently-verifying login attempts is capped globally to bound
-argon2's memory cost. Behind a reverse proxy every client shares the
-proxy's IP, so the per-source throttle degrades to a global one —
-one more reason the proxy should authenticate or rate-limit login
-attempts itself in that posture.
+timeout and a 7-day absolute cap.
+
+Failed logins are throttled with a per-source-IP token bucket: five
+attempts of burst, one refilling every three seconds. Recovery is
+purely time-based — throttled requests consume nothing and failures
+never push it out — so a hostile client can't extend a lockout, and
+the bucket is scoped per IP so it can't lock the operator out either.
+The number of concurrently-verifying attempts is also capped globally
+to bound argon2's memory cost.
+
+Behind a reverse proxy every client reaches ansbui from the proxy's
+IP. Set `ANSBUI_TRUSTED_PROXIES` to the proxy's address(es) (IPs or
+CIDRs, e.g. `127.0.0.1` for a same-host Caddy) and ansbui attributes
+login attempts to the rightmost non-trusted `X-Forwarded-For` hop —
+the address the proxy itself recorded, which a client can't forge.
+Without it, all proxied clients share one bucket: an attacker still
+can't extend the lockout (see above), but does race the operator for
+each refilled token — so either set the variable or rate-limit logins
+at the proxy. `X-Forwarded-For` is never believed unless the
+connection comes from a listed proxy. Clients behind one NAT
+genuinely share an address and therefore a bucket; that contention
+has no in-band fix.
 
 Cookie-session login is deliberately the **only** authentication
 mechanism — there is no separate API-token scheme. Non-browser
@@ -92,6 +106,9 @@ mTLS or oauth2-proxy / authelia are stronger. Whatever you pick,
 the proxy should:
 
 - terminate TLS (let's encrypt or your CA)
+- be listed in `ANSBUI_TRUSTED_PROXIES` (and forward
+  `X-Forwarded-For`, which nginx/Caddy do by default) so login
+  throttling sees real client IPs instead of one shared proxy IP
 - authenticate every request, including the WebSocket run streams.
   These live under `/api/`, NOT a separate `/ws/` prefix, so a proxy
   rule that only guards `/ws/*` protects nothing. The upgrade

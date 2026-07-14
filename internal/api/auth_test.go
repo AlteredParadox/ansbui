@@ -135,7 +135,7 @@ func TestAuth_DisabledIsPassThrough(t *testing.T) {
 // The failure throttle kicks in after the threshold.
 func TestAuth_LoginThrottle(t *testing.T) {
 	s := authTestServer(t, "pw")
-	for range loginFailureThreshold {
+	for range loginBurst {
 		if c := login(t, s, "nope"); c != nil {
 			t.Fatal("bad login should not succeed")
 		}
@@ -146,7 +146,7 @@ func TestAuth_LoginThrottle(t *testing.T) {
 	w := httptest.NewRecorder()
 	s.handleLogin(w, r)
 	if w.Code != http.StatusTooManyRequests {
-		t.Fatalf("expected 429 after %d failures, got %d", loginFailureThreshold, w.Code)
+		t.Fatalf("expected 429 after %d failures, got %d", loginBurst, w.Code)
 	}
 }
 
@@ -163,7 +163,7 @@ func TestAuth_LoginThrottleDoesNotLockOutOtherSources(t *testing.T) {
 	}
 	// Attacker fails past the threshold, then keeps hammering (each
 	// throttled request must NOT extend anyone else's window).
-	for range loginFailureThreshold {
+	for range loginBurst {
 		if code := attempt("203.0.113.7:5000", "nope"); code != http.StatusUnauthorized {
 			t.Fatalf("attacker failure = %d, want 401", code)
 		}
