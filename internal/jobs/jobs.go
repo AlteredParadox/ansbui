@@ -27,9 +27,10 @@ import (
 
 // ErrTooManyRunning is returned by Start when MaxRunning concurrent
 // jobs are already in flight. Operators retry once one finishes —
-// the cap prevents an unauthenticated attacker (no auth in the
-// API yet) from spawning enough orchestrator goroutines to exhaust
-// the SSH pool / control-node connections.
+// the cap prevents anyone who can reach the API (it runs
+// unauthenticated until a login password is set) from spawning
+// enough orchestrator goroutines to exhaust the SSH pool /
+// control-node connections.
 var ErrTooManyRunning = errors.New("too many concurrent jobs — try again when one finishes")
 
 // Default caps for the in-memory registry. Bootstrap is rare

@@ -155,7 +155,7 @@ function Sidebar({ view, setView, collapsed }) {
   );
 }
 
-function TopNav({ onOpenPalette, breadcrumb, activeName, onManage }) {
+function TopNav({ onOpenPalette, breadcrumb, activeName, onManage, authEnabled, onLogout }) {
   const lastIndex = breadcrumb.length - 1;
   return (
     <header className="topnav">
@@ -180,6 +180,11 @@ function TopNav({ onOpenPalette, breadcrumb, activeName, onManage }) {
         {activeName && (
           <button type="button" className="btn ghost small" onClick={onManage} title="Manage ansible servers & settings">
             <Icon name="server" size={13} /> <span className="mono">{activeName}</span>
+          </button>
+        )}
+        {authEnabled && (
+          <button type="button" className="btn ghost small" onClick={onLogout} title="Sign out">
+            <Icon name="log-out" size={13} />
           </button>
         )}
         <div className="tn-sep" />

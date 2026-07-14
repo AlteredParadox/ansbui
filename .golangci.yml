@@ -108,6 +108,11 @@ linters:
         - sprintfQuotedString
 
   exclusions:
+    paths:
+      # npm ci materialises a vendored Go example inside
+      # node_modules (flatted ships one); it's git-ignored and not
+      # ours to lint.
+      - node_modules
     rules:
       # The deferred sess.Close patterns in sshpool / bootstrap
       # are ssh.Session.Close. The exclude-functions list above

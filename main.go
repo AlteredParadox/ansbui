@@ -10,10 +10,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"embed"
 	"errors"
 	"flag"
+	"fmt"
 	"io/fs"
 	"log"
 	"net"
@@ -25,8 +27,11 @@ import (
 	"syscall"
 	"time"
 
+	"golang.org/x/term"
+
 	"github.com/AlteredParadox/ansbui/internal/ansible"
 	"github.com/AlteredParadox/ansbui/internal/api"
+	"github.com/AlteredParadox/ansbui/internal/auth"
 	"github.com/AlteredParadox/ansbui/internal/bootstrap"
 	"github.com/AlteredParadox/ansbui/internal/config"
 	"github.com/AlteredParadox/ansbui/internal/jobs"
@@ -37,20 +42,52 @@ import (
 var webFS embed.FS
 
 func main() {
-	addr := flag.String("addr", "127.0.0.1:8787", "listen address (host:port). Default binds to loopback only — ansbui has no built-in auth, so exposing it requires an explicit override (e.g. -addr 0.0.0.0:8787) and a reverse proxy with auth in front.")
+	addr := flag.String("addr", "127.0.0.1:8787", "listen address (host:port). Default binds to loopback only. Exposing it requires an explicit override (e.g. -addr 0.0.0.0:8787); set a login password with -set-password and/or put a reverse proxy with auth in front.")
+	setPassword := flag.Bool("set-password", false, "prompt for a login password, store its hash in the config dir, and exit. Enables built-in authentication; re-run to rotate.")
 	flag.Parse()
 
-	warnIfExposed(*addr)
+	runsPath, err := runsPath()
+	if err != nil {
+		log.Fatalf("runs path: %v", err)
+	}
+	credPath, err := credentialPath()
+	if err != nil {
+		log.Fatalf("credential path: %v", err)
+	}
+
+	if *setPassword {
+		if err := runSetPassword(credPath); err != nil {
+			log.Fatalf("set-password: %v", err)
+		}
+		return
+	}
+
+	credential, err := auth.LoadCredential(credPath)
+	if err != nil {
+		log.Fatalf("auth credential: %v", err)
+	}
+	warnIfExposed(*addr, credential != nil)
+	if credential == nil {
+		// A deployment that has opted into auth must never silently
+		// fall back to the unauthenticated posture: an incomplete
+		// restore, a missing data mount, or an accidental delete of
+		// the credential file would otherwise expose the control
+		// plane after the next restart. The env var lives in the
+		// service unit, not the data dir, so it survives exactly the
+		// failures it guards against.
+		if authRequired() {
+			log.Fatalf("ANSBUI_AUTH_REQUIRED is set but no credential exists at %s — refusing to start unauthenticated. Restore the file or re-run `ansbui -set-password`.", credPath)
+		}
+		log.Print("⚠  no login password is set — the web UI is UNAUTHENTICATED. Run `ansbui -set-password` to enable built-in auth, or keep it behind a reverse proxy / VPN.")
+	} else {
+		log.Print("built-in authentication is enabled (login required).")
+	}
 
 	cfg, err := config.New()
 	if err != nil {
 		log.Fatalf("config: %v", err)
 	}
 
-	runsPath, err := runsPath()
-	if err != nil {
-		log.Fatalf("runs path: %v", err)
-	}
 	runs, err := ansible.NewRecorder(runsPath)
 	if err != nil {
 		log.Fatalf("runs recorder: %v", err)
@@ -77,6 +114,15 @@ func main() {
 			log.Printf("persist bootstrap run %s: %v", rec.ID, err)
 		}
 	}
+	// Trusted reverse proxies for client-IP attribution (login
+	// throttling). A typo here must be loud: silently ignoring a bad
+	// entry would quietly collapse per-source throttling back into
+	// one shared bucket behind the proxy.
+	trustedProxies, err := api.ParseTrustedProxies(os.Getenv("ANSBUI_TRUSTED_PROXIES"))
+	if err != nil {
+		log.Fatalf("ANSBUI_TRUSTED_PROXIES: %v", err)
+	}
+
 	srv := &api.Server{
 		Config:  cfg,
 		Pool:    pool,
@@ -88,6 +134,14 @@ func main() {
 		// in the deployment's writable data dir (ReadWritePaths in the
 		// systemd unit covers it).
 		BootstrapHostKeys: bootstrap.NewHostKeyStore(filepath.Join(filepath.Dir(runsPath), "bootstrap_known_hosts.json")),
+		// Credential is nil when no password is set — the auth
+		// middleware then runs in pass-through mode. Sessions is always
+		// present so login can populate it if a password is set later
+		// without a restart... (a restart is still needed to load a
+		// newly-created credential; documented in DEPLOYMENT.md).
+		Credential:     credential,
+		Sessions:       auth.NewSessionStore(),
+		TrustedProxies: trustedProxies,
 	}
 
 	httpSrv := &http.Server{
@@ -147,27 +201,76 @@ func main() {
 	<-httpDone
 }
 
+// runSetPassword prompts for a login password twice (echo off),
+// confirms they match, and writes the argon2id hash to path. Runs
+// as a standalone CLI action (`ansbui -set-password`) and exits; the
+// server is never started on this path, so it's safe to run while a
+// live instance is up — the new credential takes effect on that
+// instance's next restart.
+func runSetPassword(path string) error {
+	fd := int(os.Stdin.Fd()) //nolint:gosec // G115: a stdin fd is a small non-negative int
+	if !term.IsTerminal(fd) {
+		return errors.New("-set-password requires an interactive terminal (no piped input) so the password never lands in shell history or argv")
+	}
+	fmt.Fprint(os.Stderr, "New ansbui login password: ")
+	first, err := term.ReadPassword(fd)
+	fmt.Fprintln(os.Stderr)
+	if err != nil {
+		return fmt.Errorf("read password: %w", err)
+	}
+	fmt.Fprint(os.Stderr, "Confirm password: ")
+	second, err := term.ReadPassword(fd)
+	fmt.Fprintln(os.Stderr)
+	if err != nil {
+		return fmt.Errorf("read confirmation: %w", err)
+	}
+	if !bytes.Equal(first, second) {
+		return errors.New("passwords did not match")
+	}
+	if err := auth.SetCredential(path, string(first)); err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "Password saved to %s. Restart ansbui for it to take effect.\n", path)
+	fmt.Fprint(os.Stderr, "Tip: set ANSBUI_AUTH_REQUIRED=1 in the service environment so ansbui refuses to start if this file ever goes missing (instead of falling back to unauthenticated).\n")
+	return nil
+}
+
+// authRequired reports whether the deployment has declared that
+// built-in auth must be configured (ANSBUI_AUTH_REQUIRED=1/true).
+// Same accepted values as ANSBUI_INSECURE_SSH.
+func authRequired() bool {
+	v := strings.TrimSpace(os.Getenv("ANSBUI_AUTH_REQUIRED"))
+	return v == "1" || strings.EqualFold(v, "true")
+}
+
 // warnIfExposed prints a startup warning when the listen address is
-// reachable from outside the loopback interface. ansbui has no
-// built-in authentication yet — anyone who can reach the port can
-// drive ansible-playbook as the configured SSH user — so the
-// operator needs to know they're running it that way.
-func warnIfExposed(addr string) {
+// reachable from outside the loopback interface. With no login
+// password set, anyone who can reach the port can drive
+// ansible-playbook as the configured SSH user; with one set, the
+// remaining exposure is the login itself travelling over plain HTTP
+// unless TLS terminates in front. Either way the operator needs to
+// know they're running it that way.
+func warnIfExposed(addr string, authEnabled bool) {
 	host, _, err := net.SplitHostPort(addr)
 	if err != nil {
 		// malformed flag; ListenAndServe will complain shortly
 		return
 	}
 	host = strings.TrimSpace(host)
-	if host == "" || host == "0.0.0.0" || host == "::" {
-		log.Print("⚠  ansbui is listening on all interfaces and has no built-in auth.")
-		log.Print("⚠  Put it behind an SSH tunnel, VPN, or reverse proxy with auth before exposing to untrusted networks.")
+	exposed := host == "" || host == "0.0.0.0" || host == "::"
+	if !exposed {
+		ip := net.ParseIP(host)
+		exposed = ip != nil && !ip.IsLoopback()
+	}
+	if !exposed {
 		return
 	}
-	ip := net.ParseIP(host)
-	if ip != nil && !ip.IsLoopback() {
-		log.Printf("⚠  ansbui is bound to %s (non-loopback) without auth — restrict reachability to trusted networks.", host)
+	if authEnabled {
+		log.Printf("ℹ  ansbui is reachable beyond loopback (%s) with built-in login enabled — for untrusted networks, terminate TLS in front so the password and session cookie don't travel in cleartext.", addr)
+		return
 	}
+	log.Printf("⚠  ansbui is reachable beyond loopback (%s) with NO authentication.", addr)
+	log.Print("⚠  Set a login password (-set-password) and/or put it behind an SSH tunnel, VPN, or reverse proxy with auth before exposing to untrusted networks.")
 }
 
 func runsPath() (string, error) {
@@ -186,4 +289,21 @@ func runsPath() (string, error) {
 		dir = filepath.Join(home, ".config")
 	}
 	return filepath.Join(dir, "ansbui", "runs.json"), nil
+}
+
+// credentialPath resolves where the auth password hash lives. It
+// sits next to config.json (it's config, not runtime state), so
+// setting ANSBUI_CONFIG alone is enough for `-set-password` — an
+// earlier version keyed off the runs dir, which meant the CLI
+// silently wrote to $HOME/.config unless ANSBUI_RUNS was also set.
+// ANSBUI_AUTH_CREDENTIAL overrides the location outright.
+func credentialPath() (string, error) {
+	if p := os.Getenv("ANSBUI_AUTH_CREDENTIAL"); p != "" {
+		return p, nil
+	}
+	cfgPath, err := config.DefaultPath()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(filepath.Dir(cfgPath), "auth_credential"), nil
 }

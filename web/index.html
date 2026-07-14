@@ -28,6 +28,7 @@
   <script src="data/api.js"></script>
 
   <script type="text/babel" src="components/Icon.jsx"></script>
+  <script type="text/babel" src="views/Login.jsx"></script>
   <script type="text/babel" src="components/Shell.jsx"></script>
   <script type="text/babel" src="components/CommandPalette.jsx"></script>
   <script type="text/babel" src="components/ConnectionManager.jsx"></script>
@@ -48,10 +49,38 @@
       const [activeId, setActiveId] = useState('');
       const [showManager, setShowManager] = useState(false);
       const [error, setError] = useState('');
+      const [authEnabled, setAuthEnabled] = useState(false);
+
+      const logout = useCallback(async () => {
+        // Same guard as App's navigation wrapper: signing out unmounts
+        // the whole app, which closes any live run WebSocket, and the
+        // backend kills the remote ansible process on peer disconnect.
+        const active = globalThis.AnsbuiActiveRun;
+        if (active && !globalThis.confirmAbandonRun(active.label, 'signing out')) return;
+        try { await window.AnsbuiAPI.logout(); } catch (e) { /* fall through to login regardless */ }
+        setPhase('login');
+      }, []);
+
+      // Set by the 401 handler below so bootstrap() knows a mid-flight
+      // 401 already routed to the login screen and its own phase
+      // transitions must stand down — including when refreshData()'s
+      // per-fetch catches swallow the throw and bootstrap would
+      // otherwise sail on to 'ready'.
+      const sawUnauthorized = useRef(false);
 
       const bootstrap = useCallback(async (options = {}) => {
         setError('');
+        sawUnauthorized.current = false;
         try {
+          // Gate on auth first: when a password is set and this
+          // session isn't valid, show the login screen instead of
+          // firing data fetches that would just 401.
+          const auth = await window.AnsbuiAPI.authStatus();
+          setAuthEnabled(auth.enabled);
+          if (auth.enabled && !auth.authenticated) {
+            setPhase('login');
+            return;
+          }
           const res = await window.AnsbuiAPI.listServers();
           setServers(res.servers || []);
           setActiveId(res.activeServerId || '');
@@ -61,16 +90,31 @@
             return;
           }
           await window.AnsbuiAPI.refreshData();
+          if (sawUnauthorized.current) return;
           setPhase('ready');
           setShowManager(options.keepManagerOpen || false);
         } catch (e) {
+          if (sawUnauthorized.current) return;
           setError(e.message);
           setPhase('picker');
           setShowManager(true);
         }
       }, []);
 
+      // A 401 from any endpoint (session expired mid-use) drops back
+      // to the login screen instead of surfacing a raw error.
+      useEffect(() => {
+        window.AnsbuiAPI.setUnauthorizedHandler(() => {
+          sawUnauthorized.current = true;
+          setPhase('login');
+        });
+      }, []);
+
       useEffect(() => { bootstrap(); }, [bootstrap]);
+
+      if (phase === 'login') {
+        return <window.LoginView onSuccess={() => { setPhase('loading'); bootstrap(); }}/>;
+      }
 
       if (phase === 'loading') {
         return (
@@ -132,7 +176,7 @@
         );
       }
 
-      return <App activeId={activeId} servers={servers} onReload={bootstrap}/>;
+      return <App activeId={activeId} servers={servers} onReload={bootstrap} authEnabled={authEnabled} onLogout={logout}/>;
     }
 
     function BrandMark() {
@@ -146,7 +190,7 @@
       );
     }
 
-    function App({ activeId, servers, onReload }) {
+    function App({ activeId, servers, onReload, authEnabled, onLogout }) {
       const [view, setViewRaw] = useState(() => {
         // Coerce the legacy 'provision' value so an operator who had
         // the Bootstrap view active when this rename shipped lands on
@@ -279,6 +323,8 @@
               breadcrumb={crumb}
               activeName={activeName}
               onManage={() => setManagerOpen(true)}
+              authEnabled={authEnabled}
+              onLogout={onLogout}
             />
             {tweaks.navLayout === 'topnav' && <window.TopLayoutNav view={view} setView={setView}/>}
             <div style={{ minHeight: 0, overflow: 'auto' }}>

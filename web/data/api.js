@@ -17,6 +17,13 @@
     return text;
   };
 
+  // onUnauthorized is invoked once per 401 from any endpoint other
+  // than the auth endpoints themselves, so the shell can drop to the
+  // login screen when a session expires mid-session.
+  let onUnauthorized = null;
+  api.setUnauthorizedHandler = (fn) => { onUnauthorized = fn; };
+  const AUTH_PATHS = new Set(['/api/login', '/api/logout', '/api/auth/status']);
+
   const json = async (path, opts) => {
     const options = opts || {};
     const headers = options.headers || {};
@@ -25,6 +32,9 @@
       headers: { 'Content-Type': 'application/json', ...headers }
     });
     if (!res.ok) {
+      if (res.status === 401 && !AUTH_PATHS.has(path) && onUnauthorized) {
+        onUnauthorized();
+      }
       const text = await res.text();
       const err = new Error(errorMessage(text) || `${res.status} ${res.statusText}`);
       // Callers that need to distinguish "gone" from "backend blip"
@@ -35,6 +45,10 @@
     if (res.status === 204) return null;
     return res.json();
   };
+
+  api.authStatus = () => json('/api/auth/status');
+  api.login = (password) => json('/api/login', { method: 'POST', body: JSON.stringify({ password }) });
+  api.logout = () => json('/api/logout', { method: 'POST' });
 
   api.listServers = () => json('/api/servers');
   api.upsertServer = (srv) => json('/api/servers', { method: 'POST', body: JSON.stringify(srv) });
