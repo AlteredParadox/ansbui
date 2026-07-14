@@ -28,6 +28,17 @@ func TestLoginLimiter_ConcurrencyBound(t *testing.T) {
 	}
 }
 
+// raisePeak lifts peak to cur if cur exceeds it (CAS loop, safe
+// under concurrent raisers).
+func raisePeak(peak *atomic.Int64, cur int64) {
+	for {
+		p := peak.Load()
+		if cur <= p || peak.CompareAndSwap(p, cur) {
+			return
+		}
+	}
+}
+
 // Regression for the check-then-verify race: hammer begin/end from
 // many goroutines and assert the number of concurrently admitted
 // attempts never exceeds the cap. Run with -race for full value.
@@ -44,13 +55,7 @@ func TestLoginLimiter_ConcurrentReservation(t *testing.T) {
 				if l.begin(source, time.Now()) != loginProceed {
 					continue
 				}
-				cur := active.Add(1)
-				for {
-					p := peak.Load()
-					if cur <= p || peak.CompareAndSwap(p, cur) {
-						break
-					}
-				}
+				raisePeak(&peak, active.Add(1))
 				active.Add(-1)
 				l.end(source, true)
 			}

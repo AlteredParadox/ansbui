@@ -14,7 +14,7 @@ function LoginView({ onSuccess }) {
     setBusy(true);
     setError('');
     try {
-      await window.AnsbuiAPI.login(password);
+      await globalThis.AnsbuiAPI.login(password);
       setPassword('');
       onSuccess();
     } catch (err) {
@@ -55,4 +55,4 @@ function LoginView({ onSuccess }) {
   );
 }
 
-window.LoginView = LoginView;
+globalThis.LoginView = LoginView;

@@ -80,6 +80,24 @@ type params struct {
 	salt, hash   []byte
 }
 
+// validateCosts bounds the cost parameters (see maxArgon* above):
+// zero rounds/threads panic inside argon2.IDKey at login time, and
+// oversized memory/time are a resource-exhaustion primitive.
+// Rejecting here means a corrupt credential fails at startup
+// (LoadCredential) with a clear message, not on first login.
+func (p params) validateCosts() error {
+	if p.time == 0 || p.time > maxArgonTime {
+		return fmt.Errorf("argon2 time parameter %d out of range [1, %d]", p.time, maxArgonTime)
+	}
+	if p.threads == 0 || p.threads > maxArgonThreads {
+		return fmt.Errorf("argon2 threads parameter %d out of range [1, %d]", p.threads, maxArgonThreads)
+	}
+	if p.memory < 8*uint32(p.threads) || p.memory > maxArgonMemory {
+		return fmt.Errorf("argon2 memory parameter %d KiB out of range [%d, %d]", p.memory, 8*uint32(p.threads), maxArgonMemory)
+	}
+	return nil
+}
+
 // parseEncoded decodes a PHC argon2id string. Rejects any other
 // variant/version so a hand-edited or foreign hash fails loudly
 // rather than silently never matching.
@@ -97,19 +115,8 @@ func parseEncoded(encoded string) (params, error) {
 	if _, err := fmt.Sscanf(parts[3], "m=%d,t=%d,p=%d", &p.memory, &p.time, &p.threads); err != nil {
 		return p, fmt.Errorf("malformed argon2 params %q", parts[3])
 	}
-	// Validate the cost parameters (see maxArgon* above): zero
-	// rounds/threads panic inside argon2.IDKey at login time, and
-	// oversized memory/time are a resource-exhaustion primitive.
-	// Rejecting here means a corrupt credential fails at startup
-	// (LoadCredential) with a clear message, not on first login.
-	if p.time == 0 || p.time > maxArgonTime {
-		return p, fmt.Errorf("argon2 time parameter %d out of range [1, %d]", p.time, maxArgonTime)
-	}
-	if p.threads == 0 || p.threads > maxArgonThreads {
-		return p, fmt.Errorf("argon2 threads parameter %d out of range [1, %d]", p.threads, maxArgonThreads)
-	}
-	if p.memory < 8*uint32(p.threads) || p.memory > maxArgonMemory {
-		return p, fmt.Errorf("argon2 memory parameter %d KiB out of range [%d, %d]", p.memory, 8*uint32(p.threads), maxArgonMemory)
+	if err := p.validateCosts(); err != nil {
+		return p, err
 	}
 	salt, err := base64.RawStdEncoding.DecodeString(parts[4])
 	if err != nil {
