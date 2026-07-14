@@ -37,6 +37,19 @@ const (
 	argonSaltLen = 16
 )
 
+// Ceilings for the cost parameters accepted from a stored hash.
+// The parameters come from the credential file, so a corrupt or
+// hand-edited file could otherwise smuggle values that panic inside
+// argon2 (zero rounds/threads) or turn every login attempt into a
+// host-exhausting allocation (multi-GiB memory). Generous multiples
+// of our own encoding constants above; anything outside is not a
+// credential this code ever wrote.
+const (
+	maxArgonTime    = 64
+	maxArgonMemory  = 1 << 20 // KiB (1 GiB)
+	maxArgonThreads = 64
+)
+
 // Credential is a loaded password hash. The zero value is not
 // usable; use LoadCredential or SetCredential.
 type Credential struct {
@@ -83,6 +96,20 @@ func parseEncoded(encoded string) (params, error) {
 	}
 	if _, err := fmt.Sscanf(parts[3], "m=%d,t=%d,p=%d", &p.memory, &p.time, &p.threads); err != nil {
 		return p, fmt.Errorf("malformed argon2 params %q", parts[3])
+	}
+	// Validate the cost parameters (see maxArgon* above): zero
+	// rounds/threads panic inside argon2.IDKey at login time, and
+	// oversized memory/time are a resource-exhaustion primitive.
+	// Rejecting here means a corrupt credential fails at startup
+	// (LoadCredential) with a clear message, not on first login.
+	if p.time == 0 || p.time > maxArgonTime {
+		return p, fmt.Errorf("argon2 time parameter %d out of range [1, %d]", p.time, maxArgonTime)
+	}
+	if p.threads == 0 || p.threads > maxArgonThreads {
+		return p, fmt.Errorf("argon2 threads parameter %d out of range [1, %d]", p.threads, maxArgonThreads)
+	}
+	if p.memory < 8*uint32(p.threads) || p.memory > maxArgonMemory {
+		return p, fmt.Errorf("argon2 memory parameter %d KiB out of range [%d, %d]", p.memory, 8*uint32(p.threads), maxArgonMemory)
 	}
 	salt, err := base64.RawStdEncoding.DecodeString(parts[4])
 	if err != nil {

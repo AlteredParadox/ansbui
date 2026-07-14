@@ -72,6 +72,48 @@ func TestLoadCredential_CorruptErrors(t *testing.T) {
 	}
 }
 
+// Out-of-range cost parameters are rejected at load: zero rounds or
+// threads panic inside argon2.IDKey at login time, and oversized
+// memory/time values would let a corrupt credential exhaust the host
+// on every login attempt.
+func TestLoadCredential_RejectsMalformedParams(t *testing.T) {
+	t.Parallel()
+	// Valid salt/hash segments; only the m=,t=,p= block varies.
+	const tail = "$c2FsdHNhbHRzYWx0c2FsdA$aGFzaGhhc2hoYXNoaGFzaGhhc2hoYXNoaGFzaGhhc2g"
+	for _, params := range []string{
+		"m=65536,t=0,p=4",   // zero rounds → argon2 panic
+		"m=65536,t=3,p=0",   // zero threads → argon2 panic
+		"m=65536,t=65,p=4",  // rounds above ceiling
+		"m=1048577,t=3,p=4", // memory above 1 GiB ceiling
+		"m=16,t=3,p=4",      // memory below argon2's 8×threads floor
+		"m=65536,t=3,p=65",  // threads above ceiling
+		"m=65536,t=-1,p=4",  // negative → Sscanf error
+	} {
+		path := filepath.Join(t.TempDir(), "credential")
+		body := "$argon2id$v=19$" + params + tail
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := LoadCredential(path); err == nil {
+			t.Fatalf("expected error for params %q", params)
+		}
+	}
+}
+
+// The parameters this package writes are within its own bounds (a
+// tautology today, but catches someone raising argonMemory past
+// maxArgonMemory without noticing).
+func TestParseEncoded_AcceptsOwnOutput(t *testing.T) {
+	t.Parallel()
+	encoded, err := hashPassword("pw")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := parseEncoded(encoded); err != nil {
+		t.Fatalf("parseEncoded of own output: %v", err)
+	}
+}
+
 // Distinct passwords get distinct salts → distinct encodings.
 func TestHashPassword_SaltedPerCall(t *testing.T) {
 	t.Parallel()
