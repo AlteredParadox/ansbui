@@ -62,13 +62,22 @@ func main() {
 		return
 	}
 
-	warnIfExposed(*addr)
-
 	credential, err := auth.LoadCredential(credPath)
 	if err != nil {
 		log.Fatalf("auth credential: %v", err)
 	}
+	warnIfExposed(*addr, credential != nil)
 	if credential == nil {
+		// A deployment that has opted into auth must never silently
+		// fall back to the unauthenticated posture: an incomplete
+		// restore, a missing data mount, or an accidental delete of
+		// the credential file would otherwise expose the control
+		// plane after the next restart. The env var lives in the
+		// service unit, not the data dir, so it survives exactly the
+		// failures it guards against.
+		if authRequired() {
+			log.Fatalf("ANSBUI_AUTH_REQUIRED is set but no credential exists at %s — refusing to start unauthenticated. Restore the file or re-run `ansbui -set-password`.", credPath)
+		}
 		log.Print("⚠  no login password is set — the web UI is UNAUTHENTICATED. Run `ansbui -set-password` to enable built-in auth, or keep it behind a reverse proxy / VPN.")
 	} else {
 		log.Print("built-in authentication is enabled (login required).")
@@ -212,30 +221,46 @@ func runSetPassword(path string) error {
 		return err
 	}
 	fmt.Fprintf(os.Stderr, "Password saved to %s. Restart ansbui for it to take effect.\n", path)
+	fmt.Fprint(os.Stderr, "Tip: set ANSBUI_AUTH_REQUIRED=1 in the service environment so ansbui refuses to start if this file ever goes missing (instead of falling back to unauthenticated).\n")
 	return nil
 }
 
+// authRequired reports whether the deployment has declared that
+// built-in auth must be configured (ANSBUI_AUTH_REQUIRED=1/true).
+// Same accepted values as ANSBUI_INSECURE_SSH.
+func authRequired() bool {
+	v := strings.TrimSpace(os.Getenv("ANSBUI_AUTH_REQUIRED"))
+	return v == "1" || strings.EqualFold(v, "true")
+}
+
 // warnIfExposed prints a startup warning when the listen address is
-// reachable from outside the loopback interface. ansbui has no
-// built-in authentication yet — anyone who can reach the port can
-// drive ansible-playbook as the configured SSH user — so the
-// operator needs to know they're running it that way.
-func warnIfExposed(addr string) {
+// reachable from outside the loopback interface. With no login
+// password set, anyone who can reach the port can drive
+// ansible-playbook as the configured SSH user; with one set, the
+// remaining exposure is the login itself travelling over plain HTTP
+// unless TLS terminates in front. Either way the operator needs to
+// know they're running it that way.
+func warnIfExposed(addr string, authEnabled bool) {
 	host, _, err := net.SplitHostPort(addr)
 	if err != nil {
 		// malformed flag; ListenAndServe will complain shortly
 		return
 	}
 	host = strings.TrimSpace(host)
-	if host == "" || host == "0.0.0.0" || host == "::" {
-		log.Print("⚠  ansbui is listening on all interfaces.")
-		log.Print("⚠  Set a login password (-set-password) and/or put it behind an SSH tunnel, VPN, or reverse proxy with auth before exposing to untrusted networks.")
+	exposed := host == "" || host == "0.0.0.0" || host == "::"
+	if !exposed {
+		ip := net.ParseIP(host)
+		exposed = ip != nil && !ip.IsLoopback()
+	}
+	if !exposed {
 		return
 	}
-	ip := net.ParseIP(host)
-	if ip != nil && !ip.IsLoopback() {
-		log.Printf("⚠  ansbui is bound to %s (non-loopback) — set a login password (-set-password) and/or restrict reachability to trusted networks.", host)
+	if authEnabled {
+		log.Printf("ℹ  ansbui is reachable beyond loopback (%s) with built-in login enabled — for untrusted networks, terminate TLS in front so the password and session cookie don't travel in cleartext.", addr)
+		return
 	}
+	log.Printf("⚠  ansbui is reachable beyond loopback (%s) with NO authentication.", addr)
+	log.Print("⚠  Set a login password (-set-password) and/or put it behind an SSH tunnel, VPN, or reverse proxy with auth before exposing to untrusted networks.")
 }
 
 func runsPath() (string, error) {

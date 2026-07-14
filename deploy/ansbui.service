@@ -15,6 +15,10 @@ RestartSec=3
 Environment=ANSBUI_CONFIG=/opt/ansbui/data/config.json
 Environment=ANSBUI_RUNS=/opt/ansbui/data/runs.json
 Environment=HOME=/opt/ansbui
+# Uncomment after `ansbui -set-password`: refuse to start (instead of
+# falling back to an UNAUTHENTICATED UI) if the credential file is
+# ever missing — e.g. an incomplete restore or unmounted data dir.
+#Environment=ANSBUI_AUTH_REQUIRED=1
 
 # --- Hardening (systemd-analyze security baseline) ---
 # ansbui only needs: TCP/UDP for HTTP listen + SSH + Prom fetch,

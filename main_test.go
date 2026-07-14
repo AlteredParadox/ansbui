@@ -35,3 +35,21 @@ func TestCredentialPath(t *testing.T) {
 		}
 	})
 }
+
+// ANSBUI_AUTH_REQUIRED accepts the same truthy values as
+// ANSBUI_INSECURE_SSH; anything else keeps the historical
+// fail-open-on-missing-credential behaviour.
+func TestAuthRequired(t *testing.T) {
+	for _, tc := range []struct {
+		v    string
+		want bool
+	}{
+		{"1", true}, {"true", true}, {"TRUE", true}, {" true ", true},
+		{"", false}, {"0", false}, {"no", false}, {"yes", false},
+	} {
+		t.Setenv("ANSBUI_AUTH_REQUIRED", tc.v)
+		if got := authRequired(); got != tc.want {
+			t.Fatalf("authRequired with %q = %v, want %v", tc.v, got, tc.want)
+		}
+	}
+}
