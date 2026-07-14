@@ -52,6 +52,11 @@
       const [authEnabled, setAuthEnabled] = useState(false);
 
       const logout = useCallback(async () => {
+        // Same guard as App's navigation wrapper: signing out unmounts
+        // the whole app, which closes any live run WebSocket, and the
+        // backend kills the remote ansible process on peer disconnect.
+        const active = globalThis.AnsbuiActiveRun;
+        if (active && !globalThis.confirmAbandonRun(active.label, 'signing out')) return;
         try { await window.AnsbuiAPI.logout(); } catch (e) { /* fall through to login regardless */ }
         setPhase('login');
       }, []);
