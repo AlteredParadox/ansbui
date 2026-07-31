@@ -690,15 +690,21 @@ func readControlNodePrivkey(ctx context.Context, pool *sshpool.Pool, srv config.
 	if err != nil {
 		return nil, err
 	}
-	var so, se bytes.Buffer
-	if err := sshpool.Stream(ctx, cli, "cat "+shellQuotePath(path), nil, &so, &se); err != nil {
-		msg := strings.TrimSpace(se.String())
+	// sshpool.Run, not Stream: Run applies the shared output caps,
+	// the 2-minute default deadline, and the process-wide session
+	// semaphore. Streaming into a bare bytes.Buffer had none of
+	// those, and bootstrap jobs carry no deadline of their own, so a
+	// control node returning an endless `cat` grew the heap until the
+	// operator cancelled the run.
+	so, se, err := sshpool.Run(ctx, cli, "cat "+shellQuotePath(path))
+	if err != nil {
+		msg := strings.TrimSpace(se)
 		if msg == "" {
 			msg = err.Error()
 		}
 		return nil, fmt.Errorf("read %s on control node: %s", path, msg)
 	}
-	body := so.Bytes()
+	body := []byte(so)
 	if len(body) == 0 {
 		return nil, fmt.Errorf("control node private key %s is empty", path)
 	}
@@ -962,15 +968,15 @@ func readControlNodePubkey(ctx context.Context, pool *sshpool.Pool, srv config.S
 	if err != nil {
 		return "", err
 	}
-	var so, se bytes.Buffer
-	if err := sshpool.Stream(ctx, cli, "cat "+shellQuotePath(defaultControlPubKeyPath), nil, &so, &se); err != nil {
-		msg := strings.TrimSpace(se.String())
+	so, se, err := sshpool.Run(ctx, cli, "cat "+shellQuotePath(defaultControlPubKeyPath))
+	if err != nil {
+		msg := strings.TrimSpace(se)
 		if msg == "" {
 			msg = err.Error()
 		}
 		return "", fmt.Errorf("read %s on control node: %s", defaultControlPubKeyPath, msg)
 	}
-	pub := strings.TrimSpace(so.String())
+	pub := strings.TrimSpace(so)
 	if pub == "" {
 		return "", fmt.Errorf("control node public key %s is empty", defaultControlPubKeyPath)
 	}
@@ -1017,19 +1023,19 @@ func updateInventoryFile(ctx context.Context, pool *sshpool.Pool, srv config.Ser
 		return err
 	}
 	full := path.Join(srv.WorkDir, srv.Inventory)
-	var so, se bytes.Buffer
-	if err := sshpool.Stream(ctx, cli, "cat "+shellQuote(full), nil, &so, &se); err != nil {
-		msg := strings.TrimSpace(se.String())
+	so, se, err := sshpool.Run(ctx, cli, "cat "+shellQuote(full))
+	if err != nil {
+		msg := strings.TrimSpace(se)
 		if msg == "" {
 			msg = err.Error()
 		}
 		return fmt.Errorf("read %s: %s", srv.Inventory, msg)
 	}
-	updated, err := addHostToInventoryYAML(so.Bytes(), provider, fqdn)
+	updated, err := addHostToInventoryYAML([]byte(so), provider, fqdn)
 	if err != nil {
 		return err
 	}
-	if bytes.Equal(updated, so.Bytes()) {
+	if bytes.Equal(updated, []byte(so)) {
 		return nil // already present, nothing to write
 	}
 	return ansible.WriteFileInWorkDir(ctx, cli, srv.WorkDir, srv.Inventory, string(updated))

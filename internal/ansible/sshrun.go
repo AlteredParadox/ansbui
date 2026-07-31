@@ -1,13 +1,14 @@
 package ansible
 
 import (
-	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"path"
 	"strings"
 	"time"
 
+	"github.com/AlteredParadox/ansbui/internal/sshpool"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -18,6 +19,12 @@ import (
 // vaultRunTimeout 30s caused that), but bounded so a wedged
 // session can't hang the orchestrator forever.
 const remoteWriteTimeout = 5 * time.Minute
+
+// remoteReadTimeout bounds a single confined file read from the
+// control node. Reads are interactive (a UI request is waiting on
+// them) and the files involved are playbooks and vault YAML, so a
+// minute is generous; the point is that the bound exists at all.
+const remoteReadTimeout = 1 * time.Minute
 
 // WriteFileInWorkDir is the exported entry point to the confined
 // atomic write helper — the bootstrap package calls it to persist a
@@ -68,7 +75,16 @@ func confineToWorkDirScript(workDir, rel string) string {
 
 // readFileInWorkDir cats rel (confined to workDir — see
 // confineToWorkDirScript) and returns stdout + trimmed stderr.
+//
+// Bounded by remoteReadTimeout. This path had no deadline of its own
+// and its callers (the inline-vault key list, the playbook reader)
+// pass the HTTP request's ctx — and the server sets no WriteTimeout,
+// deliberately, so nothing else ended the request either. A control
+// node that accepted the session and then never finished the `cat`
+// held the handler until the client gave up.
 func readFileInWorkDir(ctx context.Context, cli *ssh.Client, workDir, rel string) (string, string, error) {
+	ctx, cancel := context.WithTimeout(ctx, remoteReadTimeout)
+	defer cancel()
 	script := confineToWorkDirScript(workDir, rel) + `; cat -- "$TGT"`
 	return runRemoteScript(ctx, cli, script, "")
 }
@@ -190,35 +206,20 @@ func atomicWriteScriptFor(q string) string {
 // helper across both vault and bootstrap callers led to a
 // 30s cap silently applying to a small inventory write at the
 // tail of a 30-minute bootstrap run.
+// Output goes through sshpool.RunStdin rather than raw bytes.Buffers
+// so these helpers obey the same byte caps and the same process-wide
+// session semaphore as every other remote query. They previously had
+// neither: a control node returning a huge or endless stream could
+// grow the heap unbounded, and concurrent vault/file requests could
+// each hold a session outside the shared admission control.
 func runRemoteScript(ctx context.Context, cli *ssh.Client, script, stdin string) (stdout, stderr string, err error) {
-	sess, err := cli.NewSession()
-	if err != nil {
-		return "", "", fmt.Errorf("new session: %w", err)
-	}
-	defer sess.Close()
-	var so, se bytes.Buffer
-	sess.Stdout = &so
-	sess.Stderr = &se
+	var in io.Reader
 	if stdin != "" {
-		sess.Stdin = bytes.NewBufferString(stdin)
+		// Left nil when empty so the session gets no stdin at all,
+		// rather than one that reads EOF immediately.
+		in = strings.NewReader(stdin)
 	}
 	cmd := "/usr/bin/env bash -c " + shellQuote(script)
-	if err := sess.Start(cmd); err != nil {
-		return "", "", fmt.Errorf("start command: %w", err)
-	}
-	done := make(chan error, 1)
-	go func() { done <- sess.Wait() }()
-	select {
-	case runErr := <-done:
-		return so.String(), strings.TrimSpace(se.String()), runErr
-	case <-ctx.Done():
-		_ = sess.Signal(ssh.SIGTERM)
-		select {
-		case <-done:
-		case <-time.After(2 * time.Second):
-			_ = sess.Close()
-			<-done
-		}
-		return so.String(), strings.TrimSpace(se.String()), ctx.Err()
-	}
+	stdout, stderr, err = sshpool.RunStdin(ctx, cli, cmd, in)
+	return stdout, strings.TrimSpace(stderr), err
 }
