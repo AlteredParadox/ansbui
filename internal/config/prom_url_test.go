@@ -1,6 +1,7 @@
 package config
 
 import (
+	"net"
 	"strings"
 	"testing"
 )
@@ -182,5 +183,70 @@ func TestValidatePromLabel(t *testing.T) {
 		if err := validatePromLabel(s); err == nil {
 			t.Errorf("validatePromLabel(%q) returned nil, want error", s)
 		}
+	}
+}
+
+// TestCheckPromResolvedIP covers the dial-time half of the SSRF
+// guard. CheckPromHost can only vet the configured hostname; if
+// nothing re-examines where that name actually leads, repointing its
+// DNS steers the server-side fetch anywhere.
+func TestCheckPromResolvedIP(t *testing.T) {
+	mustDeny := []string{
+		"169.254.169.254", // AWS/GCP/DO IMDS
+		"169.254.170.2",   // ECS task metadata
+		"fd00:ec2::254",   // AWS IMDSv6
+		"169.254.1.1",     // any link-local
+		"fe80::1",         // IPv6 link-local
+		"0.0.0.0",
+		"224.0.0.1", // multicast
+	}
+	for _, s := range mustDeny {
+		if err := CheckPromResolvedIP(net.ParseIP(s)); err == nil {
+			t.Errorf("CheckPromResolvedIP(%s) = nil, want denial", s)
+		}
+	}
+
+	// With no CIDR pin configured, ordinary destinations still work —
+	// a same-host or LAN Prometheus is the normal deployment.
+	for _, s := range []string{"127.0.0.1", "::1", "10.1.2.3", "192.168.0.5", "203.0.113.7"} {
+		if err := CheckPromResolvedIP(net.ParseIP(s)); err != nil {
+			t.Errorf("CheckPromResolvedIP(%s) = %v, want nil", s, err)
+		}
+	}
+
+	if err := CheckPromResolvedIP(nil); err == nil {
+		t.Error("nil IP should be rejected")
+	}
+}
+
+// The optional CIDR pin is what actually closes rebinding for
+// operators who want it: the name may move, but only within the
+// network their Prometheus really lives on.
+func TestCheckPromResolvedIPCIDRPin(t *testing.T) {
+	t.Setenv(promAllowedCIDRsEnv, "10.0.0.0/8, 192.168.1.0/24")
+
+	for _, s := range []string{"10.5.5.5", "192.168.1.20"} {
+		if err := CheckPromResolvedIP(net.ParseIP(s)); err != nil {
+			t.Errorf("in-range %s rejected: %v", s, err)
+		}
+	}
+	// Previously reachable addresses are now outside the pin.
+	for _, s := range []string{"127.0.0.1", "192.168.2.20", "203.0.113.7"} {
+		if err := CheckPromResolvedIP(net.ParseIP(s)); err == nil {
+			t.Errorf("out-of-range %s allowed", s)
+		}
+	}
+	// The always-denied set stays denied regardless of the pin.
+	if err := CheckPromResolvedIP(net.ParseIP("169.254.169.254")); err == nil {
+		t.Error("IMDS allowed despite always-deny layer")
+	}
+}
+
+// A malformed CIDR must fail closed. Skipping bad entries would let a
+// typo silently widen the policy to "everything".
+func TestCheckPromResolvedIPMalformedCIDRFailsClosed(t *testing.T) {
+	t.Setenv(promAllowedCIDRsEnv, "not-a-cidr")
+	if err := CheckPromResolvedIP(net.ParseIP("10.0.0.1")); err == nil {
+		t.Fatal("malformed CIDR silently allowed the address")
 	}
 }

@@ -482,6 +482,69 @@ func CheckPromHost(host, hostport string) error {
 	return fmt.Errorf("prometheus host %q is not in ANSBUI_PROM_ALLOWED_HOSTS", hostport)
 }
 
+// promAllowedCIDRsEnv optionally pins what an allowlisted Prometheus
+// hostname is permitted to resolve to. CheckPromHost can only vet the
+// name; the address actually dialed is whatever DNS returns at fetch
+// time, which is a different value and may be attacker-controlled if
+// the name's DNS is. Set this to the network your Prometheus really
+// lives on (e.g. "10.0.0.0/8") to close that gap.
+const promAllowedCIDRsEnv = "ANSBUI_PROM_ALLOWED_CIDRS"
+
+// CheckPromResolvedIP vets an address the Prometheus client is about
+// to connect to, after DNS has resolved it. CheckPromHost validates
+// the *name*; this validates the *destination*, which is the only
+// thing that binds the request to a real machine — a hostname
+// allowlist alone is defeated by simply repointing the name (DNS
+// rebinding), since nothing re-examines where it now leads.
+//
+// Two layers:
+//
+//   - Always denied: unspecified, multicast, and link-local
+//     addresses, plus the IMDS literals. These are never legitimate
+//     Prometheus targets and are where a rebind would actually pay
+//     off, so the string denylist in CheckPromHost is enforced again
+//     here against the resolved value it couldn't see.
+//
+//   - Optionally, if ANSBUI_PROM_ALLOWED_CIDRS is set, the address
+//     must also fall inside one of those ranges. Left unset the
+//     first layer still applies; loopback and private addresses stay
+//     reachable, because a Prometheus on the same host or on the
+//     operator's own LAN is the normal deployment and denying it
+//     outright would break working setups.
+func CheckPromResolvedIP(ip net.IP) error {
+	if ip == nil {
+		return errors.New("prometheus host resolved to an invalid address")
+	}
+	if ip.IsUnspecified() || ip.IsMulticast() ||
+		ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+		return fmt.Errorf("prometheus host resolved to %s, which is unspecified/multicast/link-local — denied (possible DNS rebinding)", ip)
+	}
+	for denied := range promMetadataDeny {
+		if d := net.ParseIP(denied); d != nil && d.Equal(ip) {
+			return fmt.Errorf("prometheus host resolved to the cloud-metadata address %s — denied (possible DNS rebinding)", ip)
+		}
+	}
+	allow := strings.TrimSpace(os.Getenv(promAllowedCIDRsEnv))
+	if allow == "" {
+		return nil
+	}
+	for _, entry := range strings.Split(allow, ",") {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		_, network, err := net.ParseCIDR(entry)
+		if err != nil {
+			// A malformed entry must not silently widen the policy.
+			return fmt.Errorf("%s entry %q is not a valid CIDR: %w", promAllowedCIDRsEnv, entry, err)
+		}
+		if network.Contains(ip) {
+			return nil
+		}
+	}
+	return fmt.Errorf("prometheus host resolved to %s, which is outside %s — denied", ip, promAllowedCIDRsEnv)
+}
+
 // isLoopbackHost recognises the textual forms of localhost: the
 // literal "localhost" name and any IP that net.ParseIP marks as
 // loopback (127.0.0.0/8 and ::1). Anything else gets routed through
