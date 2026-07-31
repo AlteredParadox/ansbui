@@ -18,7 +18,7 @@ import (
 // enrichment pass is allowed to generate.
 func newTestResolver(t *testing.T, hits *atomic.Int64) *geoResolver {
 	t.Helper()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		hits.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprint(w, `{"ip":"203.0.113.9","city":"Testville","country":"NL"}`)
