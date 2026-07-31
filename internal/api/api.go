@@ -167,12 +167,16 @@ func (s *Server) Handler() http.Handler {
 //     (the SPA shell under "/") are public and stay unguarded so the
 //     page still loads; everything sensitive lives under /api/.
 //
-//   - Origin == Host (CSRF defence) on state-mutating verbs and the
-//     run-stream WS upgrades. Browsers omit Origin on same-origin
-//     GETs and curl/CLI clients omit it entirely, so we only reject a
-//     present-and-wrong Origin — non-browser admin callers keep
-//     working. This mirrors the WS upgrader's own CheckOrigin
-//     (sameOriginCheck), reused here so the two never drift.
+//   - Origin == Host (CSRF defence) on EVERY /api/ request, reads
+//     included. Cross-origin reads return opaque responses, but the
+//     server-side work still runs — /api/facts alone can fan an
+//     ansible setup run across the fleet — so a hostile page must not
+//     be able to trigger them at all. Browsers omit Origin on
+//     same-origin GETs and curl/CLI clients omit it entirely, so we
+//     only reject a present-and-wrong Origin — non-browser admin
+//     callers keep working. This mirrors the WS upgrader's own
+//     CheckOrigin (sameOriginCheck), reused here so the two never
+//     drift.
 func withOriginGuard(h http.Handler, allowedHosts map[string]struct{}) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if hostGuardedRequest(r) && !hostAllowed(r.Host, allowedHosts) {
@@ -204,19 +208,25 @@ func hostGuardedRequest(r *http.Request) bool {
 }
 
 // originGuardedRequest reports whether the Origin==Host CSRF check
-// applies: all state-mutating verbs plus the run-stream WS upgrades
-// (which a rebound page could otherwise open with a matching Origin).
+// applies: every /api/ request, regardless of method.
+//
+// This used to guard only state-mutating verbs plus an allowlist of
+// three GET paths, which left every other API read triggerable by a
+// hostile page the operator happened to visit. The responses stay
+// unreadable cross-origin (we send no CORS headers), but the *work*
+// still happened: GET /api/facts?host=all fans an ansible setup run
+// across the whole fleet, and /api/inventory, /api/playbooks and
+// /api/vault each spend a controller SSH round-trip. A blind trigger
+// is still a trigger, so the check is now route-wide rather than an
+// exception list that every new endpoint has to remember to join.
+//
+// Guarding reads costs legitimate callers nothing: browsers omit
+// Origin entirely on same-origin GETs, and curl/CLI clients omit it
+// on everything — sameOriginCheck only rejects a *present and
+// mismatched* Origin. The static SPA shell under "/" is untouched so
+// the page still loads.
 func originGuardedRequest(r *http.Request) bool {
-	switch r.Method {
-	case http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodPatch:
-		return true
-	case http.MethodGet, http.MethodHead:
-		return strings.HasPrefix(r.URL.Path, "/api/bootstrap/") ||
-			r.URL.Path == "/api/adhoc/stream" ||
-			r.URL.Path == "/api/playbook/stream"
-	default:
-		return false
-	}
+	return strings.HasPrefix(r.URL.Path, "/api/")
 }
 
 // Body size caps for POST / PUT handlers. Control-plane payloads
