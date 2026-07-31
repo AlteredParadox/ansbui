@@ -220,6 +220,18 @@ Optional env vars worth knowing about:
   front, so even the first contact is authenticated. Recommended
   wherever the provider exposes host keys out of band.
 
+  This also **refuses any run with the reinstall option enabled**.
+  A reinstall wipes the box and the new system generates fresh
+  host keys, so no fingerprint pinned beforehand can cover the
+  reconnect — and nothing in band can authenticate the
+  replacement, because the installer and first-boot sessions are
+  reached over the very connection that would need verifying. The
+  run is rejected up front (a 400, before a job starts and before
+  the target is touched) rather than quietly falling back to
+  trust-on-first-use. To reinstall a box under this policy, unset
+  the variable for that run and verify the fingerprint ansbui
+  reports against the provider console afterwards.
+
 ## 8. Backup & restore
 
 Two paths matter:

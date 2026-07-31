@@ -295,7 +295,10 @@ func Validate(req Request) error {
 	if err := boundLength("username", req.Username, 64); err != nil {
 		return err
 	}
-	return validateReinstall(req.Reinstall)
+	if err := validateReinstall(req.Reinstall); err != nil {
+		return err
+	}
+	return checkReinstallHostKeyPolicy(req.Reinstall)
 }
 
 // validateProvider gates required + post-normalize-non-empty so
