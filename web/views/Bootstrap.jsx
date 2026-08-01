@@ -109,6 +109,13 @@ function BootstrapView() {
   const [reinstallEnabled, setReinstallEnabled] = useStateBoot(false);
   const [reinstallOS, setReinstallOS] = useStateBoot(REINSTALL_OS_LIST[0]);
   const [reinstallVersion, setReinstallVersion] = useStateBoot(REINSTALL_MATRIX[REINSTALL_OS_LIST[0]][0]);
+  // Acknowledgement that the post-reinstall host key can't be
+  // verified. Only meaningful — and only shown — when the server runs
+  // with ANSBUI_BOOTSTRAP_REQUIRE_HOSTKEY, which it reports on the
+  // settings payload loaded at boot. Without this the operator would
+  // fill in the whole form and only then be told the run is refused.
+  const [reinstallHostKeyAck, setReinstallHostKeyAck] = useStateBoot(false);
+  const strictHostKey = !!(globalThis.AnsbuiSettings || {}).bootstrapRequireHostKey;
   const [running, setRunning] = useStateBoot(false);
   const [output, setOutput] = useStateBoot([]);
   const [error, setError] = useStateBoot('');
@@ -378,6 +385,12 @@ function BootstrapView() {
     const versions = REINSTALL_MATRIX[reinstallOS];
     if (!versions) return 'Pick a reinstall OS.';
     if (!versions.includes(reinstallVersion)) return 'Pick a reinstall version.';
+    // Mirrors checkReinstallHostKeyPolicy so the operator is stopped
+    // here rather than by a 400 after submitting. The backend
+    // re-checks regardless.
+    if (strictHostKey && !reinstallHostKeyAck) {
+      return 'This deployment requires host keys to be verified. Acknowledge that the reinstalled system’s key can’t be, or turn off the reinstall.';
+    }
     return null;
   };
 
@@ -428,7 +441,14 @@ function BootstrapView() {
       vaultPassword,
       hostKeyFingerprint: hostKeyFingerprint.trim(),
       reinstall: reinstallEnabled
-        ? { enabled: true, os: reinstallOS, version: reinstallVersion }
+        ? {
+          enabled: true,
+          os: reinstallOS,
+          version: reinstallVersion,
+          // Only sent when it actually applies; the backend ignores
+          // it with strict mode off.
+          ...(strictHostKey && reinstallHostKeyAck ? { acknowledgeUnverifiableHostKey: true } : {}),
+        }
         : { enabled: false }
     };
 
@@ -581,6 +601,23 @@ function BootstrapView() {
               <div className="mute" style={{ fontSize: 11, marginTop: 6 }}>
                 The target reboots into the chosen OS, sshd is set to <span className="mono">:4242</span> with the ansible public key in root&rsquo;s <span className="mono">authorized_keys</span>, then bootstrap continues. Expect 10&ndash;30 minutes; the run lives on the backend so you can close this tab and re-attach later. <b>Assumes the target&rsquo;s address (IP or hostname&rsquo;s DNS) still points at the same machine after the reboot.</b>
               </div>
+              {strictHostKey && (
+                <div style={{ marginTop: 10 }}>
+                  <label className="opt" htmlFor="boot-reinstall-hostkey-ack">
+                    <input
+                      id="boot-reinstall-hostkey-ack"
+                      type="checkbox"
+                      checked={reinstallHostKeyAck}
+                      onChange={e => setReinstallHostKeyAck(e.target.checked)}
+                      disabled={running}
+                    />
+                    <span>I accept that the reinstalled system&rsquo;s host key can&rsquo;t be verified</span>
+                  </label>
+                  <div className="mute" style={{ fontSize: 11, marginTop: 6 }}>
+                    <span className="mono">ANSBUI_BOOTSTRAP_REQUIRE_HOSTKEY</span> is set on this deployment, so host keys are normally pinned before ansbui connects. A reinstall regenerates them, and the replacement can&rsquo;t be checked against anything &mdash; the sessions that would report it are reached over the very connection being verified. Ticking this waives that <b>for this run only</b>; the acknowledgement is recorded in the job log. Compare the fingerprint ansbui reports afterwards against the provider console.
+                  </div>
+                </div>
+              )}
             </div>
           )}
         </div>

@@ -4,8 +4,10 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -126,5 +128,62 @@ func TestNewClientEnforcesSSRFAllowlist(t *testing.T) {
 	t.Setenv("ANSBUI_PROM_ALLOWED_HOSTS", "prom.internal:9090")
 	if _, err := NewClient("http://prom.internal:9090", "instance"); err != nil {
 		t.Errorf("allowlisted host rejected: %v", err)
+	}
+}
+
+// TestPinnedDialContextRefusesMetadataAddress drives the transport
+// end to end: a hostname that resolves to a cloud-metadata address
+// must be refused at dial time, not merely at config time.
+// CheckPromHost vets the name, but the default transport used to
+// resolve and connect independently — so the value checked and the
+// value dialed were never the same thing.
+func TestPinnedDialContextRefusesMetadataAddress(t *testing.T) {
+	// An IP literal takes the same validation path as a resolved
+	// answer, so it exercises the policy without needing custom DNS.
+	_, err := pinnedDialContext(context.Background(), "tcp", "169.254.169.254:80")
+	if err == nil {
+		t.Fatal("dialed the cloud-metadata address")
+	}
+	if !strings.Contains(err.Error(), "metadata") && !strings.Contains(err.Error(), "link-local") {
+		t.Errorf("unexpected error, want a policy denial: %v", err)
+	}
+
+	if _, err := pinnedDialContext(context.Background(), "tcp", "169.254.1.1:9090"); err == nil {
+		t.Error("dialed a link-local address")
+	}
+}
+
+// The pin must not break the normal case: a reachable, policy-allowed
+// address still connects.
+func TestPinnedDialContextAllowsNormalTarget(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+	go func() {
+		if c, aerr := ln.Accept(); aerr == nil {
+			_ = c.Close()
+		}
+	}()
+
+	conn, err := pinnedDialContext(context.Background(), "tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatalf("policy-allowed target refused: %v", err)
+	}
+	_ = conn.Close()
+}
+
+// And the CIDR pin, when set, is enforced at the socket boundary.
+func TestPinnedDialContextHonoursCIDRPin(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+
+	t.Setenv("ANSBUI_PROM_ALLOWED_CIDRS", "10.0.0.0/8")
+	if _, err := pinnedDialContext(context.Background(), "tcp", ln.Addr().String()); err == nil {
+		t.Fatal("loopback dialed despite a 10.0.0.0/8 pin")
 	}
 }

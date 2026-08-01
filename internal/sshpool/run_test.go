@@ -54,3 +54,45 @@ func TestRun_SemaphoreSaturationHonorsContext(t *testing.T) {
 		t.Fatalf("Run blocked %s past its context deadline", waited)
 	}
 }
+
+// RunStdin must honour ctx while waiting on the shared session
+// semaphore, and must not touch the SSH client before it holds a
+// slot. A nil client proves the point: if acquisition were
+// unconditional, the call would panic dereferencing it instead of
+// returning the queue error.
+func TestRunStdinRespectsCancelledContext(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := RunStdin(ctx, nil, "echo hi", strings.NewReader("in"))
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("cancelled context should not have run the command")
+		}
+		if !strings.Contains(err.Error(), "SSH query slot") {
+			t.Errorf("unexpected error: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("RunStdin ignored the cancelled context")
+	}
+}
+
+// The semaphore must be released on every path, including the error
+// ones, or a handful of failed calls would wedge the pool for good.
+func TestRunStdinReleasesSlotOnError(t *testing.T) {
+	for i := 0; i < cap(runSem)+2; i++ {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		_, _, _ = RunStdin(ctx, nil, "echo hi", nil)
+	}
+	if len(runSem) != 0 {
+		t.Fatalf("runSem still holds %d slots after failed calls", len(runSem))
+	}
+}

@@ -2,24 +2,45 @@ package ansible
 
 import "regexp"
 
-// redactRE matches "password: VALUE" / "passphrase: VALUE" /
-// "apikey: VALUE" / "secret_api_key: VALUE" shapes in log output,
-// including JSON-style quoted keys and `=`-delimited shell arg form.
-// Case-insensitive because sources vary (JSON, YAML debug,
-// ansible -a "password=..."). The unquoted value alternative runs to
-// a structural boundary (comma, brace, bracket, quote, newline)
-// rather than to whitespace, so multi-word passphrases are scrubbed
-// whole. The key is preserved so readers can tell a secret *was*
-// present. The token / api[_-]?key / secret[_-]?api[_-]?key
-// alternatives scrub common credential shapes that can echo back in
-// command previews, module output, or HTTP error bodies.
-var redactRE = regexp.MustCompile(`(?i)"?(password|passphrase|token|api[_-]?key|secret[_-]?api[_-]?key)"?\s*[:=]\s*("[^"]*"|'[^']*'|[^,}\]"\n]+)`)
+// sensitiveWords is the single definition of "this key name names a
+// secret", shared by the structured-key matcher and the log-text
+// matcher below. They used to carry separate lists and disagreed:
+// sensitiveKeyRE knew about bare `secret` and `private_key`, redactRE
+// did not, so a structured extra-var called client_secret was
+// scrubbed while the same name echoed in module output or an HTTP
+// error body was written to runs.json in the clear. One list means
+// they can't drift apart again.
+const sensitiveWords = `password|passphrase|token|secret|api[_-]?key|apikey|private[_-]?key|credential`
 
 // sensitiveKeyRE matches structured argument / extra-var keys whose
 // values should not be retained in run history. It intentionally
 // matches substrings so names like db_password, porkbun_secret_key,
 // apiToken, and private_key are all scrubbed.
-var sensitiveKeyRE = regexp.MustCompile(`(?i)(password|passphrase|token|secret|api[_-]?key|apikey|private[_-]?key)`)
+var sensitiveKeyRE = regexp.MustCompile(`(?i)(` + sensitiveWords + `)`)
+
+// redactRE matches "<key>: VALUE" / "<key>=VALUE" shapes in log
+// output, where <key> is any identifier *containing* one of
+// sensitiveWords — client_secret, aws_secret_access_key, db_password,
+// private_key. Case-insensitive because sources vary (JSON, YAML
+// debug, ansible -a "password=...").
+//
+// The surrounding [\w.]* is what generalises the match from "the key
+// ends in `password`" to "the key contains a secret word anywhere",
+// which is what sensitiveKeyRE always meant. It deliberately excludes
+// `-` so that hyphenated CLI flags whose *value is not a secret* keep
+// rendering in command previews: `--vault-password-file=/dev/fd/3`
+// stays readable because `-file` can't be absorbed into the key.
+//
+// Quoted values allow backslash escapes, so a JSON string like
+// {"password":"abc\"tail"} is consumed whole. The naive "[^"]*" this
+// replaced stopped at the escaped quote and left `tail"` on disk.
+// The unquoted alternative runs to a structural boundary (comma,
+// brace, bracket, quote, newline) rather than to whitespace, so
+// multi-word passphrases are scrubbed whole. The key is preserved so
+// readers can tell a secret *was* present.
+var redactRE = regexp.MustCompile(
+	`(?i)"?([\w.]*(?:` + sensitiveWords + `)[\w.]*)"?\s*[:=]\s*` +
+		`("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^,}\]"\n]+)`)
 
 // RedactText scrubs common credential key/value shapes from a single
 // line before it is streamed to the browser or written to disk.

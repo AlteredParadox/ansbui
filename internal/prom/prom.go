@@ -95,8 +95,59 @@ func NewClient(baseURL, hostLabel string) (*Client, error) {
 			CheckRedirect: func(*http.Request, []*http.Request) error {
 				return http.ErrUseLastResponse
 			},
+			Transport: &http.Transport{DialContext: pinnedDialContext},
 		},
 	}, nil
+}
+
+// pinnedDialContext resolves the target itself, vets each candidate
+// address with config.CheckPromResolvedIP, and dials the exact IP it
+// approved.
+//
+// CheckPromHost runs against the configured *hostname*, but the
+// default transport then resolves that name independently at fetch
+// time and connects to whatever comes back — so the value that was
+// checked and the value that was dialed were never the same thing.
+// Anyone controlling DNS for an allowlisted name could therefore
+// steer the server-side request anywhere, including straight past
+// the string-based metadata denylist. Validating and dialing the
+// same address closes that, and doing it per connection means a
+// later rebind can't ride in on a new one.
+func pinnedDialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, fmt.Errorf("prometheus dial: %w", err)
+	}
+	var ips []net.IP
+	if literal := net.ParseIP(host); literal != nil {
+		ips = []net.IP{literal}
+	} else {
+		resolved, rerr := net.DefaultResolver.LookupIPAddr(ctx, host)
+		if rerr != nil {
+			return nil, fmt.Errorf("prometheus dial: resolve %s: %w", host, rerr)
+		}
+		for _, a := range resolved {
+			ips = append(ips, a.IP)
+		}
+	}
+	if len(ips) == 0 {
+		return nil, fmt.Errorf("prometheus dial: %s resolved to no addresses", host)
+	}
+	dialer := &net.Dialer{Timeout: 5 * time.Second}
+	var lastErr error
+	for _, ip := range ips {
+		if err := config.CheckPromResolvedIP(ip); err != nil {
+			lastErr = err
+			continue
+		}
+		conn, err := dialer.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		return conn, nil
+	}
+	return nil, fmt.Errorf("prometheus dial %s: %w", host, lastErr)
 }
 
 // ProbeResult captures per-query diagnostics so the UI can show the
@@ -305,6 +356,12 @@ func (c *Client) instantLabels(ctx context.Context, q string) (map[string]map[st
 	return out, nil
 }
 
+// maxPromResponse bounds a single query response. The queries are a
+// fixed set returning one scalar per host, so even a large fleet is
+// far below this; the cap exists so a hostile endpoint can't stream
+// unbounded JSON into the decoder.
+const maxPromResponse = 8 << 20
+
 func (c *Client) fetch(ctx context.Context, q string) (*promResp, error) {
 	u := fmt.Sprintf("%s/api/v1/query?query=%s", c.base, url.QueryEscape(q))
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
@@ -318,11 +375,19 @@ func (c *Client) fetch(ctx context.Context, q string) (*promResp, error) {
 	}
 	defer r.Body.Close()
 	if r.StatusCode >= 400 {
-		body, _ := io.ReadAll(io.LimitReader(r.Body, 512))
-		return nil, fmt.Errorf("prometheus %d: %s", r.StatusCode, strings.TrimSpace(string(body)))
+		// Only the status is reported. This used to echo up to 512
+		// bytes of the response body, which surfaces in the operator-
+		// visible probe diagnostics — a small but real disclosure
+		// channel for whatever service the request actually reached.
+		return nil, fmt.Errorf("prometheus %d", r.StatusCode)
 	}
+	// Cap the success path too: only the error path was bounded, so a
+	// hostile or wedged endpoint could stream an arbitrarily large
+	// JSON body and be limited only by the 8s client timeout. A real
+	// query response for this fixed set of queries is orders of
+	// magnitude below the cap.
 	var pr promResp
-	if err := json.NewDecoder(r.Body).Decode(&pr); err != nil {
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxPromResponse)).Decode(&pr); err != nil {
 		return nil, fmt.Errorf("decode prometheus response: %w", err)
 	}
 	if pr.Status != "success" {

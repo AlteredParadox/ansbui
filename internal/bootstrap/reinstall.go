@@ -40,6 +40,15 @@ type ReinstallOpts struct {
 	Enabled bool   `json:"enabled"`
 	OS      string `json:"os"`
 	Version string `json:"version"`
+	// AcknowledgeUnverifiableHostKey lets a run proceed under strict
+	// host-key mode (ANSBUI_BOOTSTRAP_REQUIRE_HOSTKEY) even though a
+	// reinstall's replacement host key cannot be authenticated in
+	// band. It is a deliberate per-run exception, not a stored
+	// setting: strict mode keeps meaning "no *silent* trust on first
+	// use", and the operator's acknowledgement is recorded in the job
+	// log. Ignored entirely when strict mode is off, where TOFU is
+	// already the documented default.
+	AcknowledgeUnverifiableHostKey bool `json:"acknowledgeUnverifiableHostKey,omitempty"`
 }
 
 // reinstallOSMatrix is the curated OS/version allowlist exposed to
@@ -140,6 +149,42 @@ func validateReinstall(opts ReinstallOpts) error {
 	return fmt.Errorf("unsupported %s version %q — allowed: %s", opts.OS, opts.Version, strings.Join(versions, ", "))
 }
 
+// checkReinstallHostKeyPolicy refuses a reinstall when strict
+// host-key mode is on.
+//
+// A reinstall wipes the box and the new system generates fresh SSH
+// host keys, so no fingerprint the operator could pin beforehand can
+// cover the reconnect, and nothing in band can authenticate the
+// replacement: the installer-stage and first-boot sessions are
+// themselves reached over the very connection we would be trying to
+// verify, so an on-path attacker controls that evidence too. The
+// only trustworthy source is out of band (the provider's console).
+//
+// requireHostKeyEnv means "never trust an unauthenticated host key",
+// and the reinstall path cannot honour that, so it is refused rather
+// than quietly exempted — which is what it was doing before, since
+// hostKeyRequired() was consulted only on the first-contact dial.
+// The check runs from Validate so the refusal lands as a 400 before
+// a job slot is taken and, critically, long before the target is
+// wiped.
+//
+// AcknowledgeUnverifiableHostKey is the escape hatch, and it is
+// per-run on purpose. Strict mode's real guarantee is that no
+// unauthenticated key is trusted *silently*; an explicit,
+// per-invocation acknowledgement preserves that, whereas a second
+// env var would switch the exemption on permanently and record
+// nothing about who decided or when. runReinstall logs the
+// acknowledgement into the job so it survives in run history.
+func checkReinstallHostKeyPolicy(opts ReinstallOpts) error {
+	if !opts.Enabled || !hostKeyRequired() {
+		return nil
+	}
+	if opts.AcknowledgeUnverifiableHostKey {
+		return nil
+	}
+	return fmt.Errorf("%s is set, but a reinstall regenerates the target's SSH host keys — the replacement key cannot be authenticated in band. Tick the reinstall host-key acknowledgement in the form to accept that for this run (it is recorded in the job log), bootstrap without the reinstall option, or verify the fingerprint ansbui reports against the provider console afterwards", requireHostKeyEnv)
+}
+
 func reinstallOSList() []string {
 	out := make([]string, 0, len(reinstallOSMatrix))
 	for k := range reinstallOSMatrix {
@@ -167,6 +212,17 @@ func runReinstall(ctx context.Context, target *targetSession, req Request, pubKe
 	opts := req.Reinstall
 	if err := validateReinstall(opts); err != nil {
 		return nil, err
+	}
+	// Re-checked here as well as in Validate: Run is exported, and
+	// this is the last point before the target is destroyed.
+	if err := checkReinstallHostKeyPolicy(opts); err != nil {
+		return nil, err
+	}
+	// Record the exception where it outlives the request. Strict mode
+	// is on, the operator waived host-key verification for this run,
+	// and run history should say so.
+	if opts.AcknowledgeUnverifiableHostKey && hostKeyRequired() {
+		emit("meta", "⚠ operator acknowledged that this reinstall's replacement host key cannot be verified — proceeding despite "+requireHostKeyEnv)
 	}
 
 	stdout, err := runReinstallPrep(ctx, target, opts, pubKey, emit)
@@ -857,7 +913,14 @@ func waitForInstallerDone(ctx context.Context, host string, port int, privKey []
 // is returned open ONLY on the hold-done verdict; every other path
 // closes it.
 func tryInstallerDone(ctx context.Context, host string, port int, privKey []byte, expectedOS string) (*targetSession, int, string) {
-	target, err := dialKeyTarget(ctx, host, port, privKey)
+	// No expectation is available: the installer environment
+	// generates its own ephemeral host key, distinct from both the
+	// pre-reinstall system's and the one the installed OS will
+	// generate on first boot. Pinning across those transitions would
+	// reject the legitimate box. Strict-mode deployments refuse the
+	// reinstall before it starts (Validate / runReinstall) rather
+	// than relying on a pin that cannot exist here.
+	target, err := dialKeyTarget(ctx, host, port, privKey, hostKeyExpectation{})
 	if err != nil {
 		return nil, installerInstalling, "dial: " + err.Error()
 	}
@@ -1086,7 +1149,12 @@ func waitForReinstallTarget(ctx context.Context, host string, port int, privKey 
 // session is closed on the not-ready paths so we don't leak SSH
 // connections during the wait loop.
 func tryReinstallReady(ctx context.Context, host string, port int, privKey []byte, probe reinstallReadyProbe) (*targetSession, string) {
-	target, err := dialKeyTarget(ctx, host, port, privKey)
+	// Empty expectation for the same reason as tryInstallerDone: this
+	// loop legitimately spans the installer-to-installed-OS handover,
+	// so the key seen on an early retry is not the key the booted
+	// system will present. The security control for this window is
+	// the strict-mode refusal up front, not a pin.
+	target, err := dialKeyTarget(ctx, host, port, privKey, hostKeyExpectation{})
 	if err != nil {
 		return nil, "dial: " + err.Error()
 	}

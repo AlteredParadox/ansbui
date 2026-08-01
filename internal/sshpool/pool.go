@@ -181,6 +181,30 @@ var runSem = make(chan struct{}, 16)
 func Run(ctx context.Context, client *ssh.Client, cmd string) (stdout, stderr string, err error) {
 	ctx, cancel := context.WithTimeout(ctx, runDefaultTimeout)
 	defer cancel()
+	return RunStdin(ctx, client, cmd, nil)
+}
+
+// RunStdin is Run with a stdin stream attached, for commands that
+// take input the way the vault helpers pipe a password rather than
+// putting it in argv. It applies the same output caps and the same
+// process-wide runSem admission as Run.
+//
+// Unlike Run it imposes NO default deadline: its callers already own
+// bounds that differ by an order of magnitude (30s for an
+// ansible-vault invocation, 5 minutes for an atomic inventory write),
+// and clamping them to runDefaultTimeout would fail long writes. The
+// caller is therefore responsible for supplying a ctx with a
+// deadline — without one a stalled remote command holds a session and
+// a semaphore slot until the client disconnects.
+func RunStdin(ctx context.Context, client *ssh.Client, cmd string, stdin io.Reader) (stdout, stderr string, err error) {
+	// Checked before the select below, not just inside it: when the
+	// context is already done AND a semaphore slot is free, both
+	// cases are ready and Go picks one at random, so an abandoned
+	// request could still open a session and fire a command at the
+	// control node. Testing ctx first makes the abort deterministic.
+	if err := ctx.Err(); err != nil {
+		return "", "", fmt.Errorf("waiting for an SSH query slot: %w", err)
+	}
 	select {
 	case runSem <- struct{}{}:
 		defer func() { <-runSem }()
@@ -189,7 +213,7 @@ func Run(ctx context.Context, client *ssh.Client, cmd string) (stdout, stderr st
 	}
 	so := &cappedBuffer{name: "stdout", max: runMaxStdout}
 	se := &cappedBuffer{name: "stderr", max: runMaxStderr}
-	err = Stream(ctx, client, cmd, nil, so, se)
+	err = Stream(ctx, client, cmd, stdin, so, se)
 	return so.buf.String(), se.buf.String(), err
 }
 

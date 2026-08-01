@@ -97,12 +97,15 @@ func dialPasswordTarget(ctx context.Context, host string, port int, user, passwo
 // rest of the bootstrap steps (ansible user setup, sshd flip if
 // not already on 4242, inventory edit) from this new session.
 //
-// Host-key verification stays TOFU here — the reinstall replaces
-// the host's keys, so any pin from before it is stale and there's
-// no safe way to know the new fingerprint without an out-of-band
-// channel. The accepted fingerprint is recorded so runReinstall can
-// surface it once the new system is confirmed.
-func dialKeyTarget(ctx context.Context, host string, port int, privKey []byte) (*targetSession, error) {
+// The reinstall replaces the host's keys, so no pin from before it
+// can cover the first post-reinstall dial and expect is empty there
+// (TOFU, with a loud warning from the caller). `expect` is a real
+// parameter rather than a hard-coded empty value so that every call
+// site has to state its choice: the retry loops pin to the key seen
+// on first contact, and a strict-mode deployment refuses the whole
+// reinstall up front (see requireHostKeyEnv) rather than silently
+// trusting a replacement key here.
+func dialKeyTarget(ctx context.Context, host string, port int, privKey []byte, expect hostKeyExpectation) (*targetSession, error) {
 	signer, err := ssh.ParsePrivateKey(privKey)
 	if err != nil {
 		return nil, fmt.Errorf("parse private key: %w", err)
@@ -112,7 +115,7 @@ func dialKeyTarget(ctx context.Context, host string, port int, privKey []byte) (
 		Auth:    []ssh.AuthMethod{ssh.PublicKeys(signer)},
 		Timeout: 15 * time.Second,
 	}
-	return dialTargetWithConfig(ctx, host, port, "", hostKeyExpectation{}, cfg)
+	return dialTargetWithConfig(ctx, host, port, "", expect, cfg)
 }
 
 // dialTargetWithConfig is the shared dial path. Centralising

@@ -202,14 +202,89 @@ var hostsRE = regexp.MustCompile(`(?m)^\s*hosts:\s*(.+?)\s*$`)
 // repetition (S5852-safe). Comments at any indent or with
 // optional space after `#` are accepted.
 //
-// This is a regex over the raw YAML, not a parser-aware match —
-// a `# ansbui-include:` line buried inside a YAML block scalar
-// (`shell: |` etc.) would also match. The blast radius is
-// bounded because the resulting hosts have to already exist in
-// the inventory for ansible's `--limit` to act on them, but
-// operators reviewing imported playbooks should know that any
-// such line is honoured by ansbui's prep step.
+// Applied only to lines that are real YAML comments — see
+// stripBlockScalars, which blanks block-scalar content first.
+// Matching the raw text meant a `# ansbui-include:` line buried in a
+// `shell: |` body counted as an annotation, so text that YAML treats
+// as data could widen the operator's `--limit` to hosts they hadn't
+// selected.
 var includeRE = regexp.MustCompile(`(?m)^\s*#\s*ansbui-include:\s*(.+?)\s*$`)
+
+// stripBlockScalars returns yaml with the contents of every block
+// scalar (`key: |`, `key: >`, `- |`, with any chomping/indentation
+// indicators) replaced by blank lines, leaving everything else — and
+// the total line count — untouched.
+//
+// This is deliberately a line scanner rather than a full parse. It
+// can only ever *remove* candidate matches, so every annotation that
+// works today in a genuine comment keeps working, whereas routing
+// annotations through a YAML parser's comment attachment would risk
+// silently dropping legitimate ones (and a missed include quietly
+// narrows a run's targets).
+func stripBlockScalars(yaml string) string {
+	lines := strings.Split(yaml, "\n")
+	out := make([]string, len(lines))
+	inBlock := false
+	blockIndent := 0
+	for i, line := range lines {
+		if inBlock {
+			trimmed := strings.TrimSpace(line)
+			// Blank lines belong to the block and don't end it.
+			if trimmed == "" {
+				out[i] = ""
+				continue
+			}
+			if lineIndent(line) > blockIndent {
+				out[i] = "" // block content: not a comment, drop it
+				continue
+			}
+			inBlock = false // dedented out of the block
+		}
+		out[i] = line
+		if opensBlockScalar(line) {
+			inBlock = true
+			blockIndent = lineIndent(line)
+		}
+	}
+	return strings.Join(out, "\n")
+}
+
+func lineIndent(line string) int {
+	return len(line) - len(strings.TrimLeft(line, " \t"))
+}
+
+// opensBlockScalar reports whether line introduces a block scalar,
+// i.e. its value is `|` or `>` plus optional chomping/indentation
+// indicators, optionally followed by a comment.
+func opensBlockScalar(line string) bool {
+	s := strings.TrimSpace(line)
+	if s == "" {
+		return false
+	}
+	// A sequence entry can introduce one directly ("- |").
+	s = strings.TrimPrefix(s, "- ")
+	// The value is whatever follows the last colon; using the last one
+	// keeps `url: http://host` from being read as a value of "//host".
+	if i := strings.LastIndex(s, ":"); i >= 0 {
+		s = s[i+1:]
+	}
+	s = strings.TrimSpace(s)
+	if i := strings.Index(s, "#"); i >= 0 {
+		s = strings.TrimSpace(s[:i])
+	}
+	if s == "" || (s[0] != '|' && s[0] != '>') {
+		return false
+	}
+	// Only chomping (+/-) and explicit-indentation digits may follow;
+	// anything else means this was ordinary scalar text such as
+	// `msg: |whatever`.
+	for _, r := range s[1:] {
+		if r != '+' && r != '-' && (r < '0' || r > '9') {
+			return false
+		}
+	}
+	return true
+}
 
 func annotateFromYAML(p *Playbook) {
 	if m := hostsRE.FindStringSubmatch(p.YAML); len(m) == 2 {
@@ -226,7 +301,7 @@ func annotateFromYAML(p *Playbook) {
 // their own include line should target both sets, not just the
 // first one we encountered.
 func parseIncludesFromYAML(yaml string) []string {
-	matches := includeRE.FindAllStringSubmatch(yaml, -1)
+	matches := includeRE.FindAllStringSubmatch(stripBlockScalars(yaml), -1)
 	if len(matches) == 0 {
 		return nil
 	}

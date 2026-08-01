@@ -295,7 +295,10 @@ func Validate(req Request) error {
 	if err := boundLength("username", req.Username, 64); err != nil {
 		return err
 	}
-	return validateReinstall(req.Reinstall)
+	if err := validateReinstall(req.Reinstall); err != nil {
+		return err
+	}
+	return checkReinstallHostKeyPolicy(req.Reinstall)
 }
 
 // validateProvider gates required + post-normalize-non-empty so
@@ -687,15 +690,21 @@ func readControlNodePrivkey(ctx context.Context, pool *sshpool.Pool, srv config.
 	if err != nil {
 		return nil, err
 	}
-	var so, se bytes.Buffer
-	if err := sshpool.Stream(ctx, cli, "cat "+shellQuotePath(path), nil, &so, &se); err != nil {
-		msg := strings.TrimSpace(se.String())
+	// sshpool.Run, not Stream: Run applies the shared output caps,
+	// the 2-minute default deadline, and the process-wide session
+	// semaphore. Streaming into a bare bytes.Buffer had none of
+	// those, and bootstrap jobs carry no deadline of their own, so a
+	// control node returning an endless `cat` grew the heap until the
+	// operator cancelled the run.
+	so, se, err := sshpool.Run(ctx, cli, "cat "+shellQuotePath(path))
+	if err != nil {
+		msg := strings.TrimSpace(se)
 		if msg == "" {
 			msg = err.Error()
 		}
 		return nil, fmt.Errorf("read %s on control node: %s", path, msg)
 	}
-	body := so.Bytes()
+	body := []byte(so)
 	if len(body) == 0 {
 		return nil, fmt.Errorf("control node private key %s is empty", path)
 	}
@@ -737,28 +746,49 @@ func readControlNodePrivkey(ctx context.Context, pool *sshpool.Pool, srv config.
 //     ANSBUI_BOOTSTRAP_REQUIRE_HOSTKEY is set; otherwise accepted
 //     loudly, and the fingerprint is recorded so this happens at
 //     most once per target.
+//
+// resolveHostKeyExpectation decides what host key the target must
+// present, in precedence order:
+//
+//  1. the fingerprint the operator pinned in the form,
+//  2. otherwise the one a previous bootstrap recorded for this
+//     host:port,
+//  3. otherwise none — first contact, TOFU — unless strict mode
+//     (requireHostKeyEnv) is set, in which case the run is refused
+//     before any credential is transmitted.
+//
+// Split out from connectAndPrecheck so the precedence and the strict
+// -mode refusal are unit-testable without an SSH server: this is the
+// decision that determines whether the operator's password can reach
+// an impostor, and it previously had no test coverage at all.
+func resolveHostKeyExpectation(req Request, hostport string, hostKeys *HostKeyStore) (hostKeyExpectation, error) {
+	if fp := normalizeFingerprint(req.HostKeyFingerprint); fp != "" {
+		return hostKeyExpectation{fp: fp, src: "the operator-pinned fingerprint"}, nil
+	}
+	stored, ok, err := hostKeys.Get(hostport)
+	if err != nil {
+		return hostKeyExpectation{}, err
+	}
+	if ok {
+		return hostKeyExpectation{
+			fp:  stored,
+			src: "the fingerprint recorded by a previous bootstrap (" + hostKeys.Path() + ")",
+		}, nil
+	}
+	if hostKeyRequired() {
+		return hostKeyExpectation{}, fmt.Errorf("%s is set and no host key fingerprint is pinned or recorded for %s — get it from the provider console (ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub) and supply it in the form", requireHostKeyEnv, hostport)
+	}
+	return hostKeyExpectation{}, nil
+}
+
 func connectAndPrecheck(ctx context.Context, req Request, hostKeys *HostKeyStore, emit func(string, string)) (*targetSession, error) {
 	sudoPw := ""
 	if req.UseSudo {
 		sudoPw = req.SudoPassword
 	}
 	hostport := net.JoinHostPort(req.IP, strconv.Itoa(req.Port))
-	expect := hostKeyExpectation{
-		fp:  normalizeFingerprint(req.HostKeyFingerprint),
-		src: "the operator-pinned fingerprint",
-	}
-	if expect.fp == "" {
-		stored, ok, err := hostKeys.Get(hostport)
-		if err != nil {
-			emit("fail", err.Error())
-			return nil, err
-		}
-		if ok {
-			expect = hostKeyExpectation{fp: stored, src: "the fingerprint recorded by a previous bootstrap (" + hostKeys.Path() + ")"}
-		}
-	}
-	if expect.fp == "" && hostKeyRequired() {
-		err := fmt.Errorf("%s is set and no host key fingerprint is pinned or recorded for %s — get it from the provider console (ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub) and supply it in the form", requireHostKeyEnv, hostport)
+	expect, err := resolveHostKeyExpectation(req, hostport, hostKeys)
+	if err != nil {
 		emit("fail", err.Error())
 		return nil, err
 	}
@@ -938,15 +968,15 @@ func readControlNodePubkey(ctx context.Context, pool *sshpool.Pool, srv config.S
 	if err != nil {
 		return "", err
 	}
-	var so, se bytes.Buffer
-	if err := sshpool.Stream(ctx, cli, "cat "+shellQuotePath(defaultControlPubKeyPath), nil, &so, &se); err != nil {
-		msg := strings.TrimSpace(se.String())
+	so, se, err := sshpool.Run(ctx, cli, "cat "+shellQuotePath(defaultControlPubKeyPath))
+	if err != nil {
+		msg := strings.TrimSpace(se)
 		if msg == "" {
 			msg = err.Error()
 		}
 		return "", fmt.Errorf("read %s on control node: %s", defaultControlPubKeyPath, msg)
 	}
-	pub := strings.TrimSpace(so.String())
+	pub := strings.TrimSpace(so)
 	if pub == "" {
 		return "", fmt.Errorf("control node public key %s is empty", defaultControlPubKeyPath)
 	}
@@ -993,19 +1023,19 @@ func updateInventoryFile(ctx context.Context, pool *sshpool.Pool, srv config.Ser
 		return err
 	}
 	full := path.Join(srv.WorkDir, srv.Inventory)
-	var so, se bytes.Buffer
-	if err := sshpool.Stream(ctx, cli, "cat "+shellQuote(full), nil, &so, &se); err != nil {
-		msg := strings.TrimSpace(se.String())
+	so, se, err := sshpool.Run(ctx, cli, "cat "+shellQuote(full))
+	if err != nil {
+		msg := strings.TrimSpace(se)
 		if msg == "" {
 			msg = err.Error()
 		}
 		return fmt.Errorf("read %s: %s", srv.Inventory, msg)
 	}
-	updated, err := addHostToInventoryYAML(so.Bytes(), provider, fqdn)
+	updated, err := addHostToInventoryYAML([]byte(so), provider, fqdn)
 	if err != nil {
 		return err
 	}
-	if bytes.Equal(updated, so.Bytes()) {
+	if bytes.Equal(updated, []byte(so)) {
 		return nil // already present, nothing to write
 	}
 	return ansible.WriteFileInWorkDir(ctx, cli, srv.WorkDir, srv.Inventory, string(updated))

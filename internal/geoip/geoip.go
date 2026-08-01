@@ -13,8 +13,10 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	"sync"
+	"strings"
 	"time"
+
+	"github.com/AlteredParadox/ansbui/internal/ttlcache"
 )
 
 // Result is what the UI ends up consuming. Label is a pre-formatted
@@ -27,13 +29,22 @@ type Result struct {
 	Label   string `json:"label,omitempty"`
 }
 
-// Client is safe for concurrent use. The cache lives for the process
-// lifetime; a 24h TTL keeps things fresh enough without hammering
-// the upstream on every inventory reload.
+// maxCacheEntries bounds the result cache. Keys are public IPs drawn
+// from control-node inventory, so the key space is attacker-
+// influenced: the cache used to be an unbounded map that never
+// deleted expired entries, which let a hostile or malfunctioning
+// control node grow it for the process lifetime by rotating
+// addresses across inventory requests (failed lookups included).
+// A few thousand entries covers any realistic fleet.
+const maxCacheEntries = 4096
+
+// Client is safe for concurrent use. Results are cached with a 24h
+// TTL — fresh enough without hammering the upstream on every
+// inventory reload — in a bounded cache that evicts on expiry and on
+// capacity.
 type Client struct {
 	http     *http.Client
-	mu       sync.Mutex
-	cache    map[string]cacheEntry
+	cache    *ttlcache.Cache[cacheEntry]
 	ttl      time.Duration
 	endpoint string
 }
@@ -41,7 +52,6 @@ type Client struct {
 type cacheEntry struct {
 	result Result
 	err    error
-	expiry time.Time
 }
 
 // NewClient returns a client pointing at ipinfo.io. The endpoint is
@@ -50,10 +60,18 @@ type cacheEntry struct {
 func NewClient() *Client {
 	return &Client{
 		http:     &http.Client{Timeout: 5 * time.Second},
-		cache:    map[string]cacheEntry{},
+		cache:    ttlcache.New[cacheEntry](maxCacheEntries),
 		ttl:      24 * time.Hour,
 		endpoint: "https://ipinfo.io",
 	}
+}
+
+// WithEndpoint points the client at a different geoip service —
+// a self-hosted one, or a stub in tests. The trailing slash is
+// trimmed so callers can pass either form.
+func (c *Client) WithEndpoint(endpoint string) *Client {
+	c.endpoint = strings.TrimRight(endpoint, "/")
+	return c
 }
 
 // transientErrTTL is how long a transient failure (context
@@ -78,7 +96,7 @@ func (c *Client) Lookup(ctx context.Context, ip string) (Result, error) {
 		return cached.result, cached.err
 	}
 	result, err := c.fetch(ctx, ip)
-	c.set(ip, cacheEntry{result: result, err: err, expiry: time.Now().Add(c.entryTTL(err))})
+	c.set(ip, cacheEntry{result: result, err: err}, c.entryTTL(err))
 	return result, err
 }
 
@@ -101,19 +119,11 @@ func (c *Client) entryTTL(err error) time.Duration {
 }
 
 func (c *Client) get(ip string) (cacheEntry, bool) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	e, ok := c.cache[ip]
-	if !ok || time.Now().After(e.expiry) {
-		return cacheEntry{}, false
-	}
-	return e, true
+	return c.cache.Get(ip)
 }
 
-func (c *Client) set(ip string, e cacheEntry) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.cache[ip] = e
+func (c *Client) set(ip string, e cacheEntry, ttl time.Duration) {
+	c.cache.Set(ip, e, ttl)
 }
 
 type ipinfoResponse struct {

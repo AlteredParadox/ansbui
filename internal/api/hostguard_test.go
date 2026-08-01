@@ -115,6 +115,69 @@ func TestOriginGuardDNSRebinding(t *testing.T) {
 	}
 }
 
+// TestOriginGuardCoversAPIReads locks in the route-wide CSRF check.
+// The guard used to apply only to mutating verbs plus three GET
+// paths, so a hostile page the operator visited could fire off
+// /api/facts?host=all (an ansible setup run across the whole fleet)
+// and every other API read. The responses were always opaque
+// cross-origin, but the work still ran.
+func TestOriginGuardCoversAPIReads(t *testing.T) {
+	ok := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
+	guard := withOriginGuard(ok, allowedHostnames(selfHost))
+
+	req := func(method, path, origin string) int {
+		r := httptest.NewRequest(method, path, nil)
+		r.Host = selfHost // IP literal: passes the Host/rebinding check
+		if origin != "" {
+			r.Header.Set("Origin", origin)
+		}
+		w := httptest.NewRecorder()
+		guard.ServeHTTP(w, r)
+		return w.Code
+	}
+
+	// Every API read is now rejected when a foreign Origin is present,
+	// not just the bootstrap/stream paths that were allowlisted before.
+	for _, path := range []string{
+		"/api/facts?host=all",
+		"/api/inventory",
+		"/api/metrics",
+		"/api/playbooks",
+		"/api/playbooks/content?path=site.yml",
+		"/api/runs",
+		"/api/runs/1",
+		"/api/vault",
+		"/api/servers",
+		"/api/settings",
+		"/api/health",
+		"/api/bootstrap/jobs",
+		"/api/adhoc/stream",
+	} {
+		if code := req(http.MethodGet, path, "http://evil.example"); code != http.StatusForbidden {
+			t.Errorf("cross-origin GET %s passed with %d, want 403", path, code)
+		}
+	}
+
+	// HEAD is guarded too — same handlers, same side effects.
+	if code := req(http.MethodHead, "/api/inventory", "http://evil.example"); code != http.StatusForbidden {
+		t.Errorf("cross-origin HEAD passed with %d", code)
+	}
+
+	// Legitimate traffic must keep working. Browsers send no Origin at
+	// all on same-origin GETs, and curl/CLI clients send none ever —
+	// only a present-and-wrong Origin is rejected.
+	if code := req(http.MethodGet, "/api/inventory", ""); code != http.StatusNoContent {
+		t.Errorf("same-origin GET (no Origin header) rejected with %d", code)
+	}
+	if code := req(http.MethodGet, "/api/inventory", "http://127.0.0.1:8787"); code != http.StatusNoContent {
+		t.Errorf("same-origin GET (matching Origin) rejected with %d", code)
+	}
+	// The static SPA shell stays reachable cross-origin so the page loads.
+	if code := req(http.MethodGet, "/", "http://evil.example"); code != http.StatusNoContent {
+		t.Errorf("static shell blocked with %d", code)
+	}
+}
+
 // TestAllowedHostsWithPortMatches locks in the port-stripping fix: an
 // operator who copies the rejected Host verbatim (host:port, exactly
 // what the 403 message echoes) into ANSBUI_ALLOWED_HOSTS must then be
