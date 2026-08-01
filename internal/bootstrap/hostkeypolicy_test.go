@@ -208,6 +208,39 @@ func TestReinstallHostKeyPolicy(t *testing.T) {
 		}
 	})
 
+	// The escape hatch: strict mode stays on, but the operator can
+	// waive verification for one run. The guarantee strict mode
+	// actually makes is that nothing is trusted *silently*.
+	t.Run("acknowledgement permits a reinstall under strict mode", func(t *testing.T) {
+		t.Setenv(requireHostKeyEnv, "1")
+		acked := enabled
+		acked.AcknowledgeUnverifiableHostKey = true
+		if err := checkReinstallHostKeyPolicy(acked); err != nil {
+			t.Fatalf("acknowledged reinstall refused: %v", err)
+		}
+	})
+
+	t.Run("the refusal explains how to proceed", func(t *testing.T) {
+		t.Setenv(requireHostKeyEnv, "1")
+		err := checkReinstallHostKeyPolicy(enabled)
+		if err == nil {
+			t.Fatal("expected a refusal")
+		}
+		if !strings.Contains(err.Error(), "acknowledgement") {
+			t.Errorf("refusal should point at the acknowledgement: %v", err)
+		}
+	})
+
+	// With strict mode off the field is meaningless and must not
+	// change anything — the documented default is unchanged TOFU.
+	t.Run("acknowledgement is a no-op when strict mode is off", func(t *testing.T) {
+		acked := enabled
+		acked.AcknowledgeUnverifiableHostKey = true
+		if err := checkReinstallHostKeyPolicy(acked); err != nil {
+			t.Fatalf("reinstall refused with strict mode off: %v", err)
+		}
+	})
+
 	t.Run("reinstall allowed when strict mode is off", func(t *testing.T) {
 		if err := checkReinstallHostKeyPolicy(enabled); err != nil {
 			t.Fatalf("reinstall refused with strict mode off: %v", err)
@@ -227,6 +260,11 @@ func TestReinstallHostKeyPolicy(t *testing.T) {
 		}
 		if err := Validate(req); err == nil {
 			t.Fatal("Validate accepted a reinstall under strict host-key mode")
+		}
+
+		req.Reinstall.AcknowledgeUnverifiableHostKey = true
+		if err := Validate(req); err != nil {
+			t.Fatalf("Validate rejected an acknowledged reinstall: %v", err)
 		}
 	})
 }

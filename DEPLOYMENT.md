@@ -220,17 +220,29 @@ Optional env vars worth knowing about:
   front, so even the first contact is authenticated. Recommended
   wherever the provider exposes host keys out of band.
 
-  This also **refuses any run with the reinstall option enabled**.
-  A reinstall wipes the box and the new system generates fresh
-  host keys, so no fingerprint pinned beforehand can cover the
-  reconnect — and nothing in band can authenticate the
-  replacement, because the installer and first-boot sessions are
-  reached over the very connection that would need verifying. The
-  run is rejected up front (a 400, before a job starts and before
-  the target is touched) rather than quietly falling back to
-  trust-on-first-use. To reinstall a box under this policy, unset
-  the variable for that run and verify the fingerprint ansbui
-  reports against the provider console afterwards.
+  This also affects the **reinstall** option. A reinstall wipes the
+  box and the new system generates fresh host keys, so no
+  fingerprint pinned beforehand can cover the reconnect — and
+  nothing in band can authenticate the replacement, because the
+  installer and first-boot sessions are reached over the very
+  connection that would need verifying. Rather than quietly
+  falling back to trust-on-first-use, such a run is rejected up
+  front (a 400, before a job starts and before the target is
+  touched) **unless the operator ticks the host-key
+  acknowledgement in the bootstrap form**.
+
+  That acknowledgement is deliberately per-run, not a second
+  environment variable: strict mode's real guarantee is that no
+  unauthenticated key is trusted *silently*, and an explicit
+  per-invocation waiver preserves that, while a config knob would
+  switch the exemption on permanently and record nothing about who
+  decided or when. The waiver is written into the job log, so it
+  survives in run history. Compare the fingerprint ansbui reports
+  afterwards against the provider console.
+
+  The checkbox only appears when this variable is set; with strict
+  mode off (the default) reinstall behaves exactly as before and
+  the field is ignored.
 
 ## 8. Backup & restore
 

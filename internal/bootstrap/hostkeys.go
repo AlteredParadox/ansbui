@@ -154,3 +154,9 @@ func hostKeyRequired() bool {
 	v := strings.TrimSpace(os.Getenv(requireHostKeyEnv))
 	return v == "1" || strings.EqualFold(v, "true")
 }
+
+// HostKeyRequired exposes the strict-mode state to the API layer so
+// the bootstrap form can tell whether the reinstall acknowledgement
+// applies, instead of letting the operator fill in the whole form
+// and only then discover the run is refused.
+func HostKeyRequired() bool { return hostKeyRequired() }

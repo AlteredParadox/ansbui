@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/AlteredParadox/ansbui/internal/bootstrap"
 	"github.com/AlteredParadox/ansbui/internal/config"
 	"github.com/AlteredParadox/ansbui/internal/sshpool"
 )
@@ -94,6 +95,15 @@ type settingsBody struct {
 	AutoGatherFacts    bool   `json:"autoGatherFacts"`
 	GeoIPEnabled       bool   `json:"geoIpEnabled"`
 	ControlPrivKeyPath string `json:"controlPrivKeyPath"`
+
+	// BootstrapRequireHostKey reports whether strict bootstrap
+	// host-key mode is on. Read-only: it comes from the environment,
+	// not config.json, so setSettings ignores it — it is carried on
+	// this body (rather than a new endpoint) because the frontend
+	// already loads settings once at boot into globalThis.
+	// AnsbuiSettings, which is where the bootstrap form reads it to
+	// decide whether the reinstall acknowledgement applies.
+	BootstrapRequireHostKey bool `json:"bootstrapRequireHostKey"`
 }
 
 func (s *Server) getSettings(w http.ResponseWriter, _ *http.Request) {
@@ -104,6 +114,8 @@ func (s *Server) getSettings(w http.ResponseWriter, _ *http.Request) {
 		AutoGatherFacts:    snap.AutoGatherFacts,
 		GeoIPEnabled:       snap.GeoIPEnabled,
 		ControlPrivKeyPath: snap.ControlPrivKeyPath,
+
+		BootstrapRequireHostKey: bootstrap.HostKeyRequired(),
 	})
 }
 
