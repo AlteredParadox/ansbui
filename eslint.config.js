@@ -12,7 +12,8 @@
 import babelParser from '@babel/eslint-parser';
 import globals from 'globals';
 import reactHooks from 'eslint-plugin-react-hooks';
-import reactPlugin from 'eslint-plugin-react';
+
+import jsxUsesVars from './eslint-rules/jsx-uses-vars.js';
 
 export default [
   {
@@ -29,7 +30,7 @@ export default [
     files: ['web/**/*.{js,jsx}'],
     plugins: {
       'react-hooks': reactHooks,
-      react: reactPlugin,
+      local: { rules: { 'jsx-uses-vars': jsxUsesVars } },
     },
     languageOptions: {
       parser: babelParser,
@@ -74,9 +75,10 @@ export default [
       // doesn't see <Component/> tags as a use. The frontend ships
       // each .jsx as a top-level <script>, so component refs cross
       // files via globals — this rule suppresses the false-positive
-      // unused-vars by counting JSX-tag references as usage.
-      'react/jsx-uses-vars': 'error',
-      'react/jsx-uses-react': 'error',
+      // unused-vars by counting JSX-tag references as usage. (There
+      // is no jsx-uses-react counterpart: React is a declared global
+      // here, never an imported binding that could look unused.)
+      'local/jsx-uses-vars': 'error',
     },
   },
 ];
