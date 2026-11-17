@@ -195,7 +195,7 @@ func parseInventoryRoot(content []byte) (root, top *yaml.Node, preamble string, 
 // parser-dependent.
 func guardNoLegacyTopLevel(top *yaml.Node) error {
 	for _, group := range inventoryUmbrellaGroups {
-		if existing := findMapValue(top, group); existing != nil {
+		if findMapValue(top, group) != nil {
 			return fmt.Errorf("inventory has top-level group %q — move it under all.children before bootstrap so the new host doesn't get added to a duplicate group", group)
 		}
 	}

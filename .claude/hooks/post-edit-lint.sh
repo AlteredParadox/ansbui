@@ -24,16 +24,16 @@ set -u
 REPO=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
 
 GOLANGCI=$(command -v golangci-lint 2>/dev/null)
-if [ -z "$GOLANGCI" ] && command -v go >/dev/null 2>&1; then
+if [[ -z "$GOLANGCI" ]] && command -v go >/dev/null 2>&1; then
   GOLANGCI="$(go env GOPATH)/bin/golangci-lint"
 fi
 
 ESLINT="$REPO/node_modules/.bin/eslint"
-[ -x "$ESLINT" ] || ESLINT=$(command -v eslint 2>/dev/null)
+[[ -x "$ESLINT" ]] || ESLINT=$(command -v eslint 2>/dev/null)
 
 INPUT=$(cat)
 FILE=$(printf '%s' "$INPUT" | jq -r '.tool_input.file_path // empty')
-if [ -z "$FILE" ] || [ ! -f "$FILE" ]; then
+if [[ -z "$FILE" || ! -f "$FILE" ]]; then
   exit 0
 fi
 
@@ -52,7 +52,7 @@ emit_findings() {
 
 case "$FILE" in
   *.go)
-    if [ ! -x "$GOLANGCI" ]; then
+    if [[ ! -x "$GOLANGCI" ]]; then
       exit 0
     fi
     DIR=$(dirname "$FILE")
@@ -61,19 +61,22 @@ case "$FILE" in
     # meaningful unit.
     OUT=$(cd "$REPO" && "$GOLANGCI" run "${DIR#$REPO/}/..." 2>&1)
     EC=$?
-    if [ $EC -ne 0 ] && [ -n "$OUT" ]; then
+    if [[ $EC -ne 0 && -n "$OUT" ]]; then
       emit_findings "golangci-lint" "$OUT"
     fi
     ;;
   *.js|*.jsx)
-    if [ ! -x "$ESLINT" ]; then
+    if [[ ! -x "$ESLINT" ]]; then
       exit 0
     fi
     OUT=$("$ESLINT" --no-warn-ignored "$FILE" 2>&1)
     EC=$?
-    if [ $EC -ne 0 ] && [ -n "$OUT" ]; then
+    if [[ $EC -ne 0 && -n "$OUT" ]]; then
       emit_findings "eslint" "$OUT"
     fi
+    ;;
+  *)
+    # Any other kind of file: nothing to lint.
     ;;
 esac
 

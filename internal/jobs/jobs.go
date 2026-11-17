@@ -256,7 +256,7 @@ func (j *Job) emit(typ, text string) {
 // and finished) must not relabel a genuinely-bootstrapped box as
 // "cancelled". Only an error return combined with a cancelled ctx is
 // a real cancellation.
-func (j *Job) finish(err error, ctxErr error) {
+func (j *Job) finish(err, ctxErr error) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	if j.status != StatusRunning {

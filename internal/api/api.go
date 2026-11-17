@@ -245,9 +245,9 @@ const (
 // limitBody wraps an http.HandlerFunc so the request body is capped
 // via http.MaxBytesReader. Requests over the cap get 413 before the
 // handler sees them.
-func limitBody(max int64, h http.HandlerFunc) http.HandlerFunc {
+func limitBody(limit int64, h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		r.Body = http.MaxBytesReader(w, r.Body, max)
+		r.Body = http.MaxBytesReader(w, r.Body, limit)
 		h(w, r)
 	}
 }

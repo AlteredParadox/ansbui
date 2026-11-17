@@ -115,7 +115,7 @@ function BootstrapView() {
   // settings payload loaded at boot. Without this the operator would
   // fill in the whole form and only then be told the run is refused.
   const [reinstallHostKeyAck, setReinstallHostKeyAck] = useStateBoot(false);
-  const strictHostKey = !!(globalThis.AnsbuiSettings || {}).bootstrapRequireHostKey;
+  const strictHostKey = !!globalThis.AnsbuiSettings?.bootstrapRequireHostKey;
   const [running, setRunning] = useStateBoot(false);
   const [output, setOutput] = useStateBoot([]);
   const [error, setError] = useStateBoot('');
