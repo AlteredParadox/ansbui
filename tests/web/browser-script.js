@@ -12,7 +12,7 @@ import path from 'node:path';
 import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
 
-import { transformSync } from '@babel/core';
+import { parseSync, transformSync } from '@babel/core';
 import presetReact from '@babel/preset-react';
 
 const webRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'web');
@@ -20,8 +20,9 @@ const webRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..',
 // A stand-in for React that records what would be rendered. Elements
 // become plain `{ type, props, children }` objects a test can inspect.
 // Hooks are deliberately absent: only functions that do not call them can
-// be exercised this way.
-function reactStub() {
+// be exercised this way. A test that needs a hook passes its own stand-in
+// through `createPage({ React: { ...reactStub(), useMemo: (f) => f() } })`.
+export function reactStub() {
   return {
     Fragment: 'Fragment',
     createElement(type, props, ...children) {
@@ -31,25 +32,42 @@ function reactStub() {
 }
 
 // Returns a fresh page-like context. `globals` are added to it before any
-// script runs (a `fetch` stub, for instance).
+// script runs (a `fetch` stub, for instance), and may replace `React`.
 export function createPage(globals = {}) {
   return vm.createContext({ React: reactStub(), ...globals });
 }
+
+const babelOptions = (file) => ({
+  filename: file,
+  sourceType: 'script',
+  babelrc: false,
+  configFile: false,
+  presets: [[presetReact, { runtime: 'classic' }]],
+});
 
 // Runs web/<relPath> in the page, compiling JSX first.
 export function loadScript(page, relPath) {
   const file = path.join(webRoot, relPath);
   let code = fs.readFileSync(file, 'utf8');
-  if (relPath.endsWith('.jsx')) {
-    code = transformSync(code, {
-      filename: file,
-      sourceType: 'script',
-      babelrc: false,
-      configFile: false,
-      presets: [[presetReact, { runtime: 'classic' }]],
-    }).code;
-  }
+  if (relPath.endsWith('.jsx')) code = transformSync(code, babelOptions(file)).code;
   vm.runInContext(code, page, { filename: file });
+}
+
+// Every .jsx file under web/ (the vendored libraries excluded), as paths
+// relative to web/.
+export function jsxFiles() {
+  return fs
+    .readdirSync(webRoot, { recursive: true })
+    .map((p) => p.split(path.sep).join('/'))
+    .filter((p) => p.endsWith('.jsx') && !p.startsWith('vendor/'))
+    .sort();
+}
+
+// Parses web/<relPath> and returns its Babel AST, for tests that check
+// the markup as written rather than run it.
+export function parseScript(relPath) {
+  const file = path.join(webRoot, relPath);
+  return parseSync(fs.readFileSync(file, 'utf8'), babelOptions(file));
 }
 
 // Evaluates an expression in the page. Top-level `const`s of a script are

@@ -41,7 +41,12 @@ function LoginView({ onSuccess }) {
           className="input mono"
           type="password"
           autoComplete="current-password"
-          autoFocus
+          // This screen is one field, and it also replaces the whole app
+          // when a session expires mid-use, taking the focused element
+          // with it. Focus goes to the field so the keyboard is not left
+          // pointing at nothing. (Not inside a <dialog>, so React's
+          // autoFocus works here; see useDialog for where it does not.)
+          autoFocus // NOSONAR(S9379): deliberate, reason above
           value={password}
           onChange={e => setPassword(e.target.value)}
           disabled={busy}

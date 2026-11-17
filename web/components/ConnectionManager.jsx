@@ -158,7 +158,7 @@ function ConnectionManager({ open, onClose, onActivated, initialServers, initial
             <button type="button" className={tab === 'servers' ? 'on' : ''} onClick={() => setTab('servers')}>Ansible servers</button>
             <button type="button" className={tab === 'settings' ? 'on' : ''} onClick={() => setTab('settings')}>Settings</button>
           </div>
-          <button type="button" className="btn ghost small" onClick={onClose}><Icon name="x" size={14}/></button>
+          <button type="button" className="btn ghost small" aria-label="Close" onClick={onClose}><Icon name="x" size={14}/></button>
         </div>
         {error && <div className="cm-error mono">{error}</div>}
         {tab === 'servers' ? (
@@ -214,7 +214,7 @@ function ServersTab(props) {
                 : <button type="button" className="btn small" disabled={busy} onClick={() => onActivate(s.id)}>Activate</button>}
               <button type="button" className="btn ghost small" disabled={busy} onClick={() => onTest(s.id)}>Test</button>
               <button type="button" className="btn ghost small" disabled={busy} onClick={() => onEdit(s)}>Edit</button>
-              <button type="button" className="btn ghost small" disabled={busy} onClick={() => onDelete(s.id)}><Icon name="x" size={12}/></button>
+              <button type="button" className="btn ghost small" aria-label={`Delete connection ${s.name}`} disabled={busy} onClick={() => onDelete(s.id)}><Icon name="x" size={12}/></button>
             </div>
           </div>
         ))}

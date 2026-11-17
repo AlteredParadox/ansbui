@@ -177,10 +177,15 @@ const ICON_RENDERERS = {
 
 const FALLBACK = () => <rect x="2" y="2" width="12" height="12" rx="2"/>;
 
+// Icons are decorative: every one sits beside visible text or inside a
+// control that has its own accessible name, so the drawing is hidden
+// from assistive technology. A control that shows only an icon must be
+// named on the control itself (aria-label), not through the icon.
 const Icon = ({ name, size = 16, className = '', strokeWidth = 1.5 }) => {
   const render = ICON_RENDERERS[name] || FALLBACK;
   return (
     <svg
+      aria-hidden="true"
       width={size}
       height={size}
       viewBox="0 0 16 16"

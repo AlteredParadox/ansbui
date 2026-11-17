@@ -1,6 +1,9 @@
 // Dashboard — overview stats, activity sparkline, recent runs, quick actions
 
-function Sparkline({ data, w = 240, h = 48, color = 'var(--accent)' }) {
+// `label` is the chart's text alternative. Without one the chart is
+// hidden from assistive technology rather than announced as an unnamed
+// image.
+function Sparkline({ data, label, w = 240, h = 48, color = 'var(--accent)' }) {
   if (!data?.length) return null;
   const max = Math.max(...data);
   const min = Math.min(...data);
@@ -9,7 +12,8 @@ function Sparkline({ data, w = 240, h = 48, color = 'var(--accent)' }) {
   const pts = data.map((v, i) => `${(i * step).toFixed(1)},${(h - ((v - min) / range) * (h - 4) - 2).toFixed(1)}`).join(' ');
   const area = `0,${h} ${pts} ${w},${h}`;
   return (
-    <svg className="spark" width={w} height={h} viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none">
+    <svg className="spark" role={label ? 'img' : undefined} aria-label={label} aria-hidden={label ? undefined : 'true'}
+      width={w} height={h} viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none">
       <polygon points={area} fill={color} opacity="0.10" />
       <polyline points={pts} fill="none" stroke={color} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
       <circle cx={w} cy={h - ((data[data.length - 1] - min) / range) * (h - 4) - 2} r="2.5" fill={color} />
@@ -22,7 +26,8 @@ function DonutStatus({ ok, warn, err, size = 110 }) {
   const C = 2 * Math.PI * 42;
   const seg = (v) => (v / total) * C;
   return (
-    <svg width={size} height={size} viewBox="0 0 100 100">
+    <svg role="img" aria-label={`Host status: ${ok} reachable, ${warn} degraded, ${err} unreachable`}
+      width={size} height={size} viewBox="0 0 100 100">
       <circle cx="50" cy="50" r="42" fill="none" stroke="var(--bg-3)" strokeWidth="10" />
       <circle cx="50" cy="50" r="42" fill="none" stroke="var(--ok)" strokeWidth="10"
         strokeDasharray={`${seg(ok)} ${C}`} transform="rotate(-90 50 50)" strokeLinecap="round" />
@@ -34,6 +39,16 @@ function DonutStatus({ ok, warn, err, size = 110 }) {
       <text x="50" y="62" textAnchor="middle" fontSize="8" fill="var(--text-3)" letterSpacing="1">HOSTS</text>
     </svg>
   );
+}
+
+// activityLabel puts the run-activity sparkline into words: the series
+// is one count per day, oldest first, ending today.
+function activityLabel(perDay) {
+  if (!perDay.length) return '';
+  const total = perDay.reduce((a, b) => a + b, 0);
+  const days = `${perDay.length} ${perDay.length === 1 ? 'day' : 'days'}`;
+  if (total === 0) return `Runs per day over the last ${days}: none`;
+  return `Runs per day over the last ${days}: ${total} in total, ${Math.max(...perDay)} on the busiest day, ${perDay.at(-1)} today`;
 }
 
 function DashboardView({ onNavigate, onOpenAdhoc }) {
@@ -101,7 +116,7 @@ function DashboardView({ onNavigate, onOpenAdhoc }) {
               </div>
             </div>
           </div>
-          <Sparkline data={ACTIVITY} w={520} h={100} />
+          <Sparkline data={ACTIVITY} label={activityLabel(ACTIVITY)} w={520} h={100} />
         </div>
 
         <div className="card dash-quick">
