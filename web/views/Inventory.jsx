@@ -325,7 +325,14 @@ function InventoryGraph({ groups, hosts, onSelectGroup }) {
 
   return (
     <div className="graph-wrap">
-      <svg width="100%" height={H} viewBox={`0 0 ${W} ${H}`} className="graph-svg" preserveAspectRatio="xMidYMid meet">
+      {/* A group, not an image: the group nodes inside are buttons and
+          must stay reachable. Sonar S6819 asks for <fieldset>, <details>,
+          <optgroup> or <address> in place of the role; none of them can
+          stand in for an <svg>, so the role stays. */}
+      <svg // NOSONAR(S6819): no HTML element can replace an svg here, see above
+        role="group"
+        aria-label="Inventory graph: groups and their hosts"
+        width="100%" height={H} viewBox={`0 0 ${W} ${H}`} className="graph-svg" preserveAspectRatio="xMidYMid meet">
         <defs>
           <radialGradient id="gg" cx="50%" cy="50%">
             <stop offset="0%" stopColor="var(--accent)" stopOpacity="0.12"/>
@@ -359,7 +366,7 @@ function InventoryGraph({ groups, hosts, onSelectGroup }) {
               <g key={h.id}>
                 <line x1={p.x} y1={p.y} x2={hx} y2={hy} stroke="var(--line-soft)" strokeWidth="0.8"/>
                 <circle cx={hx} cy={hy} r="3" fill={statusColorVar(h.status)}>
-                  <title>{h.name}</title>
+                  <title>{`${h.name} (${statusLabel(h.status)})`}</title>
                 </circle>
               </g>
             );
@@ -376,6 +383,7 @@ function InventoryGraph({ groups, hosts, onSelectGroup }) {
               key={g.id}
               className="graph-node"
               role="button"
+              aria-label={`Group ${g.name}, ${hostCountLabel(count)}`}
               tabIndex={0}
               onClick={() => onSelectGroup(g.id)}
               onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelectGroup(g.id); } }}
@@ -457,6 +465,10 @@ function countByStatus(hosts, status) {
   return hosts.filter(h => h.status === status).length;
 }
 
+function hostCountLabel(n) {
+  return `${n} ${n === 1 ? 'host' : 'hosts'}`;
+}
+
 function InventoryMap({ hosts }) {
   // Group every host with a recognisable country code; everything
   // else (no region set, region we don't have a centroid for) stays
@@ -480,8 +492,16 @@ function InventoryMap({ hosts }) {
 
   return (
     <div className="map-wrap">
-      <svg width="100%" height="560" viewBox="0 0 900 480" preserveAspectRatio="xMidYMid meet" className="map-svg">
-        <g opacity="0.35">
+      {/* Each country marker is one image with a full text alternative:
+          its card tells the three status counts apart by colour alone.
+          The dotted land masses are backdrop. The svg itself is a named
+          group so the markers stay reachable one by one; as on the graph
+          above, no HTML element can take the place of the role. */}
+      <svg // NOSONAR(S6819): no HTML element can replace an svg here, see above
+        role="group"
+        aria-label="Hosts by country"
+        width="100%" height="560" viewBox="0 0 900 480" preserveAspectRatio="xMidYMid meet" className="map-svg">
+        <g opacity="0.35" aria-hidden="true">
           {Array.from({ length: 30 }).map((_, r) =>
             Array.from({ length: 60 }).map((_, c) => {
               if (!isLandMass(c, r)) return null;
@@ -505,7 +525,8 @@ function InventoryMap({ hosts }) {
           // clip out of the SVG.
           const tipLeft = x > 720 ? -174 : 14;
           return (
-            <g key={cc} className="map-region">
+            <g key={cc} className="map-region" role="img"
+              aria-label={`${name}: ${hostCountLabel(hs.length)}, ${ok} reachable, ${warn} degraded, ${err} unreachable`}>
               <circle cx={x} cy={y} r="28" fill="var(--accent-weak)" stroke="none"/>
               <circle cx={x} cy={y} r="42" fill="none" stroke="var(--accent)" strokeOpacity="0.3" strokeDasharray="2 3">
                 <animate attributeName="r" values="30;50;30" dur="3s" repeatCount="indefinite"/>
@@ -879,7 +900,7 @@ function HostDrawer({ host, onClose, onOpenAdhoc }) {
             <h2 className="mono" style={{ margin: '4px 0 2px' }}>{host.name}</h2>
             <div className="mute mono" style={{ fontSize: 12 }}>{host.ip} · {host.os}</div>
           </div>
-          <button type="button" className="btn ghost small" onClick={onClose}><Icon name="x" size={14}/></button>
+          <button type="button" className="btn ghost small" aria-label="Close" onClick={onClose}><Icon name="x" size={14}/></button>
         </div>
         <div className="drawer-section">
           <div className="stat-grid">

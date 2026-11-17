@@ -238,7 +238,7 @@ function VaultUnlockDialog({ open, file, onClose }) {
             id="vault-pw"
             type="password"
             className="input mono"
-            autoFocus
+            data-autofocus
             autoComplete="off"
             value={password}
             onChange={(e) => setPassword(e.target.value)}
@@ -431,6 +431,12 @@ function InlineVaultRowEditor({ file, mode, existingName, onClose, onSaved }) {
     finally { setBusy(false); }
   };
 
+  // Focus: this editor replaces the key list inside a dialog that is
+  // already open, and the key or Add button that had focus goes away
+  // with the list. Focus moves to the first field to fill in: the name
+  // of a new variable, or the password for an existing one. The fields
+  // mount into an open dialog, so React's autoFocus works here (it does
+  // not for a field present when the dialog opens; see useDialog).
   return (
     <div>
       <div className="mute" style={{ fontSize: 12.5, marginBottom: 10 }}>
@@ -449,7 +455,7 @@ function InlineVaultRowEditor({ file, mode, existingName, onClose, onSaved }) {
         onChange={(e) => setName(e.target.value)}
         readOnly={!isAdd}
         placeholder="db_password"
-        autoFocus={isAdd}
+        autoFocus={isAdd} // NOSONAR(S9379): deliberate, see "Focus" above
       />
 
       <label htmlFor="ive-pw" className="cm-field-label" style={{ marginTop: 10 }}>Vault password</label>
@@ -460,7 +466,7 @@ function InlineVaultRowEditor({ file, mode, existingName, onClose, onSaved }) {
         autoComplete="new-password"
         value={password}
         onChange={(e) => setPassword(e.target.value)}
-        autoFocus={!isAdd}
+        autoFocus={!isAdd} // NOSONAR(S9379): deliberate, see "Focus" above
       />
 
       {!decrypted && (
@@ -627,7 +633,7 @@ function VaultOpenByPathDialog({ open, workDir, onClose, onOpen }) {
         <input
           id="vault-openpath"
           className="input mono"
-          autoFocus
+          data-autofocus
           placeholder="group_vars/prod/vault.yml"
           value={path}
           onChange={(e) => setPath(e.target.value)}

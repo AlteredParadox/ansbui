@@ -677,7 +677,7 @@ function PlaybookRunner({ open, pb, seed, onClose }) {
               hosts: <span className="mono">{pb.targets || 'all'}</span>
             </div>
           </div>
-          <button type="button" className="btn ghost small" onClick={requestClose}><Icon name="x" size={14}/></button>
+          <button type="button" className="btn ghost small" aria-label="Close" onClick={requestClose}><Icon name="x" size={14}/></button>
         </div>
 
         <div className="pb-runner-form">

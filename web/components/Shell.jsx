@@ -16,6 +16,14 @@ const { useEffect, useLayoutEffect, useRef } = React;
 // - onClose    → fires when the dialog closes for any reason (Escape,
 //                our el.close() call, form method="dialog", etc.)
 //
+// Initial focus: showModal() focuses the first focusable element in
+// the dialog, which in this app is the close button in the header. A
+// dialog that should open on a field instead marks that field with
+// `data-autofocus`. React's `autoFocus` cannot do this job: React calls
+// focus() when the field mounts, which is before showModal() runs and
+// so before the field can take focus, and it never renders the
+// `autofocus` attribute the browser itself would honour.
+//
 // opts.guardClose (optional): a predicate consulted on every native
 // close. When it returns false the close is vetoed and, if the element
 // already went away (a browser can force a <dialog> shut on a second
@@ -35,8 +43,10 @@ function useDialog(open, onClose, opts) {
     // We guard every call with el.open so showModal() can't throw the
     // InvalidStateError that would otherwise come from re-opening, and
     // close() is a no-op on an already-closed dialog.
-    if (open && !el.open) el.showModal();
-    else if (!open && el.open) el.close();
+    if (open && !el.open) {
+      el.showModal();
+      el.querySelector('[data-autofocus]')?.focus();
+    } else if (!open && el.open) el.close();
     return () => {
       // On unmount, if React is removing the element while it's still
       // in the top layer, tear it down explicitly.
@@ -266,7 +276,7 @@ function AnsbuiCenterDialog({
             <div className="section-title">{title}</div>
             {subtitle && <div className="mute" style={{ fontSize: 12, marginTop: 2 }}>{subtitle}</div>}
           </div>
-          <button type="button" className="btn ghost small" onClick={onClose}>
+          <button type="button" className="btn ghost small" aria-label="Close" onClick={onClose}>
             <Icon name="x" size={14}/>
           </button>
         </div>
