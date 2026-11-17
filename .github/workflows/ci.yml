@@ -67,6 +67,9 @@ jobs:
       # eslint over web/ (flat config in eslint.config.js).
       - run: npm run lint
 
+      # Tests for the local lint rule in eslint-rules/ (node:test).
+      - run: npm test
+
   # Known-vulnerability scans. Their own job, NOT the required `check`: a
   # freshly published advisory would otherwise turn every open PR red for a
   # reason the PR can't fix — the fix is a dependency or Go-version bump,

@@ -121,7 +121,7 @@ web/                    # static bundle (embedded)
 
 CI runs on GitHub Actions (`.github/workflows/`):
 
-- **`ci.yml`** — `check` is the required merge gate: Go build + vet + race tests, `golangci-lint`, and `eslint` over `web/`. Two advisory jobs run alongside it: `vuln` (`govulncheck` + `npm audit`) and `fuzz` (a short pass over every `Fuzz*` target).
+- **`ci.yml`** — `check` is the required merge gate: Go build + vet + race tests, `golangci-lint`, `eslint` over `web/`, and the tests for the local lint rule in `eslint-rules/`. Two advisory jobs run alongside it: `vuln` (`govulncheck` + `npm audit`) and `fuzz` (a short pass over every `Fuzz*` target).
 - **`sonarqube.yml`** — SonarQube Cloud scan with Go coverage, using `SONAR_TOKEN` from the repo secrets. The project is `AlteredParadox_ansbui` in the `alteredparadox` organization; rule exceptions live in `sonar-project.properties`.
 - **`release.yml`** — pushing a `vX.Y.Z` tag builds `linux/amd64` + `linux/arm64` binaries and publishes them with a `SHA256SUMS` as a GitHub Release; a manual dispatch is a build-only dry run.
 

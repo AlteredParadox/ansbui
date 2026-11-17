@@ -13,26 +13,7 @@ import babelParser from '@babel/eslint-parser';
 import globals from 'globals';
 import reactHooks from 'eslint-plugin-react-hooks';
 
-// Counts a <Component/> (or <ns.Component/>) tag as a use of that
-// variable, so `no-unused-vars` does not report every component that
-// is only referenced from JSX. This is the one rule we needed from
-// eslint-plugin-react (`react/jsx-uses-vars`); it lives here because
-// that plugin's latest release does not support ESLint 10, and a
-// dozen lines is cheaper than a dependency we would be pinned behind.
-const jsxUsesVars = {
-  meta: { type: 'problem', schema: [] },
-  create(context) {
-    return {
-      JSXOpeningElement(node) {
-        let name = node.name;
-        while (name.type === 'JSXMemberExpression') name = name.object;
-        if (name.type === 'JSXIdentifier') {
-          context.sourceCode.markVariableAsUsed(name.name, node);
-        }
-      },
-    };
-  },
-};
+import jsxUsesVars from './eslint-rules/jsx-uses-vars.js';
 
 export default [
   {
