@@ -244,11 +244,14 @@ func Stream(ctx context.Context, client *ssh.Client, cmd string, stdin io.Reader
 		// If the remote ignores SIGTERM we'd park forever on
 		// <-done; force the session shut after a short grace so
 		// Wait() returns and we don't leak a goroutine.
+		// Wait's own error is deliberately dropped on both receives
+		// below: the caller is told the run was cancelled (ctx.Err()),
+		// which is the cause; the receive only confirms Wait returned.
 		select {
-		case <-done:
+		case <-done: //nolint:errcheck // superseded by ctx.Err()
 		case <-time.After(2 * time.Second):
 			_ = sess.Close()
-			<-done
+			<-done //nolint:errcheck // superseded by ctx.Err()
 		}
 		return ctx.Err()
 	case err := <-done:
