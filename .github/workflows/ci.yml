@@ -60,7 +60,9 @@ jobs:
           cache: npm
           cache-dependency-path: package-lock.json
 
-      - run: npm ci
+      # --ignore-scripts: nothing in the lint toolchain needs an install
+      # script, so no dependency gets to run code at install time.
+      - run: npm ci --ignore-scripts
 
       # eslint over web/ (flat config in eslint.config.js).
       - run: npm run lint
@@ -96,7 +98,7 @@ jobs:
           cache: npm
           cache-dependency-path: package-lock.json
 
-      - run: npm ci
+      - run: npm ci --ignore-scripts
 
       # npm audit gates on advisory severity. We accept "moderate"
       # and below quietly; "high" or "critical" fails the job so
