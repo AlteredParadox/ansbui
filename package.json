@@ -6,7 +6,7 @@
   "main": "index.js",
   "scripts": {
     "lint": "eslint web/",
-    "test": "node --test \"eslint-rules/*.test.js\""
+    "test": "node --test \"eslint-rules/*.test.js\" \"tests/web/*.test.js\""
   },
   "repository": {
     "type": "git",

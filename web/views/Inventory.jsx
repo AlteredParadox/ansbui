@@ -959,7 +959,7 @@ function FactsPanel({ host }) {
   useEffectI(() => {
     // Reset whenever the selected host changes, then maybe auto-load.
     setFacts(null); setError(''); setQuery('');
-    if (autoGather) load();
+    if (autoGather) void load();
     // We intentionally don't depend on `load` (stable enough for this
     // component) — just the host identity.
   }, [host?.name, autoGather]);

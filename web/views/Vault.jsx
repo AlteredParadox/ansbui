@@ -28,7 +28,7 @@ function VaultView() {
     finally { setLoading(false); }
   };
 
-  useEffectV(() => { reload(); }, []);
+  useEffectV(() => { void reload(); }, []);
 
   const subtitle = buildSubtitle(loading, files.length, workDir);
 
@@ -89,7 +89,7 @@ function VaultView() {
       <VaultNewDialog
         open={newOpen}
         onClose={() => setNewOpen(false)}
-        onCreated={() => { setNewOpen(false); reload(); }}
+        onCreated={() => { setNewOpen(false); void reload(); }}
       />
       <VaultOpenByPathDialog
         open={openPathOpen}
@@ -232,7 +232,7 @@ function VaultUnlockDialog({ open, file, onClose }) {
       {inlineKind && <InlineVaultEditor file={file} onClose={onClose}/>}
 
       {!inlineKind && !unlocked && (
-        <form onSubmit={(e) => { e.preventDefault(); unlock(); }}>
+        <form onSubmit={(e) => { e.preventDefault(); void unlock(); }}>
           <label htmlFor="vault-pw" className="cm-field-label">Vault password</label>
           <input
             id="vault-pw"
@@ -322,7 +322,7 @@ function InlineVaultEditor({ file, onClose }) {
     finally { setLoading(false); }
   };
 
-  useEffectV(() => { reload(); }, [file?.path]);
+  useEffectV(() => { void reload(); }, [file?.path]);
 
   if (active) {
     return (
@@ -331,7 +331,7 @@ function InlineVaultEditor({ file, onClose }) {
         mode={active.mode}
         existingName={active.name || ''}
         onClose={() => setActive(null)}
-        onSaved={() => { setActive(null); reload(); }}
+        onSaved={() => { setActive(null); void reload(); }}
       />
     );
   }

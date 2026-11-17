@@ -2,21 +2,39 @@
 
 const { useState: useStateP, useMemo: useMemoP, useEffect: useEffectP, useRef: useRefP } = React;
 
-// Bounded regexes — each anchors to a single YAML line and avoids
-// nested quantifiers / overlapping alternation, keeping them linear
-// (Sonar S5852).
+// Line regexes. Each is applied to one YAML line and must run in linear
+// time, because a playbook can hold a very long line.
+//
+// The trap is a run of blanks followed by "the rest of the line". If the
+// rest may itself start with a blank, the two parts overlap: on a line
+// that does not match (a trailing "\r" is enough, "." stops at it) the
+// engine retries once per blank and rescans the rest each time, which is
+// quadratic. TASK_NAME_RE and DASH_RE therefore spell the rest as "empty,
+// or starting with a non-blank". They match exactly what the simpler
+// `[ \t]+(.*)$` form matched; tests/web/playbooks-yaml.test.js checks
+// that, and the running time, against the old patterns.
 const SECTION_RE = /^[ \t]*(tasks|pre_tasks|post_tasks|handlers):[ \t]*$/;
-const TASK_NAME_RE = /^[ \t]+- name:[ \t]+(.*)$/;
+const TASK_NAME_RE = /^[ \t]+- name:[ \t]+((?:[^ \t\n\r\u2028\u2029].*)?)$/;
 const TASK_START_RE = /^[ \t]*- name:/;
 const MODULE_RE = /^[ \t]+((?:ansible|community)\.[a-z_.]+):[ \t]*/;
 const TOP_LEVEL_RE = /^\S/;
 const QUOTE_RE = /["']/g;
-const DASH_RE = /^([ \t]*)-([ \t]+)(.*)$/;
+const DASH_RE = /^([ \t]*)-([ \t]+)((?:[^ \t\n\r\u2028\u2029].*)?)$/;
 const KV_RE = /^([^:]+)(:)(.*)$/;
 const NUMBER_RE = /^[ \t]+\d+(\.\d+)?$/;
 const BOOL_RE = /^[ \t]+(true|false|null|yes|no)\b/;
 const STRING_RE = /^[ \t]+["']/;
-const JINJA_RE = /\{\{.*\}\}/;
+
+// True when the value holds a Jinja expression: "{{" with a "}}" after
+// it. Two indexOf scans rather than the unanchored /\{\{.*\}\}/ this
+// replaces, which rescanned the rest of the line from every "{{" and so
+// took quadratic time on a long run of braces. Same answer for any value
+// with no line terminator between the braces, which is every value here
+// (the source is split on "\n" first).
+function hasJinja(value) {
+  const open = value.indexOf('{{');
+  return open !== -1 && value.includes('}}', open + 2);
+}
 
 function PlaybookLibrary({ playbooks, selectedId, onSelect, onNew }) {
   const [q, setQ] = useStateP('');
@@ -286,7 +304,7 @@ function colorizeValue(rest) {
   if (NUMBER_RE.test(rest)) return <span className="yml-n">{rest}</span>;
   if (BOOL_RE.test(rest)) return <span className="yml-b">{rest}</span>;
   if (STRING_RE.test(rest)) return <span className="yml-s">{rest}</span>;
-  if (JINJA_RE.test(rest)) return <span className="yml-j">{rest}</span>;
+  if (hasJinja(rest)) return <span className="yml-j">{rest}</span>;
   return <span className="yml-v">{rest}</span>;
 }
 
