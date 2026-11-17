@@ -130,6 +130,19 @@ func TestNormalisePromURL(t *testing.T) {
 			raw:  "127.0.0.1:9090",
 			want: urlLoopback4,
 		},
+		{
+			// The http:// default is only for input with no scheme;
+			// an operator who writes https:// gets https.
+			name:     "explicit https kept as written",
+			raw:      "https://prom.internal:9090",
+			envAllow: "prom.internal:9090",
+			want:     "https://prom.internal:9090",
+		},
+		{
+			name: "explicit https kept on loopback too",
+			raw:  "https://localhost:9090/",
+			want: "https://localhost:9090",
+		},
 	}
 
 	for _, tc := range cases {

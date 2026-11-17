@@ -406,6 +406,19 @@ func validatePromLabel(s string) error {
 // http.Transport's DialContext. Tracked as a follow-up — the
 // allowlist already constrains the surface to a known set of
 // hostnames, which is the practically valuable bound.
+//
+// Plain HTTP: a URL written without a scheme gets http://, because
+// that is what Prometheus serves out of the box and the default
+// target is loopback, where there is no network to listen on. For a
+// Prometheus on another host the operator chooses: an explicit
+// https:// is kept as written. Over plain HTTP the metrics can be
+// read and altered in transit (wrong CPU / memory / uptime in the
+// inventory, nothing more: the response is only ever parsed as
+// numbers and labels), and ansbui sends no credentials of its own.
+// SonarQube reports the literal as go:S5332. It is an accepted risk,
+// recorded as such on the finding in SonarQube rather than silenced
+// here: a NOSONAR comment would hide every rule on the line, not only
+// that one.
 func normalisePromURL(raw string) (string, error) {
 	s := strings.TrimRight(strings.TrimSpace(raw), "/")
 	if s == "" {
@@ -434,10 +447,16 @@ func normalisePromURL(raw string) (string, error) {
 // link-local (169.254.0.0/16) on every IaaS we know of — there is
 // no legitimate reason for ansbui to scrape Prometheus over them,
 // and reaching them server-side would expose IAM credentials.
+//
+// SonarQube reports the literal addresses as go:S1313 (hardcoded IP).
+// They are addresses to refuse, not addresses to connect to, and they
+// are fixed by the cloud providers, so there is nothing to configure.
+// NOSONAR silences every rule on its line, whichever rule prompted it;
+// that is acceptable here because each of these lines is one constant.
 var promMetadataDeny = map[string]struct{}{
-	"169.254.169.254":          {}, // AWS / GCP / OpenStack / DigitalOcean IMDS
-	"169.254.170.2":            {}, // AWS ECS task metadata
-	"fd00:ec2::254":            {}, // AWS IMDSv6
+	"169.254.169.254":          {}, // AWS / GCP / OpenStack / DigitalOcean IMDS (NOSONAR: denylist entry)
+	"169.254.170.2":            {}, // AWS ECS task metadata (NOSONAR: denylist entry)
+	"fd00:ec2::254":            {}, // AWS IMDSv6 (NOSONAR: denylist entry)
 	"metadata.google.internal": {},
 	"metadata":                 {},
 	"169.254.169.254.nip.io":   {}, // common SSRF bypass
