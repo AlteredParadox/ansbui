@@ -1,8 +1,8 @@
 // Dashboard — overview stats, activity sparkline, recent runs, quick actions
 
-// `label` is the chart's text alternative. Without one the chart is
-// hidden from assistive technology rather than announced as an unnamed
-// image.
+// `label` is the chart's text alternative and is required: the chart is
+// exposed as an image, and an image with no name tells a screen-reader
+// user nothing.
 function Sparkline({ data, label, w = 240, h = 48, color = 'var(--accent)' }) {
   if (!data?.length) return null;
   const max = Math.max(...data);
@@ -12,7 +12,7 @@ function Sparkline({ data, label, w = 240, h = 48, color = 'var(--accent)' }) {
   const pts = data.map((v, i) => `${(i * step).toFixed(1)},${(h - ((v - min) / range) * (h - 4) - 2).toFixed(1)}`).join(' ');
   const area = `0,${h} ${pts} ${w},${h}`;
   return (
-    <svg className="spark" role={label ? 'img' : undefined} aria-label={label} aria-hidden={label ? undefined : 'true'}
+    <svg className="spark" role="img" aria-label={label}
       width={w} height={h} viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none">
       <polygon points={area} fill={color} opacity="0.10" />
       <polyline points={pts} fill="none" stroke={color} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />

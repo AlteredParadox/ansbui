@@ -6,6 +6,7 @@
 // check the names they produce.
 
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import test from 'node:test';
 
 import { traverse } from '@babel/core';
@@ -113,16 +114,17 @@ test('the status donut is one image named with the three counts', () => {
   assert.equal(svg.props['aria-label'], 'Host status: 7 reachable, 2 degraded, 1 unreachable');
 });
 
-test('the sparkline is an image when labelled and hidden when not', () => {
-  const labelled = plain(dashboard.Sparkline({ data: [1, 2, 3], label: 'Runs' }));
-  assert.equal(labelled.props.role, 'img');
-  assert.equal(labelled.props['aria-label'], 'Runs');
-  assert.equal(labelled.props['aria-hidden'], undefined);
+test('the sparkline is one image named with the label it is given', () => {
+  const svg = plain(dashboard.Sparkline({ data: [1, 2, 3], label: 'Runs' }));
+  assert.equal(svg.props.role, 'img');
+  assert.equal(svg.props['aria-label'], 'Runs');
+  // No data, no chart: nothing to name.
+  assert.equal(dashboard.Sparkline({ data: [], label: 'Runs' }), null);
+});
 
-  const bare = plain(dashboard.Sparkline({ data: [1, 2, 3] }));
-  assert.equal(bare.props.role, undefined);
-  assert.equal(bare.props['aria-label'], undefined);
-  assert.equal(bare.props['aria-hidden'], 'true');
+test('the dashboard gives its sparkline the activity label', () => {
+  const source = fs.readFileSync(new URL('../../web/views/Dashboard.jsx', import.meta.url), 'utf8');
+  assert.match(source, /<Sparkline data=\{ACTIVITY\} label=\{activityLabel\(ACTIVITY\)\}/);
 });
 
 test('activityLabel describes the run series in words', () => {
