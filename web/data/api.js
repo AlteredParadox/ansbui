@@ -345,10 +345,12 @@
     }));
   }
 
-  // Bounded regex — input is a single YAML line up to the first newline
-  // because the /m anchor only lets `.+` run to end-of-line. Safe for
-  // S5852 (ReDoS).
-  const TITLE_RE = /^-[ \t]+name:[ \t]+([^\n]+)$/m;
+  // First `- name: <text>` line of the playbook. The text must start
+  // with a non-blank so it cannot overlap the blanks before it; that
+  // keeps the match linear by construction. A name that is nothing but
+  // blanks is skipped rather than used as a (blank) title.
+  // tests/web/api-playbook-title.test.js covers both points.
+  const TITLE_RE = /^-[ \t]+name:[ \t]+([^ \t\n][^\n]*)$/m;
   const QUOTES_RE = /["']/g;
 
   function playbookTitle(p) {

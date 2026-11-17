@@ -227,6 +227,12 @@ function BootstrapView() {
       // ISO-8601 UTC strings sort lexicographically.
       rows.sort((a, b) => (b.startedAt || '').localeCompare(a.startedAt || ''));
       setRecentJobs(rows.slice(0, 20));
+    }).catch((err) => {
+      // Both fetches above already fall back to an empty list, so this
+      // only fires if building the rows throws (an unexpected response
+      // shape, say). Keep the list that is on screen and leave a trace
+      // instead of an unhandled rejection.
+      console.error('ansbui: could not refresh recent bootstrap jobs', err);
     });
   };
 

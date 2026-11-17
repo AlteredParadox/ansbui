@@ -67,7 +67,8 @@ jobs:
       # eslint over web/ (flat config in eslint.config.js).
       - run: npm run lint
 
-      # Tests for the local lint rule in eslint-rules/ (node:test).
+      # node:test suites: the local lint rule in eslint-rules/, and the
+      # plain functions of the browser scripts in tests/web/.
       - run: npm test
 
   # Known-vulnerability scans. Their own job, NOT the required `check`: a
