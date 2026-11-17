@@ -68,6 +68,11 @@ func FuzzRedactText(f *testing.F) {
 		"password",
 		"password:",
 		"password: a\npassword: b",
+		// One seed per word sensitiveWords gained after the first list.
+		"client_secret: x",
+		"SeCret:0",
+		"private_key=abc",
+		"credential: x",
 	} {
 		f.Add(seed)
 	}
@@ -83,11 +88,16 @@ func FuzzRedactText(f *testing.F) {
 		// If the input contains no key trigger at all (case-fold),
 		// output should equal input — otherwise the regex matched
 		// something unintended. Keep this list in lockstep with
-		// redactRE; substring matches (e.g. "apikey" inside
-		// "myapikey") are fine because over-scrub is the safe
-		// direction.
+		// sensitiveWords in redact.go (each optional [_-] spelled out);
+		// substring matches (e.g. "apikey" inside "myapikey") are fine
+		// because over-scrub is the safe direction.
 		lower := strings.ToLower(s)
-		triggers := []string{"password", "passphrase", "token", "apikey", "api_key", "api-key"}
+		triggers := []string{
+			"password", "passphrase", "token", "secret",
+			"apikey", "api_key", "api-key",
+			"privatekey", "private_key", "private-key",
+			"credential",
+		}
 		hasTrigger := false
 		for _, t := range triggers {
 			if strings.Contains(lower, t) {
