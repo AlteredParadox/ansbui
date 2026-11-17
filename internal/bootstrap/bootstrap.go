@@ -583,9 +583,9 @@ func validateHostnameLabels(h string) error {
 	return nil
 }
 
-func boundLength(name, value string, max int) error {
-	if len(value) > max {
-		return fmt.Errorf("%s is too long (max %d bytes)", name, max)
+func boundLength(name, value string, limit int) error {
+	if len(value) > limit {
+		return fmt.Errorf("%s is too long (max %d bytes)", name, limit)
 	}
 	return nil
 }

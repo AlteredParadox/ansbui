@@ -37,15 +37,16 @@ type entry[V any] struct {
 	expiry time.Time
 }
 
-// New returns a cache holding at most max entries. A max below 1 is
-// treated as 1 so a misconfigured caller still gets a bounded cache
-// rather than one that evicts on every insert or grows forever.
-func New[V any](max int) *Cache[V] {
-	if max < 1 {
-		max = 1
+// New returns a cache holding at most capacity entries. A capacity
+// below 1 is treated as 1 so a misconfigured caller still gets a
+// bounded cache rather than one that evicts on every insert or grows
+// forever.
+func New[V any](capacity int) *Cache[V] {
+	if capacity < 1 {
+		capacity = 1
 	}
 	return &Cache[V]{
-		max:     max,
+		max:     capacity,
 		entries: make(map[string]entry[V]),
 		now:     time.Now,
 	}
