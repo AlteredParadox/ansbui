@@ -12,7 +12,27 @@
 import babelParser from '@babel/eslint-parser';
 import globals from 'globals';
 import reactHooks from 'eslint-plugin-react-hooks';
-import reactPlugin from 'eslint-plugin-react';
+
+// Counts a <Component/> (or <ns.Component/>) tag as a use of that
+// variable, so `no-unused-vars` does not report every component that
+// is only referenced from JSX. This is the one rule we needed from
+// eslint-plugin-react (`react/jsx-uses-vars`); it lives here because
+// that plugin's latest release does not support ESLint 10, and a
+// dozen lines is cheaper than a dependency we would be pinned behind.
+const jsxUsesVars = {
+  meta: { type: 'problem', schema: [] },
+  create(context) {
+    return {
+      JSXOpeningElement(node) {
+        let name = node.name;
+        while (name.type === 'JSXMemberExpression') name = name.object;
+        if (name.type === 'JSXIdentifier') {
+          context.sourceCode.markVariableAsUsed(name.name, node);
+        }
+      },
+    };
+  },
+};
 
 export default [
   {
@@ -29,7 +49,7 @@ export default [
     files: ['web/**/*.{js,jsx}'],
     plugins: {
       'react-hooks': reactHooks,
-      react: reactPlugin,
+      local: { rules: { 'jsx-uses-vars': jsxUsesVars } },
     },
     languageOptions: {
       parser: babelParser,
@@ -74,9 +94,10 @@ export default [
       // doesn't see <Component/> tags as a use. The frontend ships
       // each .jsx as a top-level <script>, so component refs cross
       // files via globals — this rule suppresses the false-positive
-      // unused-vars by counting JSX-tag references as usage.
-      'react/jsx-uses-vars': 'error',
-      'react/jsx-uses-react': 'error',
+      // unused-vars by counting JSX-tag references as usage. (There
+      // is no jsx-uses-react counterpart: React is a declared global
+      // here, never an imported binding that could look unused.)
+      'local/jsx-uses-vars': 'error',
     },
   },
 ];
