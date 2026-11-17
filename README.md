@@ -48,7 +48,7 @@ The Prometheus URL is fetched **server-side with no auth in front of it**, so it
 
 A URL written without a scheme gets `http://`, which is what Prometheus serves by default and is fine for the loopback default. For a Prometheus on another host, plain HTTP means the metrics can be read or altered on the way: the inventory would show wrong CPU / memory / uptime figures, and nothing else is affected. If that matters on your network, put TLS in front of Prometheus and write the URL with `https://`.
 
-ansbui adds no credentials of its own to these requests. If you write credentials into the URL (`https://user:password@prom.example.com`), they are sent as HTTP Basic auth on every query, so only do that with `https://`: over plain HTTP they cross the network unencrypted. The URL, credentials included, is also stored in ansbui's `config.json` and shown in **Settings**.
+ansbui adds no credentials of its own to these requests. If your Prometheus needs a login, write it into the URL (`https://user:password@prom.example.com`); it is sent as HTTP Basic auth on every query. Because of that, **a URL with credentials is accepted only with `https://`**. With `http://`, or with no scheme, it is refused when you save it and again on every metrics fetch, so an `http://` URL with credentials already in `config.json` stops returning metrics until it is changed to `https://`. This applies to loopback too. The URL, credentials included, is stored in ansbui's `config.json` and shown in **Settings**.
 
 ### Environment variables
 

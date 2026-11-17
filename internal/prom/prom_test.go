@@ -111,41 +111,88 @@ func TestInstantQuerySkipsNaNAndInf(t *testing.T) {
 	}
 }
 
+// promStub answers every query with an empty result and reports the
+// Basic auth it was sent, if any.
+type sentAuth struct {
+	user, pass string
+	ok         bool
+}
+
+func promStub(got chan<- sentAuth) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		u, p, ok := r.BasicAuth()
+		got <- sentAuth{u, p, ok}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"status":"success","data":{"resultType":"vector","result":[]}}`)
+	})
+}
+
 // TestURLCredentialsAreSentAsBasicAuth pins what happens to a
 // user:password written into the Prometheus URL: the client keeps it
 // and net/http turns it into an Authorization: Basic header on every
-// query. That is why the README says a URL carrying credentials needs
-// https. If URL credentials are ever refused instead, this test and
-// that paragraph change together.
+// query. That is why such a URL is accepted only with https (next
+// test), and why the README says so.
 func TestURLCredentialsAreSentAsBasicAuth(t *testing.T) {
 	t.Setenv("ANSBUI_PROM_ALLOWED_HOSTS", "")
-	type seen struct {
-		user, pass string
-		ok         bool
-	}
-	got := make(chan seen, 1)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		u, p, ok := r.BasicAuth()
-		got <- seen{u, p, ok}
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"status":"success","data":{"resultType":"vector","result":[]}}`)
-	}))
+	got := make(chan sentAuth, 1)
+	srv := httptest.NewTLSServer(promStub(got))
 	defer srv.Close()
+	// query runs "up" through a client that trusts the test server's
+	// certificate; everything else is the client NewClient built.
+	query := func(rawURL string) {
+		t.Helper()
+		c, err := NewClient(rawURL, "instance")
+		if err != nil {
+			t.Fatalf("NewClient: %v", err)
+		}
+		c.http.Transport.(*http.Transport).TLSClientConfig = srv.Client().Transport.(*http.Transport).TLSClientConfig
+		if _, err := c.instantQuery(context.Background(), "up"); err != nil {
+			t.Fatalf("instantQuery: %v", err)
+		}
+	}
 
-	withCreds := strings.Replace(srv.URL, "http://", "http://scraper:s3cret@", 1)
-	c, err := NewClient(withCreds, "instance")
-	if err != nil {
-		t.Fatalf("NewClient with credentials in the URL: %v", err)
-	}
-	if _, err := c.instantQuery(context.Background(), "up"); err != nil {
-		t.Fatalf("instantQuery: %v", err)
-	}
+	query(strings.Replace(srv.URL, "https://", "https://scraper:s3cret@", 1))
 	if s := <-got; !s.ok || s.user != "scraper" || s.pass != "s3cret" {
 		t.Fatalf("server saw basic auth %+v, want scraper / s3cret", s)
 	}
 
 	// Without credentials in the URL, none are sent.
-	c, err = NewClient(srv.URL, "instance")
+	query(srv.URL)
+	if s := <-got; s.ok {
+		t.Fatalf("server saw basic auth %+v from a URL with no credentials", s)
+	}
+}
+
+// TestNewClientRefusesCredentialsOverPlainHTTP: the settings endpoint
+// refuses such a URL, but a config.json edited by hand, or saved
+// before the rule existed, never goes through it. The client has to
+// refuse too, before anything is sent.
+func TestNewClientRefusesCredentialsOverPlainHTTP(t *testing.T) {
+	t.Setenv("ANSBUI_PROM_ALLOWED_HOSTS", "")
+	got := make(chan sentAuth, 1)
+	srv := httptest.NewServer(promStub(got))
+	defer srv.Close()
+
+	for _, creds := range []string{"scraper:s3cret@", "scraper@", "@"} {
+		_, err := NewClient(strings.Replace(srv.URL, "http://", "http://"+creds, 1), "instance")
+		if err == nil {
+			t.Fatalf("NewClient accepted %q over plain http", creds)
+		}
+		if !strings.Contains(err.Error(), "accepted only with https://") {
+			t.Errorf("%q: unexpected error %v", creds, err)
+		}
+		if strings.Contains(err.Error(), "s3cret") {
+			t.Errorf("error repeats the password: %v", err)
+		}
+	}
+	select {
+	case s := <-got:
+		t.Fatalf("a request reached the server: %+v", s)
+	default:
+	}
+
+	// The same server without credentials in the URL is still fine.
+	c, err := NewClient(srv.URL, "instance")
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
