@@ -406,11 +406,14 @@ func (s *targetSession) run(ctx context.Context, cmd, stdin string) (string, str
 		return so.String(), strings.TrimSpace(se.String()), e
 	case <-ctx.Done():
 		_ = sess.Signal(ssh.SIGTERM)
+		// Wait's own error is deliberately dropped on both receives
+		// below: the step reports ctx.Err(), which is the cause; the
+		// receive only confirms Wait returned.
 		select {
-		case <-done:
+		case <-done: //nolint:errcheck // superseded by ctx.Err()
 		case <-time.After(2 * time.Second):
 			_ = sess.Close()
-			<-done
+			<-done //nolint:errcheck // superseded by ctx.Err()
 		}
 		return so.String(), strings.TrimSpace(se.String()), ctx.Err()
 	}

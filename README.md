@@ -15,6 +15,8 @@ go build -o ansbui .
 ./ansbui              # default: -addr 127.0.0.1:8787 (loopback only)
 ```
 
+ansbui targets Go 1.27 (see `go.mod`). Debian 13 packages an older Go; the `go` command fetches the toolchain `go.mod` names on the first build. If your environment sets `GOTOOLCHAIN=local`, install a current Go from [go.dev/dl](https://go.dev/dl/) instead.
+
 Open `http://127.0.0.1:8787/` in a browser. On first load you'll be prompted to add an ansible server — the SSH coordinates of a remote machine that already has `ansible` installed.
 
 To expose ansbui on another interface, put authentication in front of it first, then bind explicitly:

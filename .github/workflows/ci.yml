@@ -52,7 +52,7 @@ jobs:
       # turn an unrelated PR red; bump it deliberately. Config: .golangci.yml.
       - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
-          version: v2.11.4
+          version: v2.15.0
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
@@ -82,15 +82,8 @@ jobs:
 
       # Symbol-level and covers the stdlib, so advisories in code the binary
       # never calls are informational only.
-      #
-      # Pinned to v1.7.0 because govulncheck >= v1.8.0 needs Go 1.26 to build
-      # and go.mod is still on 1.25 (setup-go runs with GOTOOLCHAIN=local, so
-      # `@latest` fails on the toolchain instead of reporting anything). The
-      # vulnerability database is fetched at run time, so the pin does not
-      # freeze the findings. Switch back to `@latest` once go.mod moves to
-      # Go >= 1.26.
       - name: govulncheck
-        run: go run golang.org/x/vuln/cmd/govulncheck@v1.7.0 ./...
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
