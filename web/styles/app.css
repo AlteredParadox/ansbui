@@ -787,39 +787,6 @@ th .text-btn { display: inline-flex; gap: 6px; align-items: center; width: 100%;
 .run-stat { display: flex; flex-direction: column; gap: 3px; }
 .run-stat > span:last-child { font-size: 16px; font-weight: 600; font-variant-numeric: tabular-nums; }
 
-.matrix-wrap {
-  background: var(--bg-inset);
-  border: 1px solid var(--line-soft);
-  border-radius: var(--r-2);
-  overflow: auto;
-  margin-bottom: 8px;
-}
-.matrix { border-collapse: collapse; width: 100%; font-size: 11px; }
-.matrix th {
-  background: var(--bg-1);
-  border-bottom: 1px solid var(--line-soft);
-  padding: 4px 6px;
-  font-weight: 400; text-align: center;
-  color: var(--text-3);
-  font-size: 10px;
-}
-.matrix td { border: 1px solid var(--bg-inset); }
-.matrix-task-col { width: 260px; text-align: left !important; padding-left: 10px !important; }
-.matrix-host-col { writing-mode: sideways-lr; text-orientation: mixed; height: 90px; padding: 6px 2px !important; vertical-align: bottom; }
-.matrix-task-cell {
-  display: grid; grid-template-columns: 24px 1fr; gap: 6px; align-items: center;
-  padding: 8px 10px !important;
-  background: var(--bg-1);
-  border-right: 1px solid var(--line-soft) !important;
-  white-space: normal !important;
-  min-width: 260px;
-}
-.matrix-task-name { font-size: 12px; font-weight: 500; }
-.matrix-cell { width: 36px; height: 36px; text-align: center; color: var(--text-4); padding: 0 !important; }
-.matrix-cell.matrix-ok { background: oklch(0.75 0.16 150 / 0.3); }
-.matrix-cell.matrix-changed { background: oklch(0.75 0.16 150 / 0.3); }
-.matrix-cell.matrix-err { background: oklch(0.66 0.21 25 / 0.35); }
-
 /* ============ VAULT ============ */
 .vault-body {
   display: grid;
