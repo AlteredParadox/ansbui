@@ -53,9 +53,10 @@ var promLabelRE = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
 
 // NewClient constructs a Client. baseURL is the Prometheus root (e.g.
 // http://prom:9090). hostLabel is the label name to key on (default
-// "instance"). Only http / https URLs are accepted; redirects are
-// disabled to prevent a misconfigured Prometheus from bouncing us at
-// a cloud metadata endpoint.
+// "instance"). Only http / https URLs are accepted, and one that
+// carries credentials only with https; redirects are disabled to
+// prevent a misconfigured Prometheus from bouncing us at a cloud
+// metadata endpoint.
 func NewClient(baseURL, hostLabel string) (*Client, error) {
 	if strings.TrimSpace(baseURL) == "" {
 		return nil, errors.New("prometheus URL is empty")
@@ -75,6 +76,11 @@ func NewClient(baseURL, hostLabel string) (*Client, error) {
 	// endpoint, and this client fetches server-side with no auth in
 	// front of it.
 	if err := config.CheckPromHost(u.Hostname(), u.Host); err != nil {
+		return nil, err
+	}
+	// Likewise for credentials in the URL, which must not go out over
+	// plain HTTP.
+	if err := config.CheckPromCredentials(u); err != nil {
 		return nil, err
 	}
 	if hostLabel == "" {

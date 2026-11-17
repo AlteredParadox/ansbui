@@ -14,6 +14,7 @@ const (
 	urlPrivateRFC1918 = "http://10.0.0.5:9090"
 	urlPromInternal   = "http://prom.internal:9090"
 	errMetadataDeny   = "cloud-metadata denylist"
+	errCredsNeedHTTPS = "accepted only with https://"
 )
 
 type promURLCase struct {
@@ -143,6 +144,53 @@ func TestNormalisePromURL(t *testing.T) {
 			raw:  "https://localhost:9090/",
 			want: "https://localhost:9090",
 		},
+		// Credentials in the URL are sent as Basic auth on every
+		// query, so they are accepted only where TLS protects them.
+		{
+			name: "credentials kept with https",
+			raw:  "https://scraper:s3cret@localhost:9090",
+			want: "https://scraper:s3cret@localhost:9090",
+		},
+		{
+			name:     "credentials kept with https on an allowlisted host",
+			raw:      "https://scraper:s3cret@prom.internal:9090/",
+			envAllow: "prom.internal:9090",
+			want:     "https://scraper:s3cret@prom.internal:9090",
+		},
+		{
+			name:    "credentials refused with http",
+			raw:     "http://scraper:s3cret@localhost:9090",
+			wantErr: errCredsNeedHTTPS,
+		},
+		{
+			// No scheme means http://, so this is the same case.
+			name:    "credentials refused when the scheme is left out",
+			raw:     "scraper:s3cret@localhost:9090",
+			wantErr: errCredsNeedHTTPS,
+		},
+		{
+			name:    "user name alone refused with http",
+			raw:     "http://scraper@localhost:9090",
+			wantErr: errCredsNeedHTTPS,
+		},
+		{
+			// net/http sends an Authorization header for this too.
+			name:    "empty credentials refused with http",
+			raw:     "http://@localhost:9090",
+			wantErr: errCredsNeedHTTPS,
+		},
+		{
+			name:     "credentials refused with http on an allowlisted host",
+			raw:      "http://scraper:s3cret@prom.internal:9090",
+			envAllow: "prom.internal:9090",
+			wantErr:  errCredsNeedHTTPS,
+		},
+		{
+			// Not credentials: an @ later in the URL is part of the path.
+			name: "an @ in the path is not credentials",
+			raw:  "http://localhost:9090/prom@1",
+			want: "http://localhost:9090/prom@1",
+		},
 	}
 
 	for _, tc := range cases {
@@ -177,6 +225,21 @@ func assertErrContains(t *testing.T, err error, want, got string) {
 	}
 	if !strings.Contains(err.Error(), want) {
 		t.Fatalf("err mismatch: got %q, want substring %q", err.Error(), want)
+	}
+}
+
+// A refused URL must not come back in the error: the settings endpoint
+// returns that text and the metrics fetch logs it.
+func TestPromCredentialErrorDoesNotRepeatThePassword(t *testing.T) {
+	t.Setenv("ANSBUI_PROM_ALLOWED_HOSTS", "")
+	_, err := normalisePromURL("http://scraper:s3cret@localhost:9090")
+	if err == nil {
+		t.Fatal("credentials over plain http were accepted")
+	}
+	for _, secret := range []string{"s3cret", "scraper"} {
+		if strings.Contains(err.Error(), secret) {
+			t.Errorf("error repeats %q: %v", secret, err)
+		}
 	}
 }
 

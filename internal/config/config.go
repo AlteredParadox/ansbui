@@ -415,10 +415,11 @@ func validatePromLabel(s string) error {
 // read and altered in transit (wrong CPU / memory / uptime in the
 // inventory, nothing more: the response is only ever parsed as
 // numbers and labels). ansbui adds no credentials of its own, but a
-// user:password written into the URL is accepted and sent as HTTP
-// Basic auth on every query (prom.TestURLCredentialsAreSentAsBasicAuth
-// pins this), so over plain HTTP those credentials cross the network
-// unencrypted: a URL that carries credentials needs https://.
+// user:password written into the URL is sent as HTTP Basic auth on
+// every query (prom.TestURLCredentialsAreSentAsBasicAuth pins this),
+// and over plain HTTP it would cross the network unencrypted. So a
+// URL that carries credentials is accepted only with https://; see
+// CheckPromCredentials.
 // SonarQube reports the literal as go:S5332. It is an accepted risk,
 // recorded as such on the finding in SonarQube rather than silenced
 // here: a NOSONAR comment would hide every rule on the line, not only
@@ -441,10 +442,32 @@ func normalisePromURL(raw string) (string, error) {
 	if u.Host == "" {
 		return "", errors.New("prometheus URL is missing a host")
 	}
+	if err := CheckPromCredentials(u); err != nil {
+		return "", err
+	}
 	if err := CheckPromHost(u.Hostname(), u.Host); err != nil {
 		return "", err
 	}
 	return s, nil
+}
+
+// CheckPromCredentials refuses a Prometheus URL that carries
+// credentials (user:password@, or a user name alone) unless its
+// scheme is https. net/http sends them as Basic auth on every query,
+// so over plain HTTP anyone on the path could read them. There is no
+// exception for loopback: one rule is easier to state and to check.
+//
+// Exported so prom.NewClient can re-check at fetch time, for the same
+// reason as CheckPromHost: a config.json edited by hand, or written
+// before this rule existed, never went through the settings endpoint.
+//
+// The error names no part of the URL, so the password cannot end up
+// in a log line or an API response through it.
+func CheckPromCredentials(u *url.URL) error {
+	if u.User != nil && u.Scheme != "https" {
+		return errors.New("prometheus URL has credentials in it, which are accepted only with https:// (over plain http they would be sent unencrypted)")
+	}
+	return nil
 }
 
 // promMetadataDeny is the cloud-IMDS denylist. These addresses are
