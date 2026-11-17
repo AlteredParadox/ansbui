@@ -57,9 +57,18 @@ jobs:
       # version boundaries, so a "previous version" New Code definition has
       # nothing to compare against and silently degrades to "the whole
       # project". fetch-depth: 0 above makes describe work.
+      #
+      # The version must only change when a release is tagged. A plain
+      # `git describe --tags --always` appends the commit distance and hash
+      # (or is just the hash while no tag exists), so every push to main
+      # became its own "version" and the new-code period shrank to the
+      # latest commit. --abbrev=0 prints the nearest release tag alone;
+      # before the first release the version is the fixed "unreleased".
       - name: Resolve version
         id: ver
-        run: echo "v=$(git describe --tags --always)" >> "$GITHUB_OUTPUT"
+        run: |
+          v=$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || true)
+          echo "v=${v:-unreleased}" >> "$GITHUB_OUTPUT"
 
       - name: SonarQube Cloud scan
         uses: SonarSource/sonarqube-scan-action@59202af334b4ba7b5db01b701b8e79f8b3bef0f4 # v8.5.0
