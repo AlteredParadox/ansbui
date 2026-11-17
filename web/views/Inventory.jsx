@@ -329,8 +329,8 @@ function InventoryGraph({ groups, hosts, onSelectGroup }) {
           must stay reachable. Sonar S6819 asks for <fieldset>, <details>,
           <optgroup> or <address> in place of the role; none of them can
           stand in for an <svg>, so the role stays. */}
-      <svg
-        role="group" // NOSONAR(S6819): no HTML element can replace an svg here, see above
+      <svg // NOSONAR(S6819): no HTML element can replace an svg here, see above
+        role="group"
         aria-label="Inventory graph: groups and their hosts"
         width="100%" height={H} viewBox={`0 0 ${W} ${H}`} className="graph-svg" preserveAspectRatio="xMidYMid meet">
         <defs>
@@ -497,8 +497,8 @@ function InventoryMap({ hosts }) {
           The dotted land masses are backdrop. The svg itself is a named
           group so the markers stay reachable one by one; as on the graph
           above, no HTML element can take the place of the role. */}
-      <svg
-        role="group" // NOSONAR(S6819): no HTML element can replace an svg here, see above
+      <svg // NOSONAR(S6819): no HTML element can replace an svg here, see above
+        role="group"
         aria-label="Hosts by country"
         width="100%" height="560" viewBox="0 0 900 480" preserveAspectRatio="xMidYMid meet" className="map-svg">
         <g opacity="0.35" aria-hidden="true">
