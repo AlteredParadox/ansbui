@@ -46,6 +46,10 @@ Paste your Prometheus URL (e.g. `http://prom.example.com:9090`) in **Settings**.
 
 The Prometheus URL is fetched **server-side with no auth in front of it**, so it's constrained by an SSRF allowlist. By default only loopback hosts (`127.0.0.1`, `::1`, `localhost`) are accepted, and cloud-metadata addresses (169.254.0.0/16, `metadata.google.internal`, …) are always rejected. To point at a Prometheus on another host, list it in `ANSBUI_PROM_ALLOWED_HOSTS` (see below). This is enforced both when you save the URL and on every metrics fetch, so a hand-edited `config.json` can't bypass it.
 
+A URL written without a scheme gets `http://`, which is what Prometheus serves by default and is fine for the loopback default. For a Prometheus on another host, plain HTTP means the metrics can be read or altered on the way: the inventory would show wrong CPU / memory / uptime figures, and nothing else is affected. If that matters on your network, put TLS in front of Prometheus and write the URL with `https://`.
+
+ansbui adds no credentials of its own to these requests. If you write credentials into the URL (`https://user:password@prom.example.com`), they are sent as HTTP Basic auth on every query, so only do that with `https://`: over plain HTTP they cross the network unencrypted. The URL, credentials included, is also stored in ansbui's `config.json` and shown in **Settings**.
+
 ### Environment variables
 
 All optional. The security-relevant ones (`ANSBUI_ALLOWED_HOSTS`, `ANSBUI_PROM_ALLOWED_HOSTS`) matter mainly for non-loopback / reverse-proxy deployments.

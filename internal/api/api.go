@@ -257,8 +257,18 @@ func (s *Server) staticHandler() http.Handler {
 		// Serve index.html at "/"; /api/ already handled above. Unknown
 		// paths (and bare directories) fall back to index.html so client
 		// routing survives deep links and refreshes.
+		//
+		// The path is the caller's. fs.ValidPath accepts only a clean,
+		// relative, slash-separated name: no "..", no leading slash, not
+		// empty. Anything else cannot name an asset, so it is treated
+		// like any other unknown path. io/fs filesystems are expected to
+		// refuse such names themselves, and embed.FS does; checking here
+		// (and again in the two helpers that open the file) means that
+		// staying inside WebRoot does not depend on which filesystem is
+		// plugged in. static_test.go exercises it with one that does
+		// not check.
 		name := strings.TrimPrefix(r.URL.Path, "/")
-		if name == "" {
+		if !fs.ValidPath(name) {
 			name = "index.html"
 		}
 		if fi, err := fs.Stat(s.WebRoot, name); err != nil || fi.IsDir() {
@@ -276,6 +286,12 @@ func (s *Server) staticHandler() http.Handler {
 // so before this every response had no validator and stale JS lingered
 // in browser caches (which is how a broken Bootstrap.jsx survived a fix).
 func (s *Server) serveStaticFile(w http.ResponseWriter, r *http.Request, name string) {
+	// Checked here as well as in staticHandler, so that this function
+	// cannot be handed a name that leaves WebRoot by any caller.
+	if !fs.ValidPath(name) {
+		http.NotFound(w, r)
+		return
+	}
 	f, err := s.WebRoot.Open(name)
 	if err != nil {
 		http.NotFound(w, r)
@@ -305,6 +321,10 @@ func (s *Server) serveStaticFile(w http.ResponseWriter, r *http.Request, name st
 func (s *Server) staticETag(name string) string {
 	if v, ok := s.staticETags.Load(name); ok {
 		return v.(string)
+	}
+	// As in serveStaticFile: no name that leaves WebRoot is read.
+	if !fs.ValidPath(name) {
+		return ""
 	}
 	data, err := fs.ReadFile(s.WebRoot, name)
 	if err != nil {

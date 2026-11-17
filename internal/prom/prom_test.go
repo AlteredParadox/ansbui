@@ -111,6 +111,52 @@ func TestInstantQuerySkipsNaNAndInf(t *testing.T) {
 	}
 }
 
+// TestURLCredentialsAreSentAsBasicAuth pins what happens to a
+// user:password written into the Prometheus URL: the client keeps it
+// and net/http turns it into an Authorization: Basic header on every
+// query. That is why the README says a URL carrying credentials needs
+// https. If URL credentials are ever refused instead, this test and
+// that paragraph change together.
+func TestURLCredentialsAreSentAsBasicAuth(t *testing.T) {
+	t.Setenv("ANSBUI_PROM_ALLOWED_HOSTS", "")
+	type seen struct {
+		user, pass string
+		ok         bool
+	}
+	got := make(chan seen, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		u, p, ok := r.BasicAuth()
+		got <- seen{u, p, ok}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"status":"success","data":{"resultType":"vector","result":[]}}`)
+	}))
+	defer srv.Close()
+
+	withCreds := strings.Replace(srv.URL, "http://", "http://scraper:s3cret@", 1)
+	c, err := NewClient(withCreds, "instance")
+	if err != nil {
+		t.Fatalf("NewClient with credentials in the URL: %v", err)
+	}
+	if _, err := c.instantQuery(context.Background(), "up"); err != nil {
+		t.Fatalf("instantQuery: %v", err)
+	}
+	if s := <-got; !s.ok || s.user != "scraper" || s.pass != "s3cret" {
+		t.Fatalf("server saw basic auth %+v, want scraper / s3cret", s)
+	}
+
+	// Without credentials in the URL, none are sent.
+	c, err = NewClient(srv.URL, "instance")
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	if _, err := c.instantQuery(context.Background(), "up"); err != nil {
+		t.Fatalf("instantQuery: %v", err)
+	}
+	if s := <-got; s.ok {
+		t.Fatalf("server saw basic auth %+v from a URL with no credentials", s)
+	}
+}
+
 // TestNewClientEnforcesSSRFAllowlist: the settings endpoint validates
 // at write time, but a hand-edited config.json bypasses it — the
 // fetch-time client must apply the same allowlist.

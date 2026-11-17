@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -12,13 +13,23 @@ import (
 )
 
 // These tests pin down what the static handler does with a request path
-// that tries to leave the web root. The handler passes the path to an
-// fs.FS, and io/fs refuses any name that is not a clean, relative,
-// slash-separated path (fs.ValidPath): no "..", no leading slash. So an
-// escaping path is "not found", and the handler's fallback serves
-// index.html. Static analysis cannot see that contract and reports the
-// two fs calls as path traversal (gosecurity:S2083); these tests are the
-// evidence that they are not.
+// that tries to leave the web root. Two things stop it:
+//
+//   - The handler, and each helper that opens a file, checks the name
+//     with fs.ValidPath first: a clean, relative, slash-separated path,
+//     so no ".." and no leading slash.
+//   - io/fs filesystems are expected to refuse such names themselves,
+//     and the ones used here (fs.Sub of an embedded tree, os.DirFS) do.
+//
+// So an escaping path is "not found", and the handler's fallback serves
+// index.html. Static analysis does not recognise either check and
+// reports the two fs calls as path traversal (gosecurity:S2083); these
+// tests are the evidence that they are not. The "no checks of its own"
+// filesystem below is there to show the first check is enough alone.
+//
+// Not covered: a symbolic link inside a web root on disk that points
+// outside it. Name checks cannot see that; production serves the
+// embedded bundle, which has no links.
 
 const (
 	indexBody  = "<!doctype html><title>index</title>"
@@ -68,6 +79,31 @@ func staticRoots(t *testing.T) map[string]fs.FS {
 	return map[string]fs.FS{
 		"sub of a parent fs": sub,
 		"directory on disk":  os.DirFS(filepath.Join(dir, "web")),
+		// A filesystem that breaks the io/fs contract: it resolves ".."
+		// the way an operating system would and hands back whatever is
+		// there. Nothing in production behaves like this; it stands for
+		// "some future filesystem that forgot to check".
+		"filesystem with no checks of its own": laxFS{parent: parent, root: "web"},
+	}
+}
+
+// laxFS serves root inside parent without validating names, so
+// "../secret.txt" reaches parent's secret.txt.
+type laxFS struct {
+	parent fstest.MapFS
+	root   string
+}
+
+func (l laxFS) Open(name string) (fs.File, error) {
+	return l.parent.Open(path.Join(l.root, name))
+}
+
+// The lax filesystem really does leak when asked directly; otherwise the
+// tests that use it would prove nothing.
+func TestLaxFSLeaksWithoutTheHandlerChecks(t *testing.T) {
+	data, err := fs.ReadFile(staticRoots(t)["filesystem with no checks of its own"], "../secret.txt")
+	if err != nil || string(data) != secretBody {
+		t.Fatalf(`ReadFile("../secret.txt") = %q, %v; want the secret, to show this filesystem does not check names`, data, err)
 	}
 }
 
@@ -144,7 +180,7 @@ func TestStaticHandlerDoesNotLeaveWebRoot(t *testing.T) {
 // chain. net/http's mux redirects a path with literal dot segments to
 // the cleaned path, but a percent-encoded one ("/%2e%2e/secret.txt")
 // passes through it and reaches the static handler as "/../secret.txt".
-// So the mux is not the defence; the filesystem is. Either outcome is
+// So the mux is not the defence; the name check is. Either outcome is
 // acceptable here: a redirect, or the app shell. The file outside the
 // root is not.
 func TestHandlerDoesNotLeaveWebRoot(t *testing.T) {
