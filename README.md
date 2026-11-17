@@ -117,7 +117,13 @@ web/                    # static bundle (embedded)
 
 ## CI
 
-`.gitea/workflows/ci.yml` runs build + vet + test, and kicks off a SonarQube scan using `SONAR_TOKEN` and `SONAR_HOST_URL` from the repo secrets. The Sonar project key is `ansbui`.
+CI runs on GitHub Actions (`.github/workflows/`):
+
+- **`ci.yml`** — `check` is the required merge gate: Go build + vet + race tests, `golangci-lint`, and `eslint` over `web/`. Two advisory jobs run alongside it: `vuln` (`govulncheck` + `npm audit`) and `fuzz` (a short pass over every `Fuzz*` target).
+- **`sonarqube.yml`** — SonarQube Cloud scan with Go coverage, using `SONAR_TOKEN` from the repo secrets. The project is `AlteredParadox_ansbui` in the `alteredparadox` organization; rule exceptions live in `sonar-project.properties`.
+- **`release.yml`** — pushing a `vX.Y.Z` tag builds `linux/amd64` + `linux/arm64` binaries and publishes them with a `SHA256SUMS` as a GitHub Release; a manual dispatch is a build-only dry run.
+
+Dependabot (`.github/dependabot.yml`) opens weekly grouped PRs for Go modules, GitHub Actions and the npm lint toolchain.
 
 The repo also ships a Claude Code hook (`.claude/settings.json` + `.claude/hooks/post-edit-lint.sh`): if you open this project in [Claude Code](https://claude.com/claude-code), every file it edits is linted immediately (`golangci-lint` for Go, `eslint` for JS/JSX) so issues surface before commit. It's a plain, inspectable shell script and a silent no-op when those tools aren't installed — but note it does auto-run on edits, so review it if that's a concern. It has no effect if you use a different editor.
 

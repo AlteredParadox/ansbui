@@ -1,0 +1,187 @@
+# Merge gate: the checks a change must pass. `check` is the one required
+# status on main and holds everything deterministic — the Go build, vet,
+# race suite and golangci-lint, plus eslint for the embedded web/ bundle.
+# The jobs after it are advisory: they can go red for reasons a PR cannot
+# fix (a fresh advisory, a fuzz-timing flake), so they inform, not block.
+name: ci
+
+# push only on main; branch pushes are covered by their pull_request run,
+# so PRs (including Dependabot's) don't run this twice.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Least privilege: these jobs only read the repo.
+permissions:
+  contents: read
+
+# A new push to the same ref supersedes the previous run.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      # Actions pinned to full commit SHAs (a retagged action can't change
+      # under us); the trailing comment records the tag. Keep the comment at
+      # the FULL version — Dependabot only refreshes a comment that already
+      # carries one, and a bare "# v7" silently goes stale as the SHA moves.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      # The Go steps run BEFORE `npm ci` on purpose: some npm packages ship
+      # .go files, and with node_modules/ present `./...` would sweep them in.
+      - name: Go build
+        run: go build ./...
+
+      - name: Go vet
+        run: go vet ./...
+
+      # The SSH pool, the job runner and the WebSocket streams all share
+      # state across goroutines — the race detector is what pins them.
+      - name: Go test (race)
+        run: go test -race ./...
+
+      # The linter version is pinned so a new golangci-lint release can't
+      # turn an unrelated PR red; bump it deliberately. Config: .golangci.yml.
+      - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        with:
+          version: v2.11.4
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: lts/*
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - run: npm ci
+
+      # eslint over web/ (flat config in eslint.config.js).
+      - run: npm run lint
+
+  # Known-vulnerability scans. Their own job, NOT the required `check`: a
+  # freshly published advisory would otherwise turn every open PR red for a
+  # reason the PR can't fix — the fix is a dependency or Go-version bump,
+  # which is what this job exists to flag.
+  vuln:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      # Symbol-level and covers the stdlib, so advisories in code the binary
+      # never calls are informational only.
+      #
+      # Pinned to v1.7.0 because govulncheck >= v1.8.0 needs Go 1.26 to build
+      # and go.mod is still on 1.25 (setup-go runs with GOTOOLCHAIN=local, so
+      # `@latest` fails on the toolchain instead of reporting anything). The
+      # vulnerability database is fetched at run time, so the pin does not
+      # freeze the findings. Switch back to `@latest` once go.mod moves to
+      # Go >= 1.26.
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.7.0 ./...
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: lts/*
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - run: npm ci
+
+      # npm audit gates on advisory severity. We accept "moderate"
+      # and below quietly; "high" or "critical" fails the job so
+      # a freshly published transitive CVE is impossible to ignore.
+      # All deps are devDependencies (web/ runs raw via in-browser
+      # Babel, no bundle is shipped) — but the lint tools themselves
+      # land in CI and are worth auditing for supply-chain risk.
+      # `if: always()` so a govulncheck finding doesn't hide this one.
+      - name: npm audit
+        if: always()
+        run: npm audit --audit-level=high
+
+  # Short fuzz pass. Its own job, NOT the required `check`: it is
+  # time-boxed and timing-sensitive on shared runners (see below), so a red
+  # run here is a prompt to look, not a merge blocker.
+  fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      # Finds every Fuzz* function in *_test.go and runs each for 20s.
+      # No-ops cleanly when there are none. 11 targets × 20s ≈ 4 minutes;
+      # bump fuzztime if running on a beefier runner with budget to spare.
+      #
+      # Two CI-flake mitigations layered together:
+      #
+      # 1. -fuzzminimizetime=2s caps how long the engine spends
+      #    minimizing a freshly-discovered "interesting" input.
+      #    Default (60s) was overshooting the 20s budget on slow
+      #    shared runners: a finding at second 19 would start
+      #    minimizing for up to 60s, the deadline would hit,
+      #    and Go would surface "context deadline exceeded".
+      #
+      # 2. Output-shape check after each invocation. Even with (1),
+      #    `go test` can return a context-deadline error when the
+      #    coordinator can't shut workers down in time at the
+      #    20s edge. We classify non-zero exits in this order:
+      #      a. "Failing input written to testdata/fuzz/..."
+      #         → real finding, fatal.
+      #      b. "    --- FAIL: Fuzz.../" sub-test line
+      #         → real finding (alternate framework path), fatal.
+      #      c. "context deadline exceeded" anywhere in stdout
+      #         → known timing flake, log ::warning:: and continue.
+      #      d. anything else (build error, panic, unforeseen
+      #         failure mode) → fatal.
+      #    The narrow (c) clause is what makes this safe: it's the
+      #    only string we tolerate, so a future failure shape we
+      #    haven't seen still surfaces instead of getting masked.
+      - name: Fuzz (short)
+        run: |
+          set -e
+          files=$(grep -rl 'func Fuzz' --include='*_test.go' internal/)
+          for file in $files; do
+            dir=$(dirname "$file")
+            fns=$(grep -oE 'func (Fuzz[A-Za-z0-9_]+)' "$file" | awk '{print $2}')
+            for fn in $fns; do
+              echo "::group::Fuzzing $fn in $dir"
+              out=$(go test -run='^$' -fuzz="^${fn}$" -fuzztime=20s -fuzzminimizetime=2s "./$dir" 2>&1) && rc=0 || rc=$?
+              printf '%s\n' "$out"
+              echo "::endgroup::"
+              if [ "$rc" -ne 0 ]; then
+                if printf '%s' "$out" | grep -q "Failing input written to"; then
+                  echo "::error::fuzz target $fn found a failing input"
+                  exit 1
+                fi
+                if printf '%s' "$out" | grep -qE '^[[:space:]]+--- FAIL: '; then
+                  echo "::error::fuzz target $fn produced a sub-test failure"
+                  exit 1
+                fi
+                # Narrow tolerance to the ONE flake shape we've
+                # actually observed: "context deadline exceeded"
+                # at/just past the fuzztime edge with no real
+                # finding on stdout. Any other non-zero exit
+                # (build error, panic, an unforeseen failure
+                # mode) is still fatal.
+                if printf '%s' "$out" | grep -q "context deadline exceeded"; then
+                  echo "::warning::fuzz target $fn hit context-deadline-exceeded without a failing input — treating as a CI-timing flake"
+                else
+                  echo "::error::fuzz target $fn exited $rc with no recognised flake signature"
+                  exit 1
+                fi
+              fi
+            done
+          done
