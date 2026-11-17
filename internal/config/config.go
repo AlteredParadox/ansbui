@@ -414,7 +414,11 @@ func validatePromLabel(s string) error {
 // https:// is kept as written. Over plain HTTP the metrics can be
 // read and altered in transit (wrong CPU / memory / uptime in the
 // inventory, nothing more: the response is only ever parsed as
-// numbers and labels), and ansbui sends no credentials of its own.
+// numbers and labels). ansbui adds no credentials of its own, but a
+// user:password written into the URL is accepted and sent as HTTP
+// Basic auth on every query (prom.TestURLCredentialsAreSentAsBasicAuth
+// pins this), so over plain HTTP those credentials cross the network
+// unencrypted: a URL that carries credentials needs https://.
 // SonarQube reports the literal as go:S5332. It is an accepted risk,
 // recorded as such on the finding in SonarQube rather than silenced
 // here: a NOSONAR comment would hide every rule on the line, not only
@@ -453,10 +457,11 @@ func normalisePromURL(raw string) (string, error) {
 // are fixed by the cloud providers, so there is nothing to configure.
 // NOSONAR silences every rule on its line, whichever rule prompted it;
 // that is acceptable here because each of these lines is one constant.
+// For Go the comment has to begin with the word to take effect.
 var promMetadataDeny = map[string]struct{}{
-	"169.254.169.254":          {}, // AWS / GCP / OpenStack / DigitalOcean IMDS (NOSONAR: denylist entry)
-	"169.254.170.2":            {}, // AWS ECS task metadata (NOSONAR: denylist entry)
-	"fd00:ec2::254":            {}, // AWS IMDSv6 (NOSONAR: denylist entry)
+	"169.254.169.254":          {}, // NOSONAR denylist entry: AWS / GCP / OpenStack / DigitalOcean IMDS
+	"169.254.170.2":            {}, // NOSONAR denylist entry: AWS ECS task metadata
+	"fd00:ec2::254":            {}, // NOSONAR denylist entry: AWS IMDSv6
 	"metadata.google.internal": {},
 	"metadata":                 {},
 	"169.254.169.254.nip.io":   {}, // common SSRF bypass
