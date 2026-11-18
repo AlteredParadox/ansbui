@@ -192,12 +192,31 @@ What to know before deploying:
 
 ### Other response headers
 
-Every response also carries `Content-Security-Policy:
-frame-ancestors 'none'` and `X-Frame-Options: DENY` (no other site
-can embed the UI in a frame and trick the operator into clicking in
-it) and `X-Content-Type-Options: nosniff`. Nothing needs configuring;
-if the proxy adds its own copies, make sure it does not *relax* them
-(e.g. an `X-Frame-Options: SAMEORIGIN` override).
+Every response also carries:
+
+- `Content-Security-Policy` with `frame-ancestors 'none'`, plus
+  `X-Frame-Options: DENY`: no other site can embed the UI in a frame
+  and trick the operator into clicking in it.
+- The same `Content-Security-Policy` limits what the page may load and
+  contact to ansbui itself: `default-src 'self'`, `style-src 'self'`,
+  `font-src 'self'`, `img-src 'self' data:`, `connect-src 'self'`,
+  `object-src 'none'`, `base-uri 'none'`, `form-action 'self'`. The
+  UI needs nothing from anywhere else — its fonts are in the binary —
+  and the page that holds every password field should not be able to
+  fetch a stylesheet from, or send a request to, another host.
+  `script-src 'self' 'unsafe-inline'` is the exception: the UI
+  compiles its JSX in the browser and runs the result as inline
+  scripts.
+- `Referrer-Policy: no-referrer`: links out of the UI do not tell the
+  destination where ansbui lives.
+- `X-Content-Type-Options: nosniff`.
+
+Nothing needs configuring. If the proxy adds its own copies, make
+sure it does not *relax* them (e.g. an `X-Frame-Options: SAMEORIGIN`
+override), and note that a proxy which **injects** content into the
+page — an analytics snippet, a banner, a login widget loading from
+another host — will be blocked by this policy. That is the policy
+working; serve such things from the proxy's own pages instead.
 
 ## 4. Firewall
 
