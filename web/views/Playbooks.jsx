@@ -41,7 +41,7 @@ function PlaybookLibrary({ playbooks, selectedId, onSelect, onNew }) {
   const filter = q.toLowerCase();
   const rows = playbooks.filter(p =>
     !filter ||
-    p.name.toLowerCase().includes(filter) ||
+    (p.path || p.name).toLowerCase().includes(filter) ||
     (p.title || '').toLowerCase().includes(filter)
   );
   return (
@@ -58,7 +58,9 @@ function PlaybookLibrary({ playbooks, selectedId, onSelect, onNew }) {
         {rows.map(p => (
           <button type="button" key={p.id} className={`pb-lib-item ${selectedId === p.id ? 'active' : ''}`} onClick={() => onSelect(p.id)}>
             <div className="pb-lib-row-1">
-              <span className="pb-lib-name mono">{p.name}</span>
+              {/* The path, not the file name: two cards for deploy.yml
+                  and staging/deploy.yml must not read the same. */}
+              <span className="pb-lib-name mono">{p.path || p.name}</span>
               <span className={`dot rs-${p.lastStatus}`} title={`last: ${p.lastStatus}`}/>
             </div>
             <div className="pb-lib-row-2 mute">{p.title}</div>
@@ -319,6 +321,9 @@ function PlaybooksView({ initialId, runnerPrefill }) {
   const [error, setError] = useStateP('');
   const [runnerOpen, setRunnerOpen] = useStateP(false);
   const [runnerSeed, setRunnerSeed] = useStateP(null);
+  // Why a re-run requested from History was not opened. Separate from
+  // `error`, which the selection effect below clears on every change.
+  const [rerunError, setRerunError] = useStateP('');
   const [historyOpen, setHistoryOpen] = useStateP(false);
   const [importOpen, setImportOpen] = useStateP(false);
 
@@ -327,10 +332,23 @@ function PlaybooksView({ initialId, runnerPrefill }) {
   // External "open runner with prefill" signal from the History view.
   // The prefill carries an issuedAt so repeat clicks on the same
   // playbook re-open the dialog.
+  //
+  // The run dialog opens only for the playbook at exactly the recorded
+  // path. This used to accept a file-name match too, and to open the
+  // dialog even with no match at all — on whichever playbook happened
+  // to be selected, with the old run's limit, tags, extra vars and
+  // --become already filled in.
   useEffectP(() => {
     if (!runnerPrefill) return;
-    const match = PLAYBOOKS.find(p => p.path === runnerPrefill.playbookPath || p.name === runnerPrefill.playbookPath);
-    if (match) setSelectedId(match.id);
+    const match = PLAYBOOKS.find(p => p.path === runnerPrefill.playbookPath);
+    if (!match) {
+      setRunnerOpen(false);
+      setRunnerSeed(null);
+      setRerunError(`Not re-running: ${runnerPrefill.playbookPath || 'the recorded playbook'} is not in this connection's library.`);
+      return;
+    }
+    setRerunError('');
+    setSelectedId(match.id);
     setRunnerSeed(runnerPrefill);
     setRunnerOpen(true);
   }, [runnerPrefill?.issuedAt]);
@@ -423,9 +441,10 @@ function PlaybooksView({ initialId, runnerPrefill }) {
       </div>
 
       {error && <div className="cm-error mono">{error}</div>}
+      {rerunError && <div className="cm-error mono">{rerunError}</div>}
 
       <div className="pb-body">
-        <PlaybookLibrary playbooks={PLAYBOOKS} selectedId={selectedId} onSelect={setSelectedId} onNew={() => setImportOpen(true)}/>
+        <PlaybookLibrary playbooks={PLAYBOOKS} selectedId={selectedId} onSelect={(id) => { setRerunError(''); setSelectedId(id); }} onNew={() => setImportOpen(true)}/>
 
         <main className="pb-main">
           <div className="pb-head card">
@@ -655,7 +674,7 @@ function PlaybookRunner({ open, pb, seed, onClose }) {
     <dialog
       ref={dialogRef}
       className="ansbui-dialog ansbui-dialog-runner"
-      aria-label={`Run ${pb.name}`}
+      aria-label={`Run ${pb.path || pb.name}`}
       // Escape fires the cancelable 'cancel' event: preventDefault
       // stops the dialog closing so requestClose decides cleanly (no
       // flicker) on the first press. A second Escape that the browser
@@ -672,7 +691,9 @@ function PlaybookRunner({ open, pb, seed, onClose }) {
         <div className="pb-runner-head">
           <div>
             <div className="section-title">Run playbook</div>
-            <h3 className="mono" style={{ margin: '4px 0 0' }}>{pb.name}</h3>
+            {/* The full path: this is the last thing the operator reads
+                before the playbook runs. */}
+            <h3 className="mono" style={{ margin: '4px 0 0' }}>{pb.path || pb.name}</h3>
             <div className="mute" style={{ fontSize: 12 }}>
               hosts: <span className="mono">{pb.targets || 'all'}</span>
             </div>
@@ -1163,7 +1184,7 @@ function PlaybookHistoryDialog({ open, pb, onClose }) {
       .then(res => {
         if (!alive) return;
         const all = res.runs || [];
-        const mine = all.filter(r => r.playbook === pb.path || r.playbook === pb.name);
+        const mine = all.filter(r => r.playbook === pb.path);
         setRuns(mine);
       })
       .catch(e => { if (alive) setError(e.message); })

@@ -18,7 +18,7 @@ function filterRuns(runs, filter) {
   return runs.filter(r => r.status === filter);
 }
 
-function HistoryView({ onOpenPlaybook, onRunPlaybook, onOpenAdhoc }) {
+function HistoryView({ onOpenPlaybook, onRunPlaybook, onOpenAdhoc, activeServer }) {
   const data = globalThis.AnsibleData || {};
   const RUNS = data.RUNS || [];
   const PLAYBOOKS = data.PLAYBOOKS || [];
@@ -137,7 +137,7 @@ function HistoryView({ onOpenPlaybook, onRunPlaybook, onOpenAdhoc }) {
                       if (pb) onOpenPlaybook?.(pb.id);
                     }}
                     disabled={!findPlaybookFor(PLAYBOOKS, detail)}
-                    title={findPlaybookFor(PLAYBOOKS, detail) ? 'Open in Playbooks' : 'Playbook no longer in library'}
+                    title={findPlaybookFor(PLAYBOOKS, detail) ? 'Open in Playbooks' : `${detail.playbook} is not in this connection's library`}
                   >
                     <Icon name="code" size={12}/> View playbook
                   </button>
@@ -146,8 +146,8 @@ function HistoryView({ onOpenPlaybook, onRunPlaybook, onOpenAdhoc }) {
                       type="button"
                       className="btn small"
                       onClick={() => onRunPlaybook?.(buildRetryPrefill(detail))}
-                      disabled={failedHostsFromLog(detail.log).length === 0}
-                      title="Re-run against only the hosts that failed last time"
+                      disabled={failedHostsFromLog(detail.log).length === 0 || !!rerunBlocked(PLAYBOOKS, detail, activeServer)}
+                      title={rerunBlocked(PLAYBOOKS, detail, activeServer) || 'Re-run against only the hosts that failed last time'}
                     >
                       <Icon name="refresh" size={12}/> Retry failed
                     </button>
@@ -156,6 +156,8 @@ function HistoryView({ onOpenPlaybook, onRunPlaybook, onOpenAdhoc }) {
                     type="button"
                     className="btn primary small"
                     onClick={() => onRunPlaybook?.(buildRerunPrefill(detail))}
+                    disabled={!!rerunBlocked(PLAYBOOKS, detail, activeServer)}
+                    title={rerunBlocked(PLAYBOOKS, detail, activeServer) || 'Open the run dialog with this run\'s settings'}
                   >
                     <Icon name="play" size={12}/> Re-run
                   </button>
@@ -249,15 +251,48 @@ function timeStamp() {
 }
 
 // findPlaybookFor resolves a run's playbook (stored as the relative
-// path the runner used) back to an entry in the library. Falls back
-// to matching by basename so a moved file still resolves if the new
-// location keeps the same filename.
+// path the runner used) back to the library entry with exactly that
+// path, or null.
+//
+// It used to fall back to any entry with the same file name, "so a
+// moved file still resolves". But a same-named file somewhere else is
+// just as often a different playbook — deploy.yml and
+// staging/deploy.yml — and the caller then opened, or re-ran, that one
+// under the recorded run's name. No match now means no match.
 function findPlaybookFor(playbooks, run) {
   if (!run?.playbook) return null;
-  const direct = playbooks.find(p => p.path === run.playbook);
-  if (direct) return direct;
-  const base = run.playbook.split('/').pop();
-  return playbooks.find(p => (p.path || '').split('/').pop() === base || p.name === base) || null;
+  return playbooks.find(p => p.path === run.playbook) || null;
+}
+
+// rerunBlocked says why a recorded playbook run must not be replayed
+// from here, or '' when it may be. Re-run and Retry failed carry the
+// old run's limit, tags, extra vars and --become into the run dialog,
+// so they are only offered when the dialog will be for the SAME
+// playbook on the SAME control node:
+//
+//   - the record names a connection other than the active one. Run
+//     history is shared across connections, and two control nodes
+//     commonly both have a site.yml. Compared by id when the record
+//     has one; older records only have the display name.
+//   - the active connection's library has no playbook at exactly the
+//     recorded path (deleted, renamed, moved).
+//
+// The operator can still open the playbook they mean and run it by
+// hand; what is refused is doing it in one click under another run's
+// settings.
+function rerunBlocked(playbooks, run, activeServer) {
+  if (!run?.playbook) return 'This run did not record a playbook';
+  const active = activeServer || {};
+  const recordedElsewhere = run.serverId
+    ? !!active.id && run.serverId !== active.id
+    : !!run.server && !!active.name && run.server !== active.name;
+  if (recordedElsewhere) {
+    return `Recorded on connection "${run.server || run.serverId}" — switch to it to re-run (active: "${active.name || active.id}")`;
+  }
+  if (!findPlaybookFor(playbooks, run)) {
+    return `${run.playbook} is not in this connection's library — it was deleted, renamed or moved`;
+  }
+  return '';
 }
 
 // failedHostsFromLog scans a run's event log for "fail" or

@@ -66,13 +66,13 @@ function buildSections({ query, actions, hosts, groups, plays, mods, onNavigate,
     });
   }
 
-  const filteredPlays = plays.filter(p => matchesQuery(query, p.name, p.title));
+  const filteredPlays = plays.filter(p => matchesQuery(query, p.path || p.name, p.title));
   if (filteredPlays.length) {
     sections.push({
       title: 'Playbooks',
       items: filteredPlays.slice(0, 5).map(p => ({
         id: `pb-${p.id}`, kind: 'pb',
-        label: p.name, sub: p.title,
+        label: p.path || p.name, sub: p.title,
         icon: 'playbooks',
         run: () => onRunPlaybook(p.id)
       }))

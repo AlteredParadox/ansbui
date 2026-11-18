@@ -110,7 +110,7 @@ func parsePlaybookLine(line string) (Playbook, bool) {
 	rel := parts[0]
 	name := path.Base(rel)
 	p := Playbook{
-		ID:   "pb-" + strings.TrimSuffix(strings.TrimSuffix(name, ".yml"), ".yaml"),
+		ID:   playbookID(rel),
 		Name: name,
 		Path: rel,
 	}
@@ -127,6 +127,20 @@ func parsePlaybookLine(line string) (Playbook, bool) {
 	return p, true
 }
 
+// playbookID is the identity the UI selects, keys and looks playbooks
+// up by. It is the whole relative path, extension included, because
+// that is the only thing that is unique per file.
+//
+// It used to be the base name with the extension dropped, so
+// deploy.yml, staging/deploy.yml and deploy.yaml were all "pb-deploy".
+// The UI resolved a click by id and took the first match: selecting
+// the second card showed, saved and RAN the first file, with nothing on
+// screen to say so — in the audit's reproduction a staging playbook
+// went out with the production limit.
+func playbookID(rel string) string {
+	return "pb-" + rel
+}
+
 // LoadPlaybook reads a single playbook's YAML contents.
 func LoadPlaybook(ctx context.Context, pool *sshpool.Pool, srv config.Server, rel string) (Playbook, error) {
 	if err := validateRelPath(rel); err != nil {
@@ -141,7 +155,7 @@ func LoadPlaybook(ctx context.Context, pool *sshpool.Pool, srv config.Server, re
 		return Playbook{}, fmt.Errorf("read playbook %s: %w (stderr: %s)", rel, err, strings.TrimSpace(stderr))
 	}
 	p := Playbook{
-		ID:   "pb-" + strings.TrimSuffix(strings.TrimSuffix(path.Base(rel), ".yml"), ".yaml"),
+		ID:   playbookID(rel),
 		Name: path.Base(rel),
 		Path: rel,
 		YAML: stdout,

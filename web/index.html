@@ -282,8 +282,10 @@
       const openPlaybookRunner = useCallback((prefill) => {
         if (!prefill) return;
         if (!setView('playbooks')) return;
+        // Exact path only; PlaybooksView applies the same rule and
+        // refuses to open the dialog when nothing matches.
         const pbs = (globalThis.AnsibleData || {}).PLAYBOOKS || [];
-        const match = pbs.find(p => p.path === prefill.playbookPath || p.name === prefill.playbookPath);
+        const match = pbs.find(p => p.path === prefill.playbookPath);
         if (match) setPlaybookId(match.id);
         setPbRunnerPrefill({ ...prefill, issuedAt: Date.now() });
       }, [setView]);
@@ -305,7 +307,7 @@
           case 'playbooks': return <window.PlaybooksView initialId={playbookId} runnerPrefill={pbRunnerPrefill}/>;
           case 'adhoc': return <window.AdhocView prefill={adhocPrefill}/>;
           case 'bootstrap': return <window.BootstrapView/>;
-          case 'history': return <window.HistoryView onOpenPlaybook={runPlaybook} onRunPlaybook={openPlaybookRunner} onOpenAdhoc={openAdhoc}/>;
+          case 'history': return <window.HistoryView onOpenPlaybook={runPlaybook} onRunPlaybook={openPlaybookRunner} onOpenAdhoc={openAdhoc} activeServer={{ id: activeId, name: activeName }}/>;
           case 'vault': return <window.VaultView/>;
           default: return null;
         }
