@@ -947,14 +947,14 @@ func carryHostKeyToTargetPort(ctx context.Context, host string, dialedPort int, 
 		emit("meta", "could not record the host key fingerprint for "+moved+" ("+err.Error()+") — the next bootstrap of that address will be treated as a first contact")
 		return
 	}
+	how := "sshd now listens there with the same key"
 	switch {
 	case probeErr != nil:
-		emit("ok", "host key recorded for "+moved+" as well (sshd was moved there; the port could not be reached to confirm: "+probeErr.Error()+")")
+		how = "sshd was moved there, but the port could not be reached to confirm: " + probeErr.Error()
 	case has:
-		emit("ok", "host key recorded for "+moved+" as well — that port presents this session's key; the older record ("+existing+") was replaced")
-	default:
-		emit("ok", "host key recorded for "+moved+" as well — sshd now listens there with the same key")
+		how = "that port presents this session's key; the older record (" + existing + ") was replaced"
 	}
+	emit("ok", "host key recorded for "+moved+" as well — "+how)
 }
 
 // ensureRecord makes the porkbun record set of recordType for fqdn
