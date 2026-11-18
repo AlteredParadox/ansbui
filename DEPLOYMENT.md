@@ -463,6 +463,62 @@ Optional env vars worth knowing about:
   mode off (the default) reinstall behaves exactly as before and
   the field is ignored.
 
+### Reinstall: what is and is not verified
+
+The **reinstall the OS first** option in the bootstrap form wipes the
+target and installs a fresh Debian or Ubuntu by running the upstream
+[bin456789/reinstall](https://github.com/bin456789/reinstall) script
+as root on the target. Everything below is downloaded **by the
+target**, first from its current OS and then from the installer it
+reboots into. ansbui verifies the first item and not the rest:
+
+- **`reinstall.sh` — verified.** Fetched over HTTPS from
+  `raw.githubusercontent.com` at a commit fixed in the ansbui source,
+  and its SHA-256 is compared with a value compiled into ansbui. A
+  mismatch stops the run before anything from it executes.
+- **Its helper scripts (`trans.sh` and others) — HTTPS only.** ansbui
+  points them at the same commit and removes the `--insecure` the
+  upstream script passes to `curl`, so they come from that commit
+  over a checked TLS connection. ansbui holds no digest for them.
+- **The installer: an Alpine Linux netboot kernel, initramfs and
+  modules — not verified, and plain HTTP.** They come from
+  `http://dl-cdn.alpinelinux.org`. Upstream uses HTTP there on
+  purpose (some machines have a wrong clock that early, which breaks
+  HTTPS), and nothing checks a digest or signature of the files.
+- **The OS image — not verified.** A Debian `…/latest/…qcow2` from
+  `cdimage.debian.org` or an Ubuntu `…/release/…img` from
+  `cloud-images.ubuntu.com`, over HTTPS, with no digest or signature
+  check. The path always serves the newest build, so two reinstalls
+  can install different images. It is downloaded by the installer,
+  which was itself not verified.
+
+What follows from that: whoever can alter traffic between the target
+and the Alpine mirror while a reinstall runs can swap the installer,
+and with it control the system that gets installed — including the
+`ansible` account and key that bootstrap then puts on it. That is the
+target's hosting network, any network between it and the mirror, or
+whoever can answer its DNS query for the mirror. The same holds for
+anyone able to change what the mirror or the image servers hand out.
+ansbui cannot notice: the reinstalled host comes back and answers
+normally. The exposure is on the **target's** network path and lasts
+for the minutes the downloads take; the path between you and ansbui,
+and between ansbui and the control node, is not involved.
+
+There is no setting that adds the missing checks. So:
+
+- Use the reinstall option only where you are willing to trust the
+  target's network path that far — in practice, a provider's
+  datacenter network you already rely on.
+- Where the provider can rebuild the machine from its own image, do
+  that instead and run bootstrap without the reinstall option.
+- A reinstalled host has a new host key that ansbui could not verify
+  either (above). Comparing the fingerprint ansbui reports against
+  the provider console tells you that you reached the right machine;
+  it says nothing about what was installed on it.
+
+This describes the upstream script at the commit ansbui currently
+pins (`reinstallScriptCommit` in `internal/bootstrap/reinstall.go`).
+
 ### SSH peers that stop answering
 
 Every command ansbui runs goes over an SSH session to a control node

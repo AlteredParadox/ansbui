@@ -92,13 +92,24 @@ var reinstallOSMatrix = map[string][]string{
 // pinned orchestrator. reinstallPrepScript therefore rewrites the
 // confhome assignments to this commit after the sha256 check, so
 // the orchestrator and every helper come from the same pinned
-// commit and a run is reproducible end-to-end.
+// commit.
+//
+// That is as far as the pin reaches. What the script downloads next
+// is not ours to check and upstream does not check it: the installer
+// (Alpine netboot kernel, initramfs, modloop) comes over plain HTTP
+// with no digest, and the OS cloud image over HTTPS from a "latest"
+// path with no digest. A run is therefore NOT reproducible or
+// tamper-evident end to end. DEPLOYMENT.md, "Reinstall: what is and
+// is not verified", tells operators so, and the bootstrap form says
+// it next to the option.
 //
 // To roll: pick the new commit upstream, run
 //
 //	curl -fsSL https://raw.githubusercontent.com/bin456789/reinstall/<sha>/reinstall.sh | sha256sum
 //
-// and update both constants in the same commit.
+// and update both constants in the same commit. Then re-read how the
+// new script fetches its installer and OS image, and bring that
+// DEPLOYMENT.md section in line with it.
 const reinstallScriptCommit = "52c5a29fba0cef139b1193eee1efe09879205f52"
 
 // reinstallScriptSHA256 is the expected sha256 of reinstall.sh at
@@ -116,7 +127,9 @@ const reinstallScriptSHA256 = "c7931dfa847adc41c58b60eceb3237ef7b2eb676e38e00efe
 // raw.githubusercontent.com serves the exact file at the requested
 // commit; combined with the local sha256 check below, an MITM or
 // upstream compromise would have to produce a sha256 collision to
-// slip past.
+// slip a different reinstall.sh past. The helpers have no local
+// digest: for them the commit URL and its TLS connection are the
+// whole check.
 var (
 	reinstallConfhomeURL = fmt.Sprintf("https://raw.githubusercontent.com/bin456789/reinstall/%s", reinstallScriptCommit)
 	reinstallScriptURL   = reinstallConfhomeURL + "/reinstall.sh"
