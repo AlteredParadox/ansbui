@@ -72,9 +72,14 @@ const (
 	loginSlotWait = 3 * time.Second
 	// maxTrackedLoginSources bounds the per-source map so an
 	// attacker with many source IPs can't grow it without limit;
-	// when full, the longest-idle source is evicted. Eviction only
-	// ever forgives a backoff early — it never blocks a fresh
-	// client.
+	// when full, the longest-idle source is evicted, which only ever
+	// forgives a backoff early. A source with an attempt waiting or
+	// verifying is never evicted: its handler is still alive, and
+	// dropping its entry would let the same source start a second
+	// attempt and let waiters pile up past this bound. So the bound
+	// is also the most attempts that can be waiting at once, and a
+	// new source is refused (429) only in the one case where all of
+	// them are in flight.
 	maxTrackedLoginSources = 1024
 )
 
@@ -163,6 +168,9 @@ func (l *loginLimiter) reserve(source string, now time.Time) (chan struct{}, log
 		l.slots = make(chan struct{}, maxConcurrentLogins)
 	}
 	src := l.source(source, now)
+	if src == nil {
+		return nil, loginBusy // every tracked source has an attempt in flight
+	}
 	src.refill(now)
 	if src.inFlight {
 		return nil, loginBusy
@@ -198,7 +206,9 @@ func (l *loginLimiter) end(source string, ok bool) {
 	<-l.slots
 	src, tracked := l.sources[source]
 	if !tracked {
-		return // evicted while verifying; nothing left to update
+		// Cannot happen while in-flight sources are never evicted;
+		// kept so a future change there cannot turn into a panic.
+		return
 	}
 	src.inFlight = false
 	if ok {
@@ -208,7 +218,8 @@ func (l *loginLimiter) end(source string, ok bool) {
 
 // source returns the tracked entry for key, creating it (and
 // evicting the longest-idle entry if the map is at capacity) as
-// needed. Caller holds l.mu.
+// needed. It returns nil when the map is full and nothing in it is
+// idle. Caller holds l.mu.
 func (l *loginLimiter) source(key string, now time.Time) *loginSource {
 	if l.sources == nil {
 		l.sources = make(map[string]*loginSource)
@@ -216,38 +227,36 @@ func (l *loginLimiter) source(key string, now time.Time) *loginSource {
 	if s, ok := l.sources[key]; ok {
 		return s
 	}
-	if len(l.sources) >= maxTrackedLoginSources {
-		l.evictOldest()
+	if len(l.sources) >= maxTrackedLoginSources && !l.evictOldestIdle() {
+		return nil
 	}
 	s := &loginSource{tokens: loginBurst, lastRefill: now, lastAttempt: now}
 	l.sources[key] = s
 	return s
 }
 
-// evictOldest drops the source with the oldest lastAttempt, passing
-// over sources with an attempt in flight while any other exists (an
-// evicted in-flight source would get a second concurrent attempt).
-// Linear scan; the map is small (≤ maxTrackedLoginSources) and this
-// only runs when it is full. Caller holds l.mu.
-func (l *loginLimiter) evictOldest() {
+// evictOldestIdle drops the idle source with the oldest lastAttempt
+// and reports whether there was one. A source with an attempt in
+// flight is never a candidate (see maxTrackedLoginSources). Linear
+// scan; the map is small (≤ maxTrackedLoginSources) and this only
+// runs when it is full. Caller holds l.mu.
+func (l *loginLimiter) evictOldestIdle() bool {
 	var oldestKey string
 	var oldest time.Time
 	found := false
-	for _, idleOnly := range []bool{true, false} {
-		for k, s := range l.sources {
-			if idleOnly && s.inFlight {
-				continue
-			}
-			if !found || s.lastAttempt.Before(oldest) {
-				found = true
-				oldestKey, oldest = k, s.lastAttempt
-			}
+	for k, s := range l.sources {
+		if s.inFlight {
+			continue
 		}
-		if found {
-			break
+		if !found || s.lastAttempt.Before(oldest) {
+			found = true
+			oldestKey, oldest = k, s.lastAttempt
 		}
 	}
-	delete(l.sources, oldestKey)
+	if found {
+		delete(l.sources, oldestKey)
+	}
+	return found
 }
 
 // ParseTrustedProxies parses the ANSBUI_TRUSTED_PROXIES value: a

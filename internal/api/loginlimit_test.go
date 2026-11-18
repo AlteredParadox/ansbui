@@ -403,8 +403,93 @@ func TestLoginLimiter_GivingUpReturnsTheToken(t *testing.T) {
 	}
 }
 
-// Eviction prefers idle sources, and a source evicted while it is
-// being verified does not break the release.
+// When every tracked source has an attempt waiting or verifying,
+// nothing can be evicted: a new source is refused instead. Evicting a
+// live reservation let the same source start a second attempt, let
+// waiters grow past the cap, and let the old attempt's release clear
+// the replacement's in-flight mark.
+func TestLoginLimiter_FullOfLiveReservationsRefusesNewSources(t *testing.T) {
+	var l loginLimiter
+	now := time.Now()
+	name := func(i int) string { return fmt.Sprintf("198.18.%d.%d", i/256, i%256) }
+	// reserve is begin without the wait for a slot: each of these is
+	// what a handler parked in begin holds.
+	for i := range maxTrackedLoginSources {
+		if _, v := l.reserve(name(i), now.Add(time.Duration(i)*time.Millisecond)); v != loginProceed {
+			t.Fatalf("reservation #%d = %v, want proceed", i, v)
+		}
+	}
+	tracked := func() int {
+		l.mu.Lock()
+		defer l.mu.Unlock()
+		return len(l.sources)
+	}
+
+	// One more source: refused, and it displaced nobody.
+	const newcomer = "203.0.113.200"
+	for range 3 {
+		if _, v := l.reserve(newcomer, now.Add(time.Hour)); v != loginBusy {
+			t.Fatalf("new source with the map full of live reservations = %v, want busy", v)
+		}
+	}
+	if n := tracked(); n != maxTrackedLoginSources {
+		t.Fatalf("tracked sources = %d, want %d (a live reservation was evicted, or the map grew)", n, maxTrackedLoginSources)
+	}
+	// The oldest source is still the one with an attempt in flight: a
+	// second attempt from it is refused, not started afresh.
+	if _, v := l.reserve(name(0), now.Add(time.Hour)); v != loginBusy {
+		t.Fatalf("second attempt from the oldest live source = %v, want busy", v)
+	}
+	// begin reports the same thing, without waiting for a slot it will
+	// never be given.
+	start := time.Now()
+	if v := l.begin(bg, newcomer, now.Add(time.Hour)); v != loginBusy {
+		t.Fatalf("begin for a new source with the map full = %v, want busy", v)
+	}
+	if took := time.Since(start); took > time.Second {
+		t.Fatalf("begin took %s to refuse; it must not queue", took)
+	}
+
+	// Once one attempt gives up, its entry is idle and can make room.
+	l.unreserve(name(7))
+	if _, v := l.reserve(newcomer, now.Add(time.Hour)); v != loginProceed {
+		t.Fatalf("new source after one reservation was released = %v, want proceed", v)
+	}
+	l.mu.Lock()
+	_, stillThere := l.sources[name(7)]
+	other := l.sources[name(8)]
+	fresh := l.sources[newcomer]
+	l.mu.Unlock()
+	if stillThere {
+		t.Fatal("the idle source was not the one evicted")
+	}
+	if other == nil || !other.inFlight {
+		t.Fatal("releasing one source changed another's reservation")
+	}
+	if fresh == nil || !fresh.inFlight || fresh.tokens != loginBurst-1 {
+		t.Fatalf("the newcomer's reservation is wrong: %+v", fresh)
+	}
+	if n := tracked(); n != maxTrackedLoginSources {
+		t.Fatalf("tracked sources = %d after one swap, want %d", n, maxTrackedLoginSources)
+	}
+	// Releasing every older attempt leaves the newcomer's reservation
+	// exactly as it was.
+	for i := range maxTrackedLoginSources {
+		if i != 7 {
+			l.unreserve(name(i))
+		}
+	}
+	l.unreserve(name(7)) // already gone: must not touch anything
+	l.mu.Lock()
+	fresh = l.sources[newcomer]
+	l.mu.Unlock()
+	if fresh == nil || !fresh.inFlight || fresh.tokens != loginBurst-1 {
+		t.Fatalf("an older attempt's release changed the newcomer's reservation: %+v", fresh)
+	}
+}
+
+// Eviction prefers idle sources, and a release for a source that is
+// no longer tracked does not break anything.
 func TestLoginLimiter_EvictionAndInFlightSources(t *testing.T) {
 	var l loginLimiter
 	now := time.Now()
