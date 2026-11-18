@@ -312,9 +312,16 @@ function failedHostsFromLog(log) {
   return out;
 }
 
+// The two prefill builders below carry the record's connection
+// (server, serverId) along with its settings. The prefill outlives the
+// click that made it — it is handed to the Playbooks view, which is
+// where it is acted on — so the view checks it against the connection
+// that is active THEN, with the same rerunBlocked rule the buttons use.
 function buildRerunPrefill(run) {
   return {
     playbookPath: run.playbook,
+    server: run.server || '',
+    serverId: run.serverId || '',
     limit: run.limit || '',
     tags: run.tags || [],
     extraVars: run.extraVars || {},
@@ -327,6 +334,8 @@ function buildRetryPrefill(run) {
   const hosts = failedHostsFromLog(run.log);
   return {
     playbookPath: run.playbook,
+    server: run.server || '',
+    serverId: run.serverId || '',
     limit: hosts.join(','),
     tags: run.tags || [],
     extraVars: run.extraVars || {},
@@ -360,3 +369,6 @@ function buildAdhocRetryPrefill(run) {
 }
 
 globalThis.HistoryView = HistoryView;
+// Shared with the Playbooks view, which applies the same rule to a
+// re-run prefill at the moment it would open the run dialog.
+globalThis.AnsbuiRerunBlocked = rerunBlocked;

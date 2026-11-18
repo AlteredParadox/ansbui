@@ -7,7 +7,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { createPage, loadScript } from './browser-script.js';
+import { createPage, findElements, hookRuntime, loadScript, textOf } from './browser-script.js';
 
 const historyPage = createPage();
 loadScript(historyPage, 'views/History.jsx');
@@ -116,4 +116,148 @@ test('run cards carry the connection they were recorded on', async () => {
   const [r1, r0] = Array.from(data.RUNS);
   assert.deepEqual([r1.server, r1.serverId], ['prod', 'srv-prod']);
   assert.deepEqual([r0.server, r0.serverId], ['', '']);
+});
+
+// --- web/views/Playbooks.jsx: consuming a re-run prefill ----------------
+//
+// History's buttons are one guard; the Playbooks view is the other, and
+// the one that matters, because it is where the prefill is acted on.
+// The prefill is state the app shell holds between views, so it can
+// arrive after the active connection has changed.
+
+
+const STAGING = { id: 'srv-staging', name: 'staging' };
+const BOTH_HAVE = [
+  { id: 'pb-site.yml', name: 'site.yml', path: 'site.yml', yaml: '- hosts: all\n' },
+  { id: 'pb-deploy.yml', name: 'deploy.yml', path: 'deploy.yml', yaml: '- hosts: all\n' },
+];
+
+// A page with both views loaded, and a stand-in for the part of the app
+// shell (App in index.html) that owns the prefill: it holds one, hands
+// it to PlaybooksView, and drops it when told it was consumed or when
+// the connection changes.
+function shell(activeServer) {
+  const rt = hookRuntime();
+  const page = createPage({ React: rt.React, Icon: 'Icon', AnsibleData: { PLAYBOOKS: BOTH_HAVE } });
+  loadScript(page, 'views/History.jsx');
+  loadScript(page, 'views/Playbooks.jsx');
+  const state = { prefill: null, active: activeServer, consumed: 0, view: null };
+  const app = {
+    page,
+    state,
+    // History's Re-run on `run`, as the shell's openPlaybookRunner does it.
+    rerun(run) {
+      state.prefill = { ...page.buildRerunPrefill(run), issuedAt: ++app.clock };
+    },
+    clock: 0,
+    switchTo(server) {
+      state.active = server;
+      state.prefill = null; // the shell's effect on activeId
+    },
+    // Navigating to Playbooks mounts the view with whatever the shell holds.
+    openPlaybooks({ prefill = state.prefill } = {}) {
+      state.view = rt.mount(page.PlaybooksView, {
+        runnerPrefill: prefill,
+        activeServer: state.active,
+        onRunnerPrefillConsumed: () => {
+          state.consumed++;
+          state.prefill = null;
+        },
+      });
+      return app;
+    },
+    leave() {
+      state.view.unmount();
+      state.view = null;
+    },
+    runner() {
+      const [el] = findElements(state.view.tree, (n) => n.type === page.PlaybookRunner);
+      return el.props;
+    },
+    closeRunner() {
+      app.runner().onClose();
+      state.view.rerender();
+    },
+    banner() {
+      return findElements(state.view.tree, (n) => n.props?.className === 'cm-error mono').map(textOf).join(' | ');
+    },
+  };
+  return app;
+}
+
+const RUN_ON_PROD = { kind: 'playbook', playbook: 'deploy.yml', server: 'prod', serverId: 'srv-prod', limit: 'prod-web', tags: ['release'], extraVars: { version: '1.2.3' }, become: true };
+
+test('a re-run opens the dialog for the recorded playbook, with the recorded settings', () => {
+  const app = shell(PROD);
+  app.rerun(RUN_ON_PROD);
+  app.openPlaybooks();
+  const r = app.runner();
+  assert.equal(r.open, true);
+  assert.equal(r.pb.path, 'deploy.yml');
+  assert.equal(r.seed.limit, 'prod-web');
+  assert.equal(r.seed.become, true);
+  assert.equal(app.banner(), '');
+});
+
+test('a re-run prefill is used once: close, leave, switch connection, come back', () => {
+  const app = shell(PROD);
+  app.rerun(RUN_ON_PROD);
+  app.openPlaybooks();
+  assert.equal(app.runner().open, true);
+  assert.equal(app.state.consumed, 1, 'the view did not tell the shell the prefill was consumed');
+  assert.equal(app.state.prefill, null, 'the shell still holds the prefill');
+
+  app.closeRunner();
+  assert.equal(app.runner().open, false);
+  app.leave(); // to the Dashboard
+  app.switchTo(STAGING); // which also has a deploy.yml
+  app.openPlaybooks(); // back via the sidebar
+
+  const r = app.runner();
+  assert.equal(r.open, false, "prod's re-run reopened on staging");
+  assert.equal(r.seed, null, "prod's limit, tags and extra vars are staged for a run on staging");
+  assert.equal(app.banner(), '');
+});
+
+test('a stale prefill that reaches the view anyway is refused for the wrong connection', () => {
+  // The same sequence with a shell that failed to drop the prefill: the
+  // view must not depend on that. Staging has deploy.yml too, which is
+  // exactly why the path check alone is not enough.
+  const app = shell(PROD);
+  app.rerun(RUN_ON_PROD);
+  const stale = app.state.prefill;
+  app.openPlaybooks();
+  app.closeRunner();
+  app.leave();
+  app.state.active = STAGING; // connection changed, prefill NOT cleared
+  app.openPlaybooks({ prefill: { ...stale, issuedAt: 99 } });
+
+  const r = app.runner();
+  assert.equal(r.open, false, "prod's re-run opened on staging");
+  assert.equal(r.seed, null);
+  assert.match(app.banner(), /Not re-running\. Recorded on connection "prod"/);
+  assert.match(app.banner(), /active: "staging"/);
+  assert.equal(app.state.consumed, 2, 'a refused prefill must be consumed too');
+});
+
+test('a prefill for a path this connection does not have is refused, not redirected', () => {
+  const app = shell(PROD);
+  app.rerun({ ...RUN_ON_PROD, playbook: 'staging/deploy.yml' });
+  app.openPlaybooks();
+  const r = app.runner();
+  assert.equal(r.open, false);
+  assert.equal(r.seed, null);
+  // Whatever is selected, it was not given the other run's settings.
+  assert.match(app.banner(), /Not re-running\. staging\/deploy\.yml is not in this connection's library/);
+});
+
+test('the prefill carries the connection the run was recorded on', () => {
+  const { page } = shell(PROD);
+  for (const build of [page.buildRerunPrefill, page.buildRetryPrefill]) {
+    const prefill = build({ ...RUN_ON_PROD, log: [{ type: 'fail', host: 'web1' }] });
+    assert.deepEqual([prefill.playbookPath, prefill.server, prefill.serverId], ['deploy.yml', 'prod', 'srv-prod']);
+  }
+  // Old records: empty, never undefined.
+  const old = page.buildRerunPrefill({ playbook: 'deploy.yml' });
+  assert.deepEqual([old.server, old.serverId], ['', '']);
 });

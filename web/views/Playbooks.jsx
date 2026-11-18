@@ -310,7 +310,7 @@ function colorizeValue(rest) {
   return <span className="yml-v">{rest}</span>;
 }
 
-function PlaybooksView({ initialId, runnerPrefill }) {
+function PlaybooksView({ initialId, runnerPrefill, activeServer, onRunnerPrefillConsumed }) {
   const data = globalThis.AnsibleData || {};
   const PLAYBOOKS = data.PLAYBOOKS || [];
   const [selectedId, setSelectedId] = useStateP(initialId || PLAYBOOKS[0]?.id || '');
@@ -338,13 +338,29 @@ function PlaybooksView({ initialId, runnerPrefill }) {
   // dialog even with no match at all — on whichever playbook happened
   // to be selected, with the old run's limit, tags, extra vars and
   // --become already filled in.
+  //
+  // This is also where the prefill's connection is checked, not only
+  // on History's buttons. The prefill is state the app shell holds
+  // between views, so by the time it arrives here the active
+  // connection may no longer be the one History looked at: Re-run on
+  // connection A, close the dialog, switch to B, come back — and A's
+  // limit, tags, extra vars and --become would open against B's
+  // playbook of the same path. So: the same rule as the buttons
+  // (AnsbuiRerunBlocked), applied against the connection active now.
+  //
+  // A prefill is good for one use. The shell is told as soon as it has
+  // been looked at, accepted or not, and drops it, so revisiting this
+  // view does not act on it a second time.
   useEffectP(() => {
     if (!runnerPrefill) return;
-    const match = PLAYBOOKS.find(p => p.path === runnerPrefill.playbookPath);
+    onRunnerPrefillConsumed?.();
+    const recorded = { playbook: runnerPrefill.playbookPath, server: runnerPrefill.server, serverId: runnerPrefill.serverId };
+    const blocked = globalThis.AnsbuiRerunBlocked(PLAYBOOKS, recorded, activeServer);
+    const match = blocked ? null : PLAYBOOKS.find(p => p.path === runnerPrefill.playbookPath);
     if (!match) {
       setRunnerOpen(false);
       setRunnerSeed(null);
-      setRerunError(`Not re-running: ${runnerPrefill.playbookPath || 'the recorded playbook'} is not in this connection's library.`);
+      setRerunError(`Not re-running. ${blocked || 'The recorded playbook is not in this connection\'s library.'}`);
       return;
     }
     setRerunError('');

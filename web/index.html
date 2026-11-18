@@ -263,6 +263,14 @@
       }, []);
 
       const [pbRunnerPrefill, setPbRunnerPrefill] = useState(null);
+      // A re-run prefill is one request, for one connection. It is
+      // dropped as soon as PlaybooksView has looked at it, and again
+      // here whenever the active connection changes — this component
+      // stays mounted across a connection switch, so a prefill left in
+      // state would otherwise be replayed, against the new connection,
+      // the next time the Playbooks view mounted.
+      const consumePbRunnerPrefill = useCallback(() => setPbRunnerPrefill(null), []);
+      useEffect(() => { setPbRunnerPrefill(null); }, [activeId]);
       const openPalette = useCallback(() => setPaletteOpen(true), []);
       // Stage prefill/selection only after setView confirms the
       // navigation — otherwise a declined "run still streaming" prompt
@@ -304,7 +312,7 @@
         switch (view) {
           case 'dashboard': return <window.DashboardView onNavigate={setView} onOpenAdhoc={openAdhoc}/>;
           case 'inventory': return <window.InventoryView onOpenAdhoc={openAdhoc}/>;
-          case 'playbooks': return <window.PlaybooksView initialId={playbookId} runnerPrefill={pbRunnerPrefill}/>;
+          case 'playbooks': return <window.PlaybooksView initialId={playbookId} runnerPrefill={pbRunnerPrefill} activeServer={{ id: activeId, name: activeName }} onRunnerPrefillConsumed={consumePbRunnerPrefill}/>;
           case 'adhoc': return <window.AdhocView prefill={adhocPrefill}/>;
           case 'bootstrap': return <window.BootstrapView/>;
           case 'history': return <window.HistoryView onOpenPlaybook={runPlaybook} onRunPlaybook={openPlaybookRunner} onOpenAdhoc={openAdhoc} activeServer={{ id: activeId, name: activeName }}/>;
