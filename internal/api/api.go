@@ -1,3 +1,19 @@
+// ansbui — a single-binary web UI for an Ansible control node.
+// Copyright (C) 2026 AlteredParadox
+//
+// This program is free software: you can redistribute it and/or modify it
+// under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or (at your
+// option) any later version.
+//
+// This program is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License
+// for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program. If not, see <https://www.gnu.org/licenses/>.
+
 // Package api wires the HTTP routes, owns the global handler
 // dependencies, and serves the embedded web bundle.
 package api
@@ -75,6 +91,12 @@ type Server struct {
 	// Empty means RemoteAddr is always the source.
 	TrustedProxies []netip.Prefix
 
+	// Legal holds the embedded license texts and the build version.
+	// The texts are served without login at /license and
+	// /third-party-licenses, and /source redirects to the source of
+	// this version (see legal.go).
+	Legal Legal
+
 	// loginLimit bounds concurrent Argon2 verifications and applies
 	// the per-source token-bucket backoff (see loginlimit.go). The
 	// zero value is ready to use.
@@ -145,6 +167,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, fmt.Errorf("unknown API route %s %s", r.Method, r.URL.Path))
 	})
+	s.registerLegalRoutes(mux)
 	mux.Handle("/", s.staticHandler())
 
 	// Order: logging (outermost) → security headers → origin/host

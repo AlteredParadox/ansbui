@@ -1,3 +1,21 @@
+/*
+ * ansbui — a single-binary web UI for an Ansible control node.
+ * Copyright (C) 2026 AlteredParadox
+ *
+ * This program is free software: you can redistribute it and/or modify it
+ * under the terms of the GNU Affero General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or (at your
+ * option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+ * FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License
+ * for more details.
+ *
+ * You should have received a copy of the GNU Affero General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ */
+
 /* ansbui-specific additions to the design bundle's app.css. Keep this
    file small — new components only; no overrides of upstream tokens. */
 
@@ -23,6 +41,15 @@
 .boot-brand .brand-mark { width: 36px; height: 36px; border-radius: 9px; }
 .boot-title { font-size: 20px; font-weight: 600; letter-spacing: -0.01em; margin: 0; }
 .boot-sub { font-size: 12.5px; color: var(--text-3); margin-top: 2px; }
+.boot-legal, .legal-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  font-size: 12px;
+}
+.boot-legal { margin-top: 16px; justify-content: center; }
+.boot-legal a, .legal-links a { color: var(--text-3); text-decoration: underline; }
+.boot-legal a:hover, .legal-links a:hover { color: var(--text); }
 .boot-error {
   margin: 12px 0;
   padding: 10px 12px;

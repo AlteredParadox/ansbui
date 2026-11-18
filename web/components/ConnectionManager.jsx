@@ -1,3 +1,19 @@
+// ansbui — a single-binary web UI for an Ansible control node.
+// Copyright (C) 2026 AlteredParadox
+//
+// This program is free software: you can redistribute it and/or modify it
+// under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or (at your
+// option) any later version.
+//
+// This program is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License
+// for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program. If not, see <https://www.gnu.org/licenses/>.
+
 // Connection manager + settings dialog.
 //
 // Shown at startup when no active server is configured, and accessible
@@ -35,6 +51,7 @@ function ConnectionManager({ open, onClose, onActivated, initialServers, initial
   const [autoGatherFacts, setAutoGatherFacts] = useStateCM(false);
   const [geoIpEnabled, setGeoIpEnabled] = useStateCM(false);
   const [controlPrivKeyPath, setControlPrivKeyPath] = useStateCM('');
+  const [version, setVersion] = useStateCM('');
   const [tab, setTab] = useStateCM('servers');
 
   const refreshServers = useCallbackCM(async () => {
@@ -52,6 +69,7 @@ function ConnectionManager({ open, onClose, onActivated, initialServers, initial
       setAutoGatherFacts(!!s.autoGatherFacts);
       setGeoIpEnabled(!!s.geoIpEnabled);
       setControlPrivKeyPath(s.controlPrivKeyPath || '');
+      setVersion(s.version || '');
     }).catch(() => {});
   }, [open, refreshServers]);
 
@@ -175,6 +193,7 @@ function ConnectionManager({ open, onClose, onActivated, initialServers, initial
             autoGatherFacts={autoGatherFacts}
             geoIpEnabled={geoIpEnabled}
             controlPrivKeyPath={controlPrivKeyPath}
+            version={version}
             busy={busy}
             onChangeUrl={setPromUrl} onChangeLabel={setPromLabel}
             onChangeAutoGather={setAutoGatherFacts}
@@ -232,7 +251,7 @@ function ServersTab(props) {
   );
 }
 
-function SettingsTab({ promUrl, promLabel, autoGatherFacts, geoIpEnabled, controlPrivKeyPath, busy, onChangeUrl, onChangeLabel, onChangeAutoGather, onChangeGeoIp, onChangeControlPrivKeyPath, onSave }) {
+function SettingsTab({ promUrl, promLabel, autoGatherFacts, geoIpEnabled, controlPrivKeyPath, version, busy, onChangeUrl, onChangeLabel, onChangeAutoGather, onChangeGeoIp, onChangeControlPrivKeyPath, onSave }) {
   const [probe, setProbe] = useStateCM(null);
   const [probing, setProbing] = useStateCM(false);
 
@@ -308,7 +327,27 @@ function SettingsTab({ promUrl, promLabel, autoGatherFacts, geoIpEnabled, contro
           </button>
         </div>
         {probe && <ProbeReport report={probe}/>}
+
+        <div className="divider" style={{ margin: '16px 0 12px' }}/>
+        <div className="section-title">About &amp; licensing</div>
+        <div className="mute" style={{ fontSize: 12, marginBottom: 8 }}>
+          ansbui <span className="mono">{version || 'dev'}</span> is free software under the GNU Affero General Public License, version 3 or later. Because you are using it over a network, you are entitled to its source code.
+        </div>
+        <LegalLinks/>
       </div>
+    </div>
+  );
+}
+
+// LegalLinks is the AGPL offer: the license, the notices for everything
+// built into the binary, and the source of the running version. All three
+// are served without login, so the same links work on the sign-in screen.
+function LegalLinks({ className }) {
+  return (
+    <div className={className || 'legal-links'}>
+      <a href="/license" target="_blank" rel="noreferrer">license</a>
+      <a href="/third-party-licenses" target="_blank" rel="noreferrer">third-party notices</a>
+      <a href="/source" target="_blank" rel="noreferrer">source code</a>
     </div>
   );
 }
@@ -413,3 +452,5 @@ function Field({ id, label, value, onChange, placeholder, type }) {
 }
 
 globalThis.ConnectionManager = ConnectionManager;
+// Also used by the sign-in screen (views/Login.jsx).
+globalThis.LegalLinks = LegalLinks;

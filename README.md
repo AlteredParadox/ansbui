@@ -130,6 +130,7 @@ The passwords typed into the form are used for that job and are not stored. The 
 
 ```
 main.go                 # boot, flags, HTTP server
+legal.go                # embeds LICENSE + THIRD_PARTY_LICENSES.md, version stamp
 internal/api/           # HTTP + WebSocket handlers, request guards, login throttle
 internal/auth/          # password hash + sessions
 internal/config/        # JSON config store (servers, settings), Prometheus URL rules
@@ -144,6 +145,8 @@ internal/ttlcache/      # small bounded cache
 web/                    # static bundle (embedded): JSX views, vendored React/Babel, fonts
 tests/web/              # unit tests for the browser scripts
 eslint-rules/           # local lint rule
+scripts/                # licence header stamper, third-party notices generators
+Makefile                # build (stamped, notices regenerated), license-check, notices-check
 deploy/                 # hardened systemd unit
 .github/                # CI, release and Dependabot config
 .claude/                # Claude Code project config (see CI)
@@ -168,9 +171,9 @@ deploy/                 # hardened systemd unit
 
 CI runs on GitHub Actions (`.github/workflows/`):
 
-- **`ci.yml`** — `check` is the required merge gate: Go build + vet + race tests, `golangci-lint`, `eslint` over `web/`, and `npm test` (the local lint rule in `eslint-rules/`, plus unit tests in `tests/web/` for the plain functions of the browser scripts). Two advisory jobs run alongside it: `vuln` (`govulncheck` + `npm audit`) and `fuzz` (a short pass over every `Fuzz*` target).
+- **`ci.yml`** — `check` is the required merge gate: Go build + vet + race tests, `make license-check` (every first-party source file carries the AGPL notice), `golangci-lint`, `eslint` over `web/`, and `npm test` (the local lint rule in `eslint-rules/`, plus unit tests in `tests/web/` for the plain functions of the browser scripts). Two advisory jobs run alongside it: `vuln` (`govulncheck` + `npm audit`) and `fuzz` (a short pass over every `Fuzz*` target).
 - **`sonarqube.yml`** — SonarQube Cloud scan with Go coverage, using `SONAR_TOKEN` from the repo secrets. Two jobs: `coverage` runs the tests with no secret in scope and hands `coverage.out` to `scan`, which holds the token and executes nothing from the checkout. The project is `AlteredParadox_ansbui` in the `alteredparadox` organization; rule exceptions live in `sonar-project.properties`.
-- **`release.yml`** — pushing a `vX.Y.Z` tag builds `linux/amd64` + `linux/arm64` binaries and publishes them with a `SHA256SUMS` as a GitHub Release; a manual dispatch is a build-only dry run.
+- **`release.yml`** — pushing a `vX.Y.Z` tag builds `linux/amd64` + `linux/arm64` binaries, stamped with the tag, and publishes them with a `SHA256SUMS` as a GitHub Release; a manual dispatch is a build-only dry run. Before building it runs `make notices-check`, which fails the release if `THIRD_PARTY_LICENSES.md` no longer matches what is linked into the binary.
 
 Dependabot (`.github/dependabot.yml`) opens weekly grouped PRs for Go modules, GitHub Actions and the npm lint toolchain.
 
@@ -183,3 +186,31 @@ A few of Sonar's hotspots are not real concerns in this project; leaving them he
 - **`'unsafe-inline'` in the Content-Security-Policy's `script-src`.** Deliberate: the JSX is compiled in the browser by Babel, which runs its output as inline scripts. Every other directive is `'self'` or stricter, and nothing is loaded from a third party — React, ReactDOM and Babel are vendored in `web/vendor/` (checksums in `web/index.html`), the fonts in `web/fonts/` (checksums in its README). Removing `'unsafe-inline'` needs a build step that ships compiled `.js`.
 - **Regex ReDoS hotspots** (`javascript:S5852`) on the YAML tokenisers in `Inventory.jsx`, `Playbooks.jsx`, `data/api.js`. Every regex we flag is anchored to a single line, uses character classes over broad alternation, and has no nested or overlapping quantifiers — input size per match is bounded by the line length pulled out of `.split('\n')`. Inputs come from playbook files authored on the controller (trusted operator-supplied YAML), not from external request bodies.
 - **Weak PRNG** (`History.jsx`, `javascript:S2245`). The previous implementation synthesised per-task / per-host cells with `Math.random()` for the prototype. The view now reads the real streamed run log instead, so no PRNG is used in the production path.
+
+## License
+
+ansbui is free software under the **GNU Affero General Public License v3 or later** ([`LICENSE`](LICENSE)).
+
+The AGPL's §13 obligation is to offer the Corresponding Source to everyone who interacts with the program *over a network*, so these three routes are deliberately served **without login** — a login wall would defeat the offer:
+
+| Route | Serves |
+| --- | --- |
+| `/license` | the AGPL text embedded in this binary |
+| `/third-party-licenses` | every bundled dependency's licence and notices |
+| `/source` | redirects to the Corresponding Source, pinned to the running version |
+
+They are linked from the sign-in screen and from **Settings → About & licensing**. A stamped release points `/source` at its own tag, so the source you are offered is the source that is running; an unstamped build (`go build`) can only point at the repository. They reveal nothing about the deployment: two texts compiled into the binary and a redirect to this repository.
+
+If you run a modified ansbui for others to use over a network, the same obligation is yours: change `sourceBaseURL` in `internal/api/legal.go` to where your source is published.
+
+Every first-party source file carries the AGPL notice; `make license-headers` stamps new files and `make license-check` (in CI) fails on one without it.
+
+[`THIRD_PARTY_LICENSES.md`](THIRD_PARTY_LICENSES.md) is generated from what is **actually distributed**: the Go modules linked into the binary (read back off a probe build) and the third-party files embedded from `web/` — React, ReactDOM, Babel and the two fonts — whose licence texts are kept beside them in `web/vendor/` and `web/fonts/`.
+
+```sh
+make notices        # regenerate after a dependency change
+make notices-check  # fail if the committed copy is stale (the release workflow runs this)
+make build          # regenerates the notices, then builds a stamped binary
+```
+
+`web/vendor/babel.min.js` is a special case. It is Babel's single-file browser build, which also contains a few dozen separately published packages, most of them from outside the Babel project and so not covered by Babel's own licence (MIT, ISC, BSD-2-Clause, and CC-BY-4.0 for the caniuse-lite browser data). `web/vendor/babel-standalone.THIRD-PARTY.txt` lists each with the licence it ships. It is produced by `scripts/babel-bundle-licenses.py <version>` from the source map upstream publishes with the file — each listed package's files are compared with the text recorded in that map — and must be regenerated in the same commit that replaces `babel.min.js`; the script refuses to run if the vendored file is not the upstream file for that version.

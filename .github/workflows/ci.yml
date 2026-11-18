@@ -43,6 +43,13 @@ jobs:
       - name: Go vet
         run: go vet ./...
 
+      # Every first-party source carries the AGPL notice. Cheap and offline,
+      # so unlike notices-check (release.yml) this one is safe to gate every
+      # PR on — Dependabot never touches source headers. Run before `npm ci`
+      # like the other steps here; it only looks at tracked files anyway.
+      - name: make license-check
+        run: make license-check
+
       # The SSH pool, the job runner and the WebSocket streams all share
       # state across goroutines — the race detector is what pins them.
       - name: Go test (race)
