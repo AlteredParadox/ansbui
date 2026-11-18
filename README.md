@@ -8,6 +8,16 @@ A single-binary web UI for an Ansible control node.
 - **Observability**: optionally enriches inventory with live CPU / memory / load / uptime / OS from Prometheus (node_exporter), matched by hostname
 - **Bootstrap**: prepares a fresh Debian or Ubuntu machine for ansible (DNS record, `ansible` user, sshd port, inventory entry), optionally reinstalling its OS first — see [Bootstrap](#bootstrap)
 
+![The ansbui dashboard: host health, run activity and recent runs](docs/screenshots/dashboard.png)
+
+| | |
+| --- | --- |
+| [![Inventory table with per-host CPU and memory](docs/screenshots/inventory.png)](docs/screenshots/inventory.png)<br>**Inventory** — groups, hosts and live metrics | [![A playbook's structure next to its YAML](docs/screenshots/playbooks.png)](docs/screenshots/playbooks.png)<br>**Playbooks** — structure, YAML, run and edit |
+| [![An ad-hoc command with its output per host](docs/screenshots/adhoc.png)](docs/screenshots/adhoc.png)<br>**Ad-hoc** — one module across a group, output streamed | [![Run history with the log of one run](docs/screenshots/runs.png)](docs/screenshots/runs.png)<br>**Runs** — history, logs, re-run |
+| [![The bootstrap form](docs/screenshots/bootstrap.png)](docs/screenshots/bootstrap.png)<br>**Bootstrap** — turn a fresh machine into a managed host | [![The sign-in screen](docs/screenshots/login.png)](docs/screenshots/login.png)<br>**Sign-in** |
+
+The screenshots show an invented fleet (`example.com` names, documentation-only addresses); `scripts/screenshots.mjs` regenerates them without touching a real control node.
+
 ## Quick start (Debian 13)
 
 ```sh
@@ -147,7 +157,8 @@ internal/ttlcache/      # small bounded cache
 web/                    # static bundle (embedded): JSX views, vendored React/Babel, fonts
 tests/web/              # unit tests for the browser scripts
 eslint-rules/           # local lint rule
-scripts/                # licence header stamper, third-party notices generators, reinstall pin check
+scripts/                # licence header stamper, third-party notices generators, reinstall pin check, README screenshots
+docs/screenshots/       # the images above (generated)
 Makefile                # build (stamped, notices regenerated), license-check, notices-check
 deploy/                 # hardened systemd unit
 .github/                # CI, release and Dependabot config

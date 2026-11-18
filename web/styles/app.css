@@ -358,6 +358,11 @@ th .text-btn { display: inline-flex; gap: 6px; align-items: center; width: 100%;
   font-size: 12.5px;
   text-align: left;
 }
+/* The name sits inside a <button> (display: contents), and a button
+   centres its text by default: without this the group name floats in
+   the middle of its column instead of sitting next to its icon, and
+   the tree's indentation cannot be seen. */
+.tree-select { text-align: left; }
 .tree-row:hover { background: var(--bg-2); }
 .tree-row.active { background: var(--accent-weak); color: var(--accent); }
 .tree-row.active .tree-icon { color: var(--accent); }
