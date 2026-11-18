@@ -57,6 +57,26 @@ or go through whatever auth the reverse proxy adds. Enabling a
 password will therefore break any unauthenticated API consumer you
 may have pointed at the instance — that's the point.
 
+Separately from login, a script must send the header
+`X-Ansbui-Request: 1` on the API reads that make ansbui contact the
+control node or Prometheus (`/api/inventory`, `/api/facts`,
+`/api/metrics`, `/api/playbooks`, `/api/playbooks/content`,
+`/api/vault`, and the two run WebSockets when opened without an
+`Origin`):
+
+```
+curl -H 'X-Ansbui-Request: 1' http://127.0.0.1:8787/api/inventory
+```
+
+Without it those routes answer `403`. The web UI sends the header
+itself. It is not a credential — the value is ignored — it exists
+because a web page on another site can make the operator's browser
+send a plain `GET` to ansbui (an image tag or a link is enough) but
+cannot attach a custom header to it. Reads answered from ansbui's own
+state (`/api/health`, `/api/auth/status`, `/api/servers`,
+`/api/settings`, `/api/runs`, `/api/bootstrap/jobs`) and all
+`POST`/`PUT`/`DELETE` requests do not need it.
+
 When **no** credential is set ansbui runs UNAUTHENTICATED (the
 historical posture) and logs a loud startup warning; the reverse
 proxy below is then mandatory, not optional. Built-in login and a
@@ -106,6 +126,18 @@ mTLS or oauth2-proxy / authelia are stronger. Whatever you pick,
 the proxy should:
 
 - terminate TLS (let's encrypt or your CA)
+- forward the browser's original `Host` header and list that name in
+  `ANSBUI_ALLOWED_HOSTS` (see the README's "Remote access" section)
+- send `X-Forwarded-Proto: https`. This is **required**, not
+  advisory: ansbui compares the scheme of the browser's `Origin`
+  with the scheme the request arrived on, so that a plain-HTTP page
+  for your hostname (which someone on the operator's network can
+  serve) is not mistaken for the real UI. A proxy that terminates TLS
+  without sending the header makes every login and every action fail
+  with a `403` that names this header. Caddy's `reverse_proxy` sends
+  it by default; for nginx add
+  `proxy_set_header X-Forwarded-Proto $scheme;` next to
+  `proxy_set_header Host $host;`
 - be listed in `ANSBUI_TRUSTED_PROXIES` (and forward
   `X-Forwarded-For`, which nginx/Caddy do by default) so login
   throttling sees real client IPs instead of one shared proxy IP
@@ -122,6 +154,50 @@ the proxy should:
 Always. Never expose ansbui over plain HTTP — sessions carry
 playbook output that often includes inventory hostnames, vault
 plaintext briefly during view, and SSH config decisions.
+
+### HSTS: give ansbui its own hostname
+
+On every response to a request that arrived over HTTPS (direct TLS,
+or `X-Forwarded-Proto: https` from the proxy) ansbui sends
+
+```
+Strict-Transport-Security: max-age=31536000
+```
+
+A browser that has seen this header refuses to use plain HTTP for
+that hostname for one year, renewed on each visit. That is the
+intent: it stops a network attacker from serving the operator a
+plain-HTTP page under ansbui's name.
+
+What to know before deploying:
+
+- **It covers the hostname on every port, not just ansbui's.** If
+  `ops.example.com` serves ansbui over HTTPS and something else over
+  plain HTTP on another port (`http://ops.example.com:9090`), the
+  operator's browser will rewrite that to `https://` and the other
+  service stops loading in that browser. ansbui holds the keys to the
+  whole fleet and should have a hostname to itself
+  (`ansbui.example.com`); give it one rather than sharing.
+- It does **not** cover subdomains or sibling names — the header
+  carries no `includeSubDomains` — so `prometheus.example.com` is
+  unaffected by `ansbui.example.com`.
+- It is never sent over plain HTTP, so a loopback or SSH-tunnel
+  instance (`http://127.0.0.1:8787`) does not pin anything.
+- There is no switch to turn it off. If the proxy also sets the
+  header, the browser uses the first one it receives; either is fine.
+- To undo it in one browser (after moving ansbui off a shared name,
+  say): Chrome/Edge `chrome://net-internals/#hsts` → "Delete domain
+  security policies"; Firefox: forget the site from History. It
+  otherwise expires a year after the last HTTPS visit.
+
+### Other response headers
+
+Every response also carries `Content-Security-Policy:
+frame-ancestors 'none'` and `X-Frame-Options: DENY` (no other site
+can embed the UI in a frame and trick the operator into clicking in
+it) and `X-Content-Type-Options: nosniff`. Nothing needs configuring;
+if the proxy adds its own copies, make sure it does not *relax* them
+(e.g. an `X-Frame-Options: SAMEORIGIN` override).
 
 ## 4. Firewall
 

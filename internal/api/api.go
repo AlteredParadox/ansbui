@@ -7,7 +7,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -134,12 +133,53 @@ func (s *Server) Handler() http.Handler {
 	})
 	mux.Handle("/", s.staticHandler())
 
-	// Order: logging (outermost) → origin/host guard → auth → mux.
-	// The origin guard runs before auth so a cross-origin or
-	// rebinding attempt is rejected regardless of session state, and
-	// auth runs before the mux so no guarded handler executes without
-	// a session.
-	return withLogging(withOriginGuard(s.withAuth(mux), allowedHostnames(s.Addr)))
+	// Order: logging (outermost) → security headers → origin/host
+	// guard → auth → mux. The headers sit outside the guards so the
+	// 403 and 401 responses carry them too. The origin guard runs
+	// before auth so a cross-origin or rebinding attempt is rejected
+	// regardless of session state, and auth runs before the mux so no
+	// guarded handler executes without a session.
+	return withLogging(withSecurityHeaders(withOriginGuard(s.withAuth(mux), allowedHostnames(s.Addr))))
+}
+
+// hstsMaxAge is one year, the value browsers and scanners treat as a
+// real commitment. No includeSubDomains: ansbui speaks for its own
+// hostname, not for whatever else lives under the parent domain.
+const hstsMaxAge = "max-age=31536000"
+
+// withSecurityHeaders sets the response headers that every reply —
+// the SPA shell, static assets, API JSON, error bodies — should carry.
+//
+//   - frame-ancestors 'none' (and X-Frame-Options: DENY for browsers
+//     that predate it): no other origin may put the UI in a frame. The
+//     Origin check cannot stop clickjacking, because a click inside a
+//     framed copy of the real page IS a same-origin request; with no
+//     password set, or behind proxy basic auth, one concealed click on
+//     "Activate" or "Run" was enough.
+//
+//   - X-Content-Type-Options: nosniff, so JSON carrying operator data
+//     is never reinterpreted as script or style by a page that includes
+//     it cross-origin.
+//
+//   - Strict-Transport-Security on HTTPS requests only (browsers ignore
+//     it over plain HTTP, and a loopback dev instance must not pin
+//     itself). Once the browser has it, it stops loading
+//     http://<this host> at all, which removes the plaintext page a
+//     network attacker needs for the cross-scheme attack described at
+//     checkSameOrigin. HSTS is per hostname, every port: a deployment
+//     that also serves plain HTTP on another port of the SAME name
+//     should give ansbui its own name.
+func withSecurityHeaders(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hd := w.Header()
+		hd.Set("Content-Security-Policy", "frame-ancestors 'none'")
+		hd.Set("X-Frame-Options", "DENY")
+		hd.Set("X-Content-Type-Options", "nosniff")
+		if requestIsHTTPS(r) {
+			hd.Set("Strict-Transport-Security", hstsMaxAge)
+		}
+		h.ServeHTTP(w, r)
+	})
 }
 
 // withOriginGuard rejects HTTP requests whose Origin header is set
@@ -167,24 +207,38 @@ func (s *Server) Handler() http.Handler {
 //     (the SPA shell under "/") are public and stay unguarded so the
 //     page still loads; everything sensitive lives under /api/.
 //
-//   - Origin == Host (CSRF defence) on EVERY /api/ request, reads
+//   - Same-origin (CSRF defence) on EVERY /api/ request, reads
 //     included. Cross-origin reads return opaque responses, but the
 //     server-side work still runs — /api/facts alone can fan an
 //     ansible setup run across the fleet — so a hostile page must not
-//     be able to trigger them at all. Browsers omit Origin on
-//     same-origin GETs and curl/CLI clients omit it entirely, so we
-//     only reject a present-and-wrong Origin — non-browser admin
-//     callers keep working. This mirrors the WS upgrader's own
-//     CheckOrigin (sameOriginCheck), reused here so the two never
-//     drift.
+//     be able to trigger them at all. checkSameOrigin rejects a
+//     Sec-Fetch-Site that names another origin and an Origin whose
+//     scheme or host:port differs from the request's; it is the same
+//     function the WS upgrader uses, so the two never drift.
+//
+//   - Client marker on the reads that make ansbui do remote work
+//     (see clientMarkerRequired). The same-origin check can only
+//     judge what the browser tells it, and on the requests that
+//     matter most here the browser may say nothing: a cross-site
+//     <img>, a link, or a navigation is a GET with no Origin, and on
+//     a plain-HTTP non-loopback origin there is no Sec-Fetch-Site
+//     either. Those are indistinguishable from curl. So these routes
+//     additionally require a header only our own page (or a
+//     deliberate CLI caller) sends.
 func withOriginGuard(h http.Handler, allowedHosts map[string]struct{}) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if hostGuardedRequest(r) && !hostAllowed(r.Host, allowedHosts) {
 			writeError(w, http.StatusForbidden, fmt.Errorf("request Host %q not recognised (DNS-rebinding guard) — if ansbui is behind a reverse proxy, list its public hostname in %s", r.Host, allowedHostsEnv))
 			return
 		}
-		if originGuardedRequest(r) && !sameOriginCheck(r) {
-			writeError(w, http.StatusForbidden, errors.New("cross-origin request rejected"))
+		if originGuardedRequest(r) {
+			if err := checkSameOrigin(r); err != nil {
+				writeError(w, http.StatusForbidden, err)
+				return
+			}
+		}
+		if clientMarkerRequired(r) && r.Header.Get(clientMarkerHeader) == "" {
+			writeError(w, http.StatusForbidden, fmt.Errorf("an API read that can make ansbui contact the control node must carry the %s header when the request has no Origin (a page on another site cannot add it) — with curl: -H '%s: 1'", clientMarkerHeader, clientMarkerHeader))
 			return
 		}
 		if hostGuardedRequest(r) {
@@ -199,6 +253,54 @@ func withOriginGuard(h http.Handler, allowedHosts map[string]struct{}) http.Hand
 	})
 }
 
+// clientMarkerHeader is the request header the SPA's fetch wrapper
+// (web/data/api.js) adds to every call. Its value is not a secret and
+// is not checked: what makes it a control is that a page on another
+// origin cannot attach a custom header to a request without the
+// browser first asking this server's permission (a CORS preflight),
+// which ansbui never grants.
+const clientMarkerHeader = "X-Ansbui-Request"
+
+// clientMarkerRequired reports whether r must carry clientMarkerHeader:
+// a GET or HEAD under /api/ that has no Origin header, unless the path
+// is one of the local reads below.
+//
+// Why these requests. A mutating request from a browser always carries
+// Origin, so checkSameOrigin has already judged it; so has any request
+// that does carry one, which includes every browser WebSocket upgrade
+// (they cannot send custom headers, and need not). What is left is the
+// Origin-less read, which another site's page can cause the operator's
+// browser to send blind.
+//
+// Why not all of them. Sec-Fetch-Site: none is not proof of intent
+// either — a link opened from a mail or chat client arrives that way —
+// so the marker is demanded regardless of Fetch Metadata. The exempt
+// list is the reads answered from this process's own state, where a
+// blind trigger makes nothing happen: they stay reachable with a bare
+// curl, and the health check stays usable by a monitor. The list is
+// the exemption, not the rule, so a new read route requires the
+// marker unless someone decides it should not.
+func clientMarkerRequired(r *http.Request) bool {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		return false
+	}
+	if !strings.HasPrefix(r.URL.Path, "/api/") || r.Header.Get("Origin") != "" {
+		return false
+	}
+	return !localReadPath(r.URL.Path)
+}
+
+// localReadPath reports whether an API read is answered without any
+// SSH session or outbound HTTP request: health, auth status, the
+// server list, settings, run history and bootstrap job state.
+func localReadPath(p string) bool {
+	switch p {
+	case "/api/health", "/api/auth/status", "/api/servers", "/api/settings", "/api/runs", "/api/bootstrap/jobs":
+		return true
+	}
+	return strings.HasPrefix(p, "/api/runs/") || strings.HasPrefix(p, "/api/bootstrap/jobs/")
+}
+
 // hostGuardedRequest reports whether the DNS-rebinding Host check
 // applies: every /api/ request (reads included), regardless of
 // method. The static SPA shell served from "/" is deliberately
@@ -207,7 +309,7 @@ func hostGuardedRequest(r *http.Request) bool {
 	return strings.HasPrefix(r.URL.Path, "/api/")
 }
 
-// originGuardedRequest reports whether the Origin==Host CSRF check
+// originGuardedRequest reports whether the same-origin CSRF check
 // applies: every /api/ request, regardless of method.
 //
 // This used to guard only state-mutating verbs plus an allowlist of
@@ -220,11 +322,10 @@ func hostGuardedRequest(r *http.Request) bool {
 // is still a trigger, so the check is now route-wide rather than an
 // exception list that every new endpoint has to remember to join.
 //
-// Guarding reads costs legitimate callers nothing: browsers omit
-// Origin entirely on same-origin GETs, and curl/CLI clients omit it
-// on everything — sameOriginCheck only rejects a *present and
-// mismatched* Origin. The static SPA shell under "/" is untouched so
-// the page still loads.
+// Guarding reads costs legitimate callers nothing: checkSameOrigin
+// rejects only what a browser has labelled as coming from elsewhere,
+// and curl/CLI clients send neither label. The static SPA shell under
+// "/" is untouched so the page still loads.
 func originGuardedRequest(r *http.Request) bool {
 	return strings.HasPrefix(r.URL.Path, "/api/")
 }
