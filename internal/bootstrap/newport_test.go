@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -183,5 +184,31 @@ func TestRequestDecodesNewSSHPort(t *testing.T) {
 	}
 	if req.Port != 22 || req.NewSSHPort != 2222 {
 		t.Errorf("decoded port=%d newSshPort=%d", req.Port, req.NewSSHPort)
+	}
+}
+
+// The prep step runs against a target and hands back what the script
+// printed, for the network cross-check that follows.
+func TestRunReinstallPrepReturnsTheScriptOutput(t *testing.T) {
+	const out = "IPv4 Address: 192.0.2.5/24\nIPv4 Gateway: 192.0.2.1\n"
+	host, port := startKeyTarget(t, out)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	target, err := dialKeyTarget(ctx, host, port, testClientKey(t), hostKeyExpectation{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = target.Close() }()
+
+	var log emitLog
+	got, err := runReinstallPrep(ctx, target, ReinstallOpts{Enabled: true, OS: "debian", Version: "13"}, "ssh-ed25519 AAAA test", 2222, log.emit)
+	if err != nil {
+		t.Fatalf("runReinstallPrep: %v\n%s", err, log.text())
+	}
+	if got != out {
+		t.Errorf("prep output = %q, want %q", got, out)
+	}
+	if log.count("reinstall.sh prepared the new install") == 0 {
+		t.Errorf("job log does not report the prep as done:\n%s", log.text())
 	}
 }

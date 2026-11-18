@@ -17,6 +17,7 @@
 package bootstrap
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -48,34 +49,76 @@ func TestSshdPortScriptNoOpGatedOnListener(t *testing.T) {
 	full := sshdPortScript(4242)
 	guard := guardPrelude(t, full) + `; echo PROCEEDED`
 
+	const sshdOwner = `users:(("sshd",pid=812,fd=3))`
 	cases := []struct {
-		name       string
-		ssListens  string // what fake ss reports as the listening port
-		wantExit0  bool
-		wantOutput string
+		name string
+		// what fake `ss -tlnp` prints
+		ssLine string
+		// active socket unit and the address it listens on, if any
+		socketUnit, socketListen string
+		wantExitCode             int
+		wantOutput               string
+		wantProceeded            bool
 	}{
-		{"listener already on target", "4242", true, "already listening"},
-		{"config flipped but listener still on 22", "22", false, "PROCEEDED"},
+		{name: "sshd already on target", ssLine: "LISTEN 0 128 0.0.0.0:4242 0.0.0.0:* " + sshdOwner,
+			wantOutput: "already listening"},
+		{name: "config flipped but listener still on 22", ssLine: "LISTEN 0 128 0.0.0.0:22 0.0.0.0:* " + sshdOwner,
+			wantOutput: "PROCEEDED", wantProceeded: true},
+		// The operator picks the port now. One taken by another
+		// service used to be reported as "sshd already listening":
+		// the run went on to write that port into the inventory.
+		{name: "another service holds the target port", ssLine: `LISTEN 0 511 0.0.0.0:4242 0.0.0.0:* users:(("nginx",pid=700,fd=6))`,
+			wantExitCode: 1, wantOutput: "already in use on the target by something other than sshd"},
+		{name: "listener with no owner shown is not assumed to be sshd", ssLine: "LISTEN 0 128 0.0.0.0:4242 0.0.0.0:*",
+			wantExitCode: 1, wantOutput: "other than sshd"},
+		{name: "ssh socket activation on the target port counts as ssh", ssLine: `LISTEN 0 4096 *:4242 *:* users:(("systemd",pid=1,fd=40))`,
+			socketUnit: "ssh.socket", socketListen: "[::]:4242 (Stream)", wantOutput: "already listening"},
+		{name: "systemd listening for something else does not", ssLine: `LISTEN 0 4096 *:4242 *:* users:(("systemd",pid=1,fd=40))`,
+			socketUnit: "ssh.socket", socketListen: "[::]:22 (Stream)", wantExitCode: 1, wantOutput: "other than sshd"},
+		{name: "a port that merely ends in the target is not it", ssLine: "LISTEN 0 128 0.0.0.0:14242 0.0.0.0:* " + sshdOwner,
+			wantOutput: "PROCEEDED", wantProceeded: true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			dir := t.TempDir()
-			// Fake ss prints one LISTEN line for the configured port.
-			ss := "#!/bin/sh\necho 'LISTEN 0 128 0.0.0.0:" + c.ssListens + " 0.0.0.0:*'\n"
-			if err := os.WriteFile(filepath.Join(dir, "ss"), []byte(ss), 0o755); err != nil {
-				t.Fatal(err)
-			}
+			writeStub(t, dir, "ss", "echo '"+c.ssLine+"'")
+			// Fake systemctl: one unit may be active, and `show … -p
+			// Listen` prints its address.
+			writeStub(t, dir, "systemctl", `
+case "$1" in
+is-active) [ -n "`+c.socketUnit+`" ] && [ "$3" = "`+c.socketUnit+`" ] ;;
+show) [ "$2" = "`+c.socketUnit+`" ] && echo 'Listen=`+c.socketListen+`' ;;
+*) exit 1 ;;
+esac`)
 			cmd := exec.Command("sh", "-c", guard)
 			cmd.Env = append(os.Environ(), "PATH="+dir+string(os.PathListSeparator)+os.Getenv("PATH"))
-			out, _ := cmd.CombinedOutput()
+			out, err := cmd.CombinedOutput()
 			got := string(out)
+			code := 0
+			var exitErr *exec.ExitError
+			if errors.As(err, &exitErr) {
+				code = exitErr.ExitCode()
+			} else if err != nil {
+				t.Fatalf("run guard: %v", err)
+			}
+			if code != c.wantExitCode {
+				t.Errorf("exit code = %d, want %d (output %q)", code, c.wantExitCode, got)
+			}
 			if !strings.Contains(got, c.wantOutput) {
 				t.Errorf("output %q does not contain %q", got, c.wantOutput)
 			}
-			if c.wantExit0 && strings.Contains(got, "PROCEEDED") {
-				t.Errorf("expected early no-op exit, but the script proceeded: %q", got)
+			if proceeded := strings.Contains(got, "PROCEEDED"); proceeded != c.wantProceeded {
+				t.Errorf("proceeded to the config edit = %v, want %v: %q", proceeded, c.wantProceeded, got)
 			}
 		})
+	}
+}
+
+// writeStub puts an executable sh script named name into dir.
+func writeStub(t *testing.T, dir, name, body string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, name), []byte("#!/bin/sh\n"+body+"\n"), 0o755); err != nil {
+		t.Fatal(err)
 	}
 }
 

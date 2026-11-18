@@ -36,6 +36,20 @@ function parseTcpPort(text) {
   return n >= 1 && n <= 65535 ? n : 0;
 }
 
+// parseBootstrapPorts reads the form's two port fields: where sshd
+// answers now, and where bootstrap moves it. Both go through
+// parseTcpPort — the current port decides which machine and service
+// the root password is sent to, so a typo there must not be rounded
+// to the nearest number either. Returns { portNum, newPortNum } or
+// { error }.
+function parseBootstrapPorts(port, newPort) {
+  const portNum = parseTcpPort(port);
+  if (!portNum) return { error: 'Current SSH port must be a valid TCP port (1–65535).' };
+  const newPortNum = parseTcpPort(newPort);
+  if (!newPortNum) return { error: 'New SSH port must be a valid TCP port (1–65535).' };
+  return { portNum, newPortNum };
+}
+
 // REINSTALL_MATRIX must mirror reinstallOSMatrix in
 // internal/bootstrap/reinstall.go — the backend re-validates, so a
 // drift here just means the form rejects something the backend
@@ -438,11 +452,9 @@ function BootstrapView() {
     if (!provider.trim()) return { error: 'Provider is required.' };
     if (!ip.trim()) return { error: 'Address is required.' };
     if (!classifyAddress(ip.trim())) return { error: 'Address must be an IPv4 address (e.g. 203.0.113.42), IPv6 address (e.g. 2001:db8::1), or DNS hostname (e.g. host.example.com).' };
-    const portNum = Number.parseInt(port, 10);
-    const portOk = Number.isInteger(portNum) && portNum > 0 && portNum <= 65535;
-    if (!portOk) return { error: 'Current SSH port must be a valid TCP port.' };
-    const newPortNum = parseTcpPort(newPort);
-    if (!newPortNum) return { error: 'New SSH port must be a valid TCP port (1–65535).' };
+    const ports = parseBootstrapPorts(port, newPort);
+    if (ports.error) return ports;
+    const { portNum, newPortNum } = ports;
     if (!username.trim()) return { error: 'Username is required.' };
     if (!password) return { error: 'Password is required.' };
     if (useSudo && !sudoPassword) return { error: 'Sudo password is required when using sudo.' };

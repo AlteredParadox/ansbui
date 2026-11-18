@@ -297,25 +297,25 @@ func Run(ctx context.Context, pool *sshpool.Pool, srv config.Server, req Request
 		target = newTarget
 	}
 
-	newPort := req.newSSHPort()
-	if err := bootstrapTarget(ctx, target, pubKey, newPort, emit); err != nil {
+	targetSSHPort := req.newSSHPort()
+	if err := bootstrapTarget(ctx, target, pubKey, targetSSHPort, emit); err != nil {
 		return err
 	}
 	if !req.Reinstall.Enabled {
 		// A reinstall run reconnected on the new port and recorded
 		// the new system's key there already (runReinstall).
-		carryHostKeyToTargetPort(ctx, hostPortMove{host: req.IP, from: req.Port, to: newPort}, target.fingerprint(), hostKeys, probeHostKey, emit)
+		carryHostKeyToTargetPort(ctx, hostPortMove{host: req.IP, from: req.Port, to: targetSSHPort}, target.fingerprint(), hostKeys, probeHostKey, emit)
 	}
 
 	providerGroup := normalizeProviderName(req.Provider)
 	emit("meta", fmt.Sprintf("Adding %s to inventory under group %q...", req.Hostname, providerGroup))
-	if err := updateInventoryFile(ctx, pool, srv, providerGroup, req.Hostname, newPort); err != nil {
+	if err := updateInventoryFile(ctx, pool, srv, providerGroup, req.Hostname, targetSSHPort); err != nil {
 		emit("fail", "inventory edit: "+err.Error())
 		return err
 	}
 	emit("ok", "inventory updated")
 
-	emit("done", fmt.Sprintf("Bootstrap complete. Reach via ansible@%s:%d", req.Hostname, newPort))
+	emit("done", fmt.Sprintf("Bootstrap complete. Reach via ansible@%s:%d", req.Hostname, targetSSHPort))
 	return nil
 }
 
@@ -667,7 +667,7 @@ func boundLength(name, value string, limit int) error {
 // budget after the reinstall branch landed; same script either
 // way (post-reinstall the sshd-port flip is a no-op since
 // reinstall.sh already baked the new port into the image).
-func bootstrapTarget(ctx context.Context, target *targetSession, pubKey string, newPort int, emit func(typ, text string)) error {
+func bootstrapTarget(ctx context.Context, target *targetSession, pubKey string, targetSSHPort int, emit func(typ, text string)) error {
 	emit("meta", "Detecting distro...")
 	distroOut, _, err := target.runRoot(ctx, "cat /etc/os-release", "")
 	if err != nil {
@@ -703,8 +703,8 @@ func bootstrapTarget(ctx context.Context, target *targetSession, pubKey string, 
 	}
 	emit("ok", "ansible user ready")
 
-	emit("meta", fmt.Sprintf("Configuring sshd to listen on port %d...", newPort))
-	portOut, stderr, err := target.runRoot(ctx, sshdPortScript(newPort), "")
+	emit("meta", fmt.Sprintf("Configuring sshd to listen on port %d...", targetSSHPort))
+	portOut, stderr, err := target.runRoot(ctx, sshdPortScript(targetSSHPort), "")
 	if err != nil {
 		emit("fail", "sshd port change: "+stderr)
 		return err
@@ -1399,11 +1399,24 @@ func sshdPortScript(target int) string {
 	return strings.Join([]string{
 		`set -e`,
 		`TARGET=` + t,
-		`listening() { ss -tln 2>/dev/null | grep -qE "[:.]$1([[:space:]]|$)"; }`,
+		// listeners prints the TCP listeners on a port with their
+		// owning process (-p; this runs as root, so ss can name it).
+		`listeners() { ss -tlnp 2>/dev/null | grep -E "[:.]$1([[:space:]]|$)" || true; }`,
+		// Under socket activation the listening socket belongs to
+		// systemd, not sshd; it counts as ssh only when an active ssh
+		// socket unit is the one listening on that port.
+		`ssh_socket_on() { for u in ssh.socket sshd.socket; do if systemctl is-active --quiet "$u" 2>/dev/null && systemctl show "$u" -p Listen 2>/dev/null | grep -qE "[:.]$1([[:space:]]|$)"; then return 0; fi; done; return 1; }`,
+		`ssh_listening() { L=$(listeners "$1"); if printf '%s\n' "$L" | grep -q '"sshd"'; then return 0; fi; if printf '%s\n' "$L" | grep -q '"systemd"' && ssh_socket_on "$1"; then return 0; fi; return 1; }`,
 		`if command -v ss >/dev/null 2>&1; then HAVE_SS=1; else HAVE_SS=; fi`,
 		// Ground-truth no-op: only trust the config when we can't see
-		// the listener.
-		`if [ -n "$HAVE_SS" ]; then if listening "$TARGET"; then echo "sshd already listening on port $TARGET"; exit 0; fi; else CURRENT=$(grep -hE '^[[:space:]]*Port[[:space:]]+' /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*.conf 2>/dev/null | awk '{print $2}' | tail -1); if [ "$CURRENT" = "$TARGET" ]; then echo "sshd config already on port $TARGET (no ss to verify listener)"; exit 0; fi; fi`,
+		// the listener. A listener on the port is "already done" only
+		// if it IS ssh. The port is the operator's choice, and one
+		// already taken by another service (443 on a web server) must
+		// stop the run here, before anything is changed — reporting it
+		// as sshd would end with an inventory entry pointing ansible
+		// at that other service.
+		`if [ -n "$HAVE_SS" ] && [ -n "$(listeners "$TARGET")" ] && ! ssh_listening "$TARGET"; then echo "port $TARGET is already in use on the target by something other than sshd ($(listeners "$TARGET" | grep -oE 'users:[^[:space:]]+' | sort -u | tr '\n' ' ')) — sshd cannot be moved there; choose another port" >&2; exit 1; fi`,
+		`if [ -n "$HAVE_SS" ]; then if ssh_listening "$TARGET"; then echo "sshd already listening on port $TARGET"; exit 0; fi; else CURRENT=$(grep -hE '^[[:space:]]*Port[[:space:]]+' /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*.conf 2>/dev/null | awk '{print $2}' | tail -1); if [ "$CURRENT" = "$TARGET" ]; then echo "sshd config already on port $TARGET (no ss to verify listener)"; exit 0; fi; fi`,
 		`if grep -qE '^[[:space:]]*Port[[:space:]]+' /etc/ssh/sshd_config; then sed -i -E "s/^[[:space:]]*Port[[:space:]]+.*/Port $TARGET/" /etc/ssh/sshd_config; else printf 'Port %s\n' "$TARGET" >> /etc/ssh/sshd_config; fi`,
 		`for f in /etc/ssh/sshd_config.d/*.conf; do [ -f "$f" ] || continue; if grep -qE '^[[:space:]]*Port[[:space:]]+' "$f"; then sed -i -E "s/^[[:space:]]*Port[[:space:]]+.*/Port $TARGET/" "$f"; fi; done`,
 		`sshd -t`,
@@ -1417,8 +1430,8 @@ func sshdPortScript(target int) string {
 		// without ss (minimal alpine) skip the check rather than fail.
 		`[ -n "$HAVE_SS" ] || exit 0`,
 		`i=0`,
-		`while [ "$i" -lt 10 ]; do if listening "$TARGET"; then exit 0; fi; i=$((i+1)); sleep 1; done`,
-		`echo "sshd reported success but nothing is listening on port $TARGET — socket activation or a config override may still hold the old port" >&2`,
+		`while [ "$i" -lt 10 ]; do if ssh_listening "$TARGET"; then exit 0; fi; i=$((i+1)); sleep 1; done`,
+		`echo "sshd reported success but sshd is not listening on port $TARGET — socket activation or a config override may still hold the old port" >&2`,
 		`exit 1`,
 	}, "; ")
 }

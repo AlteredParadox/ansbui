@@ -27,7 +27,7 @@ import { createPage, loadScript } from './browser-script.js';
 
 const page = createPage();
 loadScript(page, 'views/Bootstrap.jsx');
-const { parseTcpPort } = page;
+const { parseTcpPort, parseBootstrapPorts } = page;
 
 test('a TCP port is digits only, 1 to 65535', () => {
   for (const [text, want] of [['22', 22], ['4242', 4242], [' 2222 ', 2222], ['1', 1], ['65535', 65535]]) {
@@ -43,4 +43,16 @@ test('anything else is refused', () => {
 
 test('a number is accepted as well as its text', () => {
   assert.equal(parseTcpPort(4242), 4242);
+});
+
+// The form's check, as start() runs it. Each field is refused on its
+// own: the current port used to go through Number.parseInt, which
+// let "22abc" and "22.5" through as 22.
+test('both port fields of the form are checked strictly', () => {
+  assert.deepEqual({ ...parseBootstrapPorts('22', '4242') }, { portNum: 22, newPortNum: 4242 });
+  assert.deepEqual({ ...parseBootstrapPorts(' 2200 ', '2200') }, { portNum: 2200, newPortNum: 2200 });
+  for (const bad of ['22abc', '22.5', '', '0', '70000']) {
+    assert.match(parseBootstrapPorts(bad, '4242').error, /^Current SSH port/, `current=${JSON.stringify(bad)}`);
+    assert.match(parseBootstrapPorts('22', bad).error, /^New SSH port/, `new=${JSON.stringify(bad)}`);
+  }
 });
