@@ -2,8 +2,10 @@ package bootstrap
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -47,23 +49,33 @@ func normalizeFingerprint(s string) string {
 	return strings.TrimRight(s, "=")
 }
 
-// hostKeyExpectation pairs a pinned/stored fingerprint with a
+// hostKeyExpectation is what a target dial requires of the host key
+// the peer presents. It pairs a pinned/stored fingerprint with a
 // human-readable description of its origin, so a mismatch error can
 // tell the operator the right remediation. The zero value means "no
-// expectation" — first contact, accept and record.
+// expectation, nothing to record" — accept whatever is presented.
 type hostKeyExpectation struct {
 	fp  string // normalized SHA256:… fingerprint, "" for none
 	src string // e.g. "the operator-pinned fingerprint"
+
+	// accept, when set, is called with the fingerprint of a key that
+	// passed the check against fp (or any key at all when fp is
+	// empty). It runs inside the key exchange, so an error from it
+	// aborts the handshake BEFORE SSH auth: no password is sent to a
+	// peer whose acceptance could not be made durable. See
+	// hostKeyRecorder for why that ordering matters.
+	accept func(fp string) error
 }
 
 // recordFingerprintCallback builds the HostKeyCallback for target
-// dials: it always records the presented key's fingerprint into
-// *observed, and when expect.fp is non-empty (an operator-supplied
-// pin or a TOFU-store record, already normalized) it rejects any
-// other key BEFORE any credential is transmitted — the callback runs
-// during key exchange, ahead of SSH auth. With no expectation the
-// callback accepts anything — first contact; callers must surface
-// and record the observed fingerprint.
+// dials. It always writes the presented key's fingerprint into
+// *observed. When expect.fp is non-empty (an operator-supplied pin or
+// a TOFU-store record, already normalized) it rejects any other key.
+// A key that gets past that is handed to expect.accept, whose error
+// rejects it too. All of this happens BEFORE any credential is
+// transmitted — the callback runs during key exchange, ahead of SSH
+// auth. With a zero expectation the callback accepts anything; only
+// the post-reinstall dials use that (see tryInstallerDone).
 func recordFingerprintCallback(expect hostKeyExpectation, observed *string) ssh.HostKeyCallback {
 	return func(_ string, _ net.Addr, key ssh.PublicKey) error {
 		fp := ssh.FingerprintSHA256(key)
@@ -71,8 +83,58 @@ func recordFingerprintCallback(expect hostKeyExpectation, observed *string) ssh.
 		if expect.fp != "" && fp != expect.fp {
 			return fmt.Errorf("host key mismatch: target presented %s but %s expects %s — if the box was reinstalled or replaced out of band, supply its new fingerprint in the form to update the record; otherwise treat this as a possible MITM and verify via the provider console (ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub)", fp, expect.src, expect.fp)
 		}
+		if expect.accept != nil {
+			return expect.accept(fp)
+		}
 		return nil
 	}
+}
+
+// hostKeyProbeTimeout bounds the whole probe: TCP connect plus the
+// part of the SSH handshake that precedes authentication.
+const hostKeyProbeTimeout = 10 * time.Second
+
+// errHostKeyProbed ends a probe's handshake once the key is in hand.
+var errHostKeyProbed = errors.New("host key probe complete")
+
+// probeHostKey returns the fingerprint of the host key host:port
+// presents, and nothing else happens: the callback that captures the
+// key also refuses it, so the handshake stops before SSH auth and no
+// credential, user name included, is ever sent. The key exchange has
+// verified the peer's signature by the time the callback runs, so the
+// fingerprint is of a key the peer actually holds, not one it merely
+// claims.
+func probeHostKey(ctx context.Context, host string, port int) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, hostKeyProbeTimeout)
+	defer cancel()
+	addr := net.JoinHostPort(host, strconv.Itoa(port))
+	var d net.Dialer
+	conn, err := d.DialContext(ctx, "tcp", addr)
+	if err != nil {
+		return "", fmt.Errorf("dial %s: %w", addr, err)
+	}
+	defer func() { _ = conn.Close() }()
+	if deadline, ok := ctx.Deadline(); ok {
+		_ = conn.SetDeadline(deadline)
+	}
+	var fp string
+	cfg := &ssh.ClientConfig{
+		User: "probe",
+		HostKeyCallback: func(_ string, _ net.Addr, key ssh.PublicKey) error {
+			fp = ssh.FingerprintSHA256(key)
+			return errHostKeyProbed
+		},
+	}
+	sshConn, _, _, err := ssh.NewClientConn(conn, addr, cfg)
+	if err == nil {
+		// Unreachable: the callback always refuses. Close rather than
+		// leave an authenticated-as-nobody connection behind.
+		_ = sshConn.Close()
+	}
+	if fp == "" {
+		return "", fmt.Errorf("no host key from %s: %w", addr, err)
+	}
+	return fp, nil
 }
 
 // dialPasswordTarget opens an SSH connection to host:port, with
@@ -101,10 +163,14 @@ func dialPasswordTarget(ctx context.Context, host string, port int, user, passwo
 // can cover the first post-reinstall dial and expect is empty there
 // (TOFU, with a loud warning from the caller). `expect` is a real
 // parameter rather than a hard-coded empty value so that every call
-// site has to state its choice: the retry loops pin to the key seen
-// on first contact, and a strict-mode deployment refuses the whole
-// reinstall up front (see requireHostKeyEnv) rather than silently
-// trusting a replacement key here.
+// site has to state its choice. Both post-reinstall retry loops pass
+// an empty one on every dial, deliberately: they span the handover
+// from the installer's ephemeral key to the installed system's, so
+// the key seen on an early retry is not the one a later retry should
+// see (tryInstallerDone, tryReinstallReady). The control for that
+// window is that a strict-mode deployment refuses the whole reinstall
+// up front (see requireHostKeyEnv) rather than silently trusting a
+// replacement key here.
 func dialKeyTarget(ctx context.Context, host string, port int, privKey []byte, expect hostKeyExpectation) (*targetSession, error) {
 	signer, err := ssh.ParsePrivateKey(privKey)
 	if err != nil {

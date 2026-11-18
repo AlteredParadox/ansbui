@@ -220,6 +220,22 @@ Optional env vars worth knowing about:
   front, so even the first contact is authenticated. Recommended
   wherever the provider exposes host keys out of band.
 
+  In either mode the fingerprint is written to the store **before**
+  the password is sent, and a bootstrap whose record cannot be
+  written (full disk, wrong owner after a restore, read-only mount)
+  stops there with "refusing to authenticate … no credential was
+  sent". Fix the data directory and retry. Two consequences worth
+  knowing: a key is on record even if the login then fails (a
+  mistyped password — the job log still shows the first-contact
+  warning for that run), and after bootstrap moves sshd to port 4242
+  the same fingerprint is recorded for `host:4242` too, so a re-run
+  against the new port is verified rather than trusted afresh. Before
+  writing that second record ansbui connects to port 4242 (key
+  exchange only, no login) to check it presents the same key; if
+  something else answers there with a different key, nothing is
+  written, any existing record for `host:4242` is kept, and the job
+  log says so.
+
   This also affects the **reinstall** option. A reinstall wipes the
   box and the new system generates fresh host keys, so no
   fingerprint pinned beforehand can cover the reconnect — and
@@ -259,7 +275,11 @@ Two paths matter:
   first use, so back it up with the rest; to deliberately reset
   trust for one target (e.g. after an out-of-band reinstall),
   remove its `"host:port"` entry or supply the new fingerprint
-  in the bootstrap form.
+  in the bootstrap form. Every value must be a `SHA256:…`
+  fingerprint: a hand-edited file with an empty value, or one
+  that is not a JSON object, is treated as corrupt and stops
+  every bootstrap until it is fixed — it is never read as "no
+  record".
 - `/opt/ansbui/data/auth_credential` — the argon2id login password
   hash (0600), present only if you ran `-set-password`. Losing it
   disables built-in auth on next start (falls back to the
