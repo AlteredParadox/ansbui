@@ -137,6 +137,7 @@ func main() {
 		Credential:     credential,
 		Sessions:       auth.NewSessionStore(),
 		TrustedProxies: trustedProxies,
+		Legal:          legalTexts(),
 	}
 
 	httpSrv := &http.Server{

@@ -260,7 +260,13 @@ the proxy should:
   `proxy_set_header X-Forwarded-For $remote_addr;` it passes on
   whatever the client sent, and each client then chooses the address
   it is throttled as (section 0)
-- authenticate every request, including the WebSocket run streams.
+- leave `/license`, `/third-party-licenses` and `/source` reachable if
+  people other than you use this instance. ansbui serves them without
+  login because the AGPL entitles everyone who uses it over a network
+  to its license and source (README, "License"); they return two
+  texts compiled into the binary and a redirect to the public
+  repository, nothing about your deployment
+- authenticate every other request, including the WebSocket run streams.
   These live under `/api/`, NOT a separate `/ws/` prefix, so a proxy
   rule that only guards `/ws/*` protects nothing. The upgrade
   endpoints are `/api/adhoc/stream`, `/api/playbook/stream`, and
@@ -708,7 +714,7 @@ expensive.
 ## 9. Upgrade path
 
 ```
-git pull && go build -trimpath -ldflags='-s -w' -o /tmp/ansbui .
+git pull && make build && cp ansbui /tmp/ansbui
 sudo install -o root -g root -m 0755 /tmp/ansbui /opt/ansbui/bin/
 sudo systemctl restart ansbui
 sudo systemctl status ansbui
@@ -721,9 +727,13 @@ self-update with malicious code. The deploying operator needs
 sudo, which is fine for an upgrade flow that's usually
 manual or driven by CI with elevated privileges.
 
-`-trimpath` strips local paths from binary; `-ldflags='-s -w'`
-strips the symbol table. Neither affects the security posture
-but both are good hygiene for a prod binary.
+`make build` regenerates `THIRD_PARTY_LICENSES.md` (it is embedded in
+the binary), stamps the version from `git describe`, and builds with
+`-trimpath` (strips local paths) and `-ldflags='-s -w'` (strips the
+symbol table). The stamp is what **Settings → About & licensing**
+shows and what `/source` points at. A plain `go build -o ansbui .`
+also works; it reports version `dev`. Or skip the build and install a
+release binary, checking it against the release's `SHA256SUMS`.
 
 ### Checks after upgrading
 

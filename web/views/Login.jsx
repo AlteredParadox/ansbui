@@ -71,6 +71,7 @@ function LoginView({ onSuccess }) {
         <button type="submit" className="btn primary" disabled={busy || !password} style={{ marginTop: 14, width: '100%', justifyContent: 'center' }}>
           {busy ? 'Signing in…' : 'Sign in'}
         </button>
+        <LegalLinks className="boot-legal"/>
       </form>
     </div>
   );

@@ -91,6 +91,12 @@ type Server struct {
 	// Empty means RemoteAddr is always the source.
 	TrustedProxies []netip.Prefix
 
+	// Legal holds the embedded license texts and the build version.
+	// The texts are served without login at /license and
+	// /third-party-licenses, and /source redirects to the source of
+	// this version (see legal.go).
+	Legal Legal
+
 	// loginLimit bounds concurrent Argon2 verifications and applies
 	// the per-source token-bucket backoff (see loginlimit.go). The
 	// zero value is ready to use.
@@ -161,6 +167,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, fmt.Errorf("unknown API route %s %s", r.Method, r.URL.Path))
 	})
+	s.registerLegalRoutes(mux)
 	mux.Handle("/", s.staticHandler())
 
 	// Order: logging (outermost) → security headers → origin/host

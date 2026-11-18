@@ -41,6 +41,16 @@ jobs:
       - name: Go test (race)
         run: go test -race ./...
 
+      - name: make license-check
+        run: make license-check
+
+      # THIRD_PARTY_LICENSES.md is embedded in the binary, so a release must
+      # not ship notices that disagree with what is linked into it. This is
+      # the ONE place the check gates — see the Makefile for why not on PRs.
+      # If it fails: run `make notices` on main, merge that, and re-tag.
+      - name: make notices-check
+        run: make notices-check
+
   # Runs on BOTH triggers, so a dispatch proves the build still works.
   # Pure Go (no cgo) cross-compiles with nothing but GOARCH — no QEMU, no
   # buildx.
@@ -66,15 +76,23 @@ jobs:
           go-version-file: go.mod
           cache: false
 
-      # No version is stamped: main.go has no version variable, and `-X` on
-      # a symbol that does not exist is a silent no-op. Add `-X main.version`
-      # here if one is ever introduced.
+      # A run on a tag ref (pushed, or dispatched on the tag) stamps the tag;
+      # one on a branch stamps "dev". The stamp is what /source pins the
+      # AGPL source offer to (internal/api/legal.go), and what Settings
+      # shows. The ref name reaches the shell through the environment and
+      # is refused unless it looks like a version, so a tag name cannot
+      # carry anything into the command line.
       - name: Build
         env:
           CGO_ENABLED: '0'
           GOOS: linux
           GOARCH: ${{ matrix.goarch }}
-        run: go build -trimpath -ldflags "-s -w" -o "ansbui-linux-${GOARCH}" .
+        run: |
+          v="${GITHUB_REF_NAME}"
+          [ "${GITHUB_REF_TYPE}" = tag ] || v="dev"
+          case "$v" in ''|*[!A-Za-z0-9._+-]*) echo "refusing version stamp: $v" >&2; exit 1;; esac
+          go build -trimpath -ldflags "-s -w -X main.version=${v}" \
+            -o "ansbui-linux-${GOARCH}" .
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:

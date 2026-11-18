@@ -136,6 +136,10 @@ type settingsBody struct {
 	// AnsbuiSettings, which is where the bootstrap form reads it to
 	// decide whether the reinstall acknowledgement applies.
 	BootstrapRequireHostKey bool `json:"bootstrapRequireHostKey"`
+
+	// Version is the build stamp shown under Settings → About &
+	// licensing. Read-only, like the field above.
+	Version string `json:"version"`
 }
 
 func (s *Server) getSettings(w http.ResponseWriter, _ *http.Request) {
@@ -148,6 +152,7 @@ func (s *Server) getSettings(w http.ResponseWriter, _ *http.Request) {
 		ControlPrivKeyPath: snap.ControlPrivKeyPath,
 
 		BootstrapRequireHostKey: bootstrap.HostKeyRequired(),
+		Version:                 s.version(),
 	})
 }
 
