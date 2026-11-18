@@ -3,6 +3,7 @@ package ansible
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -25,9 +26,16 @@ type FactsResult struct {
 // expression ansible accepts but the UI calls this with a concrete
 // host name; if the expression matches multiple hosts we return the
 // first SUCCESS line.
+// ErrFactsHost is returned for a facts request whose host is not a
+// plain host name (see ValidHostName).
+var ErrFactsHost = errors.New("host must be a single host name: letters, digits, '.', '-', '_' and ':' only, not starting with '-'")
+
 func GatherFacts(ctx context.Context, pool *sshpool.Pool, srv config.Server, host string) (FactsResult, error) {
 	if strings.TrimSpace(host) == "" {
 		return FactsResult{}, fmt.Errorf("host is required")
+	}
+	if !ValidHostName(host) {
+		return FactsResult{}, ErrFactsHost
 	}
 	cli, err := pool.Client(ctx, srv)
 	if err != nil {

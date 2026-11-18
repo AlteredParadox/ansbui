@@ -259,6 +259,29 @@ func scanLines(ctx context.Context, r *io.PipeReader, stream string, out chan<- 
 	_ = r.Close()
 }
 
+// eventHost turns the text captured between the brackets of an output
+// line into the event's Host, or "" when it is not a plain host name.
+//
+// The capture is whatever the line held: `[^\]]+` for the bracketed
+// forms, any non-space run for a recap row. Ansible writes a host name
+// there, or "host -> delegate" for a delegated task (the part before
+// the arrow is the inventory host). But the same lines can be printed
+// by a managed host from a command's output, and Host is acted on
+// later: History offers it as the target of "Retry failed" and the
+// composer writes it into a generated playbook. A name with a line
+// break, a ':' followed by a space or other YAML syntax in it added
+// keys and tasks to that playbook. The event keeps its type either
+// way — an unparseable name must not turn a failure line into an
+// ordinary one — it just carries no host.
+func eventHost(captured string) string {
+	host, _, _ := strings.Cut(captured, " -> ")
+	host = strings.TrimSpace(host)
+	if !ValidHostName(host) {
+		return ""
+	}
+	return host
+}
+
 func classify(line, stream string) Event {
 	switch {
 	case playHeadLine.MatchString(line):
@@ -275,17 +298,17 @@ func classify(line, stream string) Event {
 		case m[3] != "0":
 			t = "recap-warn"
 		}
-		return Event{Type: t, Host: m[1], Text: line, Stream: stream}
+		return Event{Type: t, Host: eventHost(m[1]), Text: line, Stream: stream}
 	case okLine.MatchString(line):
-		return Event{Type: "ok", Host: okLine.FindStringSubmatch(line)[1], Text: line, Stream: stream}
+		return Event{Type: "ok", Host: eventHost(okLine.FindStringSubmatch(line)[1]), Text: line, Stream: stream}
 	case changedLine.MatchString(line):
-		return Event{Type: "changed", Host: changedLine.FindStringSubmatch(line)[1], Text: line, Stream: stream}
+		return Event{Type: "changed", Host: eventHost(changedLine.FindStringSubmatch(line)[1]), Text: line, Stream: stream}
 	case failedLine.MatchString(line):
-		return Event{Type: "fail", Host: failedLine.FindStringSubmatch(line)[1], Text: line, Stream: stream}
+		return Event{Type: "fail", Host: eventHost(failedLine.FindStringSubmatch(line)[1]), Text: line, Stream: stream}
 	case unreachLine.MatchString(line):
-		return Event{Type: "fail", Host: unreachLine.FindStringSubmatch(line)[1], Text: line, Stream: stream}
+		return Event{Type: "fail", Host: eventHost(unreachLine.FindStringSubmatch(line)[1]), Text: line, Stream: stream}
 	case skippedLine.MatchString(line):
-		return Event{Type: "meta", Host: skippedLine.FindStringSubmatch(line)[1], Text: line, Stream: stream}
+		return Event{Type: "meta", Host: eventHost(skippedLine.FindStringSubmatch(line)[1]), Text: line, Stream: stream}
 	}
 	return Event{Type: "line", Text: line, Stream: stream}
 }

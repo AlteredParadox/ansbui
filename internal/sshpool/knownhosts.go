@@ -1,11 +1,15 @@
 package sshpool
 
 import (
+	"bufio"
 	"errors"
 	"fmt"
 	"io/fs"
+	"log"
 	"net"
 	"os"
+	"regexp"
+	"strings"
 	"sync"
 
 	"golang.org/x/crypto/ssh"
@@ -36,6 +40,7 @@ func knownHostsCallback(path string) (ssh.HostKeyCallback, error) {
 	if err := ensureKnownHostsMode(path); err != nil {
 		return nil, err
 	}
+	warnKnownHostsWildcardsOnce(path)
 	strict, err := knownhosts.New(path)
 	if err != nil {
 		return nil, fmt.Errorf("load known_hosts: %w", err)
@@ -126,6 +131,9 @@ func appendKnownHost(path, hostname string, remote net.Addr, key ssh.PublicKey) 
 		// Already recorded with this key — nothing to do.
 		return nil
 	}
+	if !safeKnownHostsName(knownhosts.Normalize(hostname)) {
+		return fmt.Errorf("refusing to record a host key for %q: the name contains characters that have a meaning in known_hosts", hostname)
+	}
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0o600)
 	if err != nil {
 		return fmt.Errorf("append known_hosts: %w", err)
@@ -136,4 +144,81 @@ func appendKnownHost(path, hostname string, remote net.Addr, key ssh.PublicKey) 
 		return fmt.Errorf("write known_hosts: %w", err)
 	}
 	return nil
+}
+
+// knownHostsNameRE is the only shape of host name appendKnownHost will
+// write: a bare name or address, or "[name]:port" for a non-default
+// port — the two forms knownhosts.Normalize produces.
+//
+// known_hosts gives several characters a meaning: ',' separates
+// patterns, '*' and '?' are wildcards, '!' negates, '#' starts a
+// comment, a leading '@' is a marker, '|' starts a hashed entry, and
+// whitespace or a newline ends the field or the line. The name comes
+// from the server record, which config.ValidateServerHost already
+// restricts; this is the same rule applied where the file is written,
+// so the file cannot be corrupted through a record that reached the
+// dialer some other way.
+var knownHostsNameRE = regexp.MustCompile(`^(\[[A-Za-z0-9_.:%-]+\]:[0-9]{1,5}|[A-Za-z0-9_.:%-]+)$`)
+
+func safeKnownHostsName(normalized string) bool {
+	return knownHostsNameRE.MatchString(normalized)
+}
+
+// knownHostsWarned records which files have been scanned, so the
+// warning below is logged once per file per process.
+var knownHostsWarned sync.Map
+
+// warnKnownHostsWildcardsOnce logs the line numbers of known_hosts
+// entries whose host pattern contains a wildcard. Such an entry makes
+// its key acceptable for every host it matches, including hosts that
+// have their own pinned key — the host-key check passes if ANY
+// matching line holds the presented key. Releases before the host
+// check in config.ValidateServerHost could be made to write one, and
+// nothing removes it automatically: an operator may have added a
+// wildcard on purpose (a certificate authority line, a lab subnet), so
+// the file is theirs to edit. Only line numbers are logged.
+func warnKnownHostsWildcardsOnce(path string) {
+	if _, seen := knownHostsWarned.LoadOrStore(path, struct{}{}); seen {
+		return
+	}
+	lines := knownHostsWildcardLines(path)
+	if len(lines) == 0 {
+		return
+	}
+	log.Printf("known_hosts: %s has wildcard host patterns on line(s) %s. A key on such a line is accepted for every matching host, pinned or not. If you did not add these lines, remove them (see DEPLOYMENT.md, \"Checks after upgrading\").", path, strings.Join(lines, ", "))
+}
+
+// knownHostsWildcardLines returns the 1-based numbers of lines whose
+// host field contains '*' or '?'. Hashed entries cannot hold a
+// wildcard and are skipped; an unreadable file yields nothing (the
+// caller is about to load it and will report that error itself).
+func knownHostsWildcardLines(path string) []string {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	var out []string
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 64<<10), 1<<20)
+	for n := 1; sc.Scan(); n++ {
+		fields := strings.Fields(sc.Text())
+		if len(fields) == 0 || strings.HasPrefix(fields[0], "#") {
+			continue
+		}
+		hosts := fields[0]
+		if strings.HasPrefix(hosts, "@") { // @cert-authority / @revoked marker
+			if len(fields) < 2 {
+				continue
+			}
+			hosts = fields[1]
+		}
+		if strings.HasPrefix(hosts, "|") {
+			continue
+		}
+		if strings.ContainsAny(hosts, "*?") {
+			out = append(out, fmt.Sprint(n))
+		}
+	}
+	return out
 }

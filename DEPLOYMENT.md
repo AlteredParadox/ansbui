@@ -427,6 +427,44 @@ manual or driven by CI with elevated privileges.
 strips the symbol table. Neither affects the security posture
 but both are good hygiene for a prod binary.
 
+### Checks after upgrading
+
+Newer releases refuse some input that older ones stored. Nothing is
+rewritten for you; these are worth one look after an upgrade.
+
+- **`~/.ssh/known_hosts` of the service user.** A connection's host
+  must now be a DNS name or an IP address. Before that rule, a host
+  written as an IPv6 address with a crafted zone (`::1%…`) could add
+  a line of its own to `known_hosts`, including a `*` pattern, and a
+  key on a `*` line is accepted for **every** host, even one with a
+  different key already pinned. ansbui never removes lines from this
+  file. On the first SSH connection after start it logs
+  `known_hosts: … has wildcard host patterns on line(s) …` if any
+  host pattern contains `*` or `?`. If you did not put those lines
+  there (a certificate-authority line or a lab subnet are the usual
+  legitimate ones), delete them and compare the keys of your control
+  nodes against a source you trust.
+- **Connections with an unusual host.** A stored connection whose host
+  is not a DNS name or IP address (a `user@host`, a bracketed IPv6
+  address, a name with a space) now fails to connect with *"this
+  connection's host cannot be used"*. Edit it. An IPv6 link-local
+  address may keep its zone when the zone is an interface name
+  (`fe80::1%eth0`).
+- **Prometheus URL.** It must be a base address — scheme, host,
+  optional path prefix — with no `?query` and no `#fragment`. A stored
+  URL that has one is refused on every fetch (the log says so) and
+  host metrics stay empty until it is saved again without it.
+- **Login shell on the control node.** ansbui builds every command for
+  a POSIX shell (`sh`, `bash`, `dash`, `ksh`, `zsh`), and the SSH
+  account's login shell is what reads them. Under `fish`, for example,
+  a value containing a backslash followed by a quote is split into
+  separate commands. **Test connection** now checks this by sending a
+  quoted value through the shell and comparing what comes back; if it
+  reports that the shell *"does not read quoted arguments the way a
+  POSIX shell does"*, change the account's shell
+  (`chsh -s /bin/bash <user>`). The check runs only when you press
+  Test connection.
+
 ## 10. What's still on the operator
 
 - Auth in front of the proxy.

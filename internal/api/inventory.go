@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strconv"
+	"strings"
 
 	"github.com/AlteredParadox/ansbui/internal/ansible"
 	"github.com/AlteredParadox/ansbui/internal/config"
@@ -137,20 +139,47 @@ func (s *Server) tryMetrics(ctx context.Context) (prom.MetricsResult, bool) {
 	}
 	client, err := prom.NewClient(url, label)
 	if err != nil {
-		log.Printf("prom: bad client config: %v", err)
+		log.Printf("prom: bad client config: %s", logSafe(err.Error()))
 		return prom.MetricsResult{}, false
 	}
 	result, err := client.Metrics(ctx)
 	if err != nil {
-		log.Printf("prom: metrics call failed: %v", err)
+		log.Printf("prom: metrics call failed: %s", logSafe(err.Error()))
 		return prom.MetricsResult{}, false
 	}
 	for _, p := range result.Probes {
 		if p.Error != "" {
-			log.Printf("prom: probe %q failed: %s", p.Name, p.Error)
+			log.Printf("prom: probe %q failed: %s", p.Name, logSafe(p.Error))
 		}
 	}
 	return result, true
+}
+
+// maxLoggedRemoteText bounds one piece of remote-derived text in a
+// log line.
+const maxLoggedRemoteText = 512
+
+// logSafe makes text that may have been written by a remote peer safe
+// to put in the server log: shortened, with every non-printing
+// character (newline, carriage return, other controls, the Unicode
+// line separators) written as an escape, so it cannot start a new log
+// line. The access logger quotes method and path for the same reason.
+// prom.fetch already bounds and quotes what it takes from a response;
+// doing it here as well means this log does not depend on every
+// caller remembering to.
+func logSafe(s string) string {
+	if len(s) > maxLoggedRemoteText {
+		s = strings.ToValidUTF8(s[:maxLoggedRemoteText], "") + "…"
+	}
+	var b strings.Builder
+	for _, r := range s {
+		if strconv.IsPrint(r) {
+			b.WriteRune(r)
+			continue
+		}
+		fmt.Fprintf(&b, "\\u%04x", r)
+	}
+	return b.String()
 }
 
 func applyMetrics(inv *ansible.Inventory, metrics map[string]prom.HostMetric) {

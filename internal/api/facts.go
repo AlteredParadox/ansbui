@@ -22,6 +22,10 @@ func (s *Server) getFacts(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, errors.New("host query param is required"))
 		return
 	}
+	if !ansible.ValidHostName(host) {
+		writeError(w, http.StatusBadRequest, ansible.ErrFactsHost)
+		return
+	}
 	result, err := ansible.GatherFacts(r.Context(), s.Pool, srv, host)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, err)

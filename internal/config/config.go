@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -442,6 +443,9 @@ func normalisePromURL(raw string) (string, error) {
 	if u.Host == "" {
 		return "", errors.New("prometheus URL is missing a host")
 	}
+	if err := CheckPromBaseURL(s); err != nil {
+		return "", err
+	}
 	if err := CheckPromCredentials(u); err != nil {
 		return "", err
 	}
@@ -449,6 +453,28 @@ func normalisePromURL(raw string) (string, error) {
 		return "", err
 	}
 	return s, nil
+}
+
+// CheckPromBaseURL refuses a Prometheus URL that carries a query
+// string or a fragment. The setting is a base: ansbui appends
+// /api/v1/query?query=<one of six fixed expressions> to it. With a
+// base ending in "?x=" that suffix became the value of a parameter the
+// caller chose, and with one ending in "#" it was never sent, so
+// whoever could save settings picked the whole path and query of the
+// server-side request — including a base that already ended in
+// /api/v1/query?query=<their own PromQL>.
+//
+// The raw string is checked, not the parsed URL: url.Parse leaves
+// RawQuery empty for a bare trailing "?" and Fragment empty for a bare
+// trailing "#".
+//
+// Exported so prom.NewClient can re-check at fetch time, for the same
+// reason as CheckPromHost.
+func CheckPromBaseURL(raw string) error {
+	if strings.ContainsAny(raw, "?#") {
+		return errors.New("prometheus URL must be a base address such as http://127.0.0.1:9090 or https://host/prometheus, with no '?' query string and no '#' fragment")
+	}
+	return nil
 }
 
 // CheckPromCredentials refuses a Prometheus URL that carries
@@ -655,9 +681,51 @@ func (m *Manager) SetSettings(u SettingsUpdate) error {
 	return m.persistAndCommitLocked(next)
 }
 
-func validateServer(s Server) error {
-	if strings.TrimSpace(s.Host) == "" {
+// serverHostRE is the DNS-name form of a server host: letters, digits,
+// '.', '-' and '_', not starting with a separator.
+var serverHostRE = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.-]*$`)
+
+// serverZoneRE is what an IPv6 zone may look like: an interface name
+// or index.
+var serverZoneRE = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,32}$`)
+
+// ValidateServerHost accepts a DNS host name or an IP literal and
+// nothing else.
+//
+// The host is not only dialled. On first contact it is written into
+// ~/.ssh/known_hosts as the name the accepted key belongs to, and that
+// file has its own syntax: a comma separates patterns, '*' and '?' are
+// wildcards, a newline starts another entry. Go's dialer accepts an
+// IPv6 literal followed by an arbitrary zone ("::1%<anything>"), so a
+// host such as "::1%a\n* ssh-ed25519 AAAA… #" connected to ::1 and
+// left a line trusting the attacker's key for every host on port 22 —
+// which turned off the key-change check for control nodes that were
+// already pinned.
+//
+// Exported so sshpool can refuse to dial a record that was stored
+// before this check existed, or written into config.json by hand.
+func ValidateServerHost(host string) error {
+	if host == "" {
 		return errors.New("host is required")
+	}
+	if addr, err := netip.ParseAddr(host); err == nil {
+		if zone := addr.Zone(); zone != "" && !serverZoneRE.MatchString(zone) {
+			return errors.New("host: the IPv6 zone after '%' must be an interface name (letters, digits, '.', '-', '_')")
+		}
+		return nil
+	}
+	if strings.ContainsAny(host, ":%[]") {
+		return errors.New("host is not a valid IP address (write an IPv6 address without brackets)")
+	}
+	if len(host) > 253 || !serverHostRE.MatchString(host) {
+		return errors.New("host must be a DNS name (letters, digits, '.', '-', '_'; at most 253 characters) or an IP address")
+	}
+	return nil
+}
+
+func validateServer(s Server) error {
+	if err := ValidateServerHost(strings.TrimSpace(s.Host)); err != nil {
+		return err
 	}
 	if strings.TrimSpace(s.User) == "" {
 		return errors.New("user is required")

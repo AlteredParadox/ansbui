@@ -40,7 +40,7 @@ type HostMetric struct {
 
 // Client queries a single Prometheus instance.
 type Client struct {
-	base  string
+	base  *url.URL // scheme, host, optional credentials and path prefix; never a query or fragment
 	label string
 	http  *http.Client
 }
@@ -71,6 +71,11 @@ func NewClient(baseURL, hostLabel string) (*Client, error) {
 	if u.Host == "" {
 		return nil, errors.New("prometheus URL is missing a host")
 	}
+	// A base address only: see config.CheckPromBaseURL for what a
+	// query string or fragment in it allowed.
+	if err := config.CheckPromBaseURL(baseURL); err != nil {
+		return nil, err
+	}
 	// Re-run the settings-layer SSRF allowlist at fetch time: a
 	// config.json edited by hand never went through the settings
 	// endpoint, and this client fetches server-side with no auth in
@@ -94,7 +99,7 @@ func NewClient(baseURL, hostLabel string) (*Client, error) {
 		return nil, fmt.Errorf("prometheus label %q must match [a-zA-Z_][a-zA-Z0-9_]*", hostLabel)
 	}
 	return &Client{
-		base:  strings.TrimRight(baseURL, "/"),
+		base:  u,
 		label: hostLabel,
 		http: &http.Client{
 			Timeout: 8 * time.Second,
@@ -368,9 +373,37 @@ func (c *Client) instantLabels(ctx context.Context, q string) (map[string]map[st
 // unbounded JSON into the decoder.
 const maxPromResponse = 8 << 20
 
+// queryURL is the address of one instant query. It is built from the
+// parsed base, not by appending to its text, so the fixed path and
+// the single "query" parameter are always what is sent, whatever the
+// configured base looks like.
+func (c *Client) queryURL(q string) string {
+	u := c.base.JoinPath("api", "v1", "query")
+	u.RawQuery = url.Values{"query": {q}}.Encode()
+	u.Fragment = ""
+	return u.String()
+}
+
+// maxRemoteErrorText bounds the error text taken from a Prometheus
+// response. A real message ("bad_data: invalid parameter …") is a
+// sentence; the response it comes from may be 8 MiB.
+const maxRemoteErrorText = 200
+
+// remoteErrorText returns s shortened to maxRemoteErrorText bytes and
+// quoted, so that text written by whoever answers at the configured
+// URL stays one bounded line wherever it ends up — the probe
+// diagnostics, and the server log, where an embedded newline used to
+// start a line that looked like one of ansbui's own access-log
+// entries.
+func remoteErrorText(s string) string {
+	if len(s) > maxRemoteErrorText {
+		s = strings.ToValidUTF8(s[:maxRemoteErrorText], "") + "…"
+	}
+	return strconv.Quote(s)
+}
+
 func (c *Client) fetch(ctx context.Context, q string) (*promResp, error) {
-	u := fmt.Sprintf("%s/api/v1/query?query=%s", c.base, url.QueryEscape(q))
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.queryURL(q), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -397,7 +430,7 @@ func (c *Client) fetch(ctx context.Context, q string) (*promResp, error) {
 		return nil, fmt.Errorf("decode prometheus response: %w", err)
 	}
 	if pr.Status != "success" {
-		return nil, fmt.Errorf("prometheus error: %s", pr.Error)
+		return nil, fmt.Errorf("prometheus error: %s", remoteErrorText(pr.Error))
 	}
 	return &pr, nil
 }

@@ -56,17 +56,18 @@ function suggestedTargets(hosts, groups, descendants) {
 }
 
 // splitTargetPattern splits an ansible target string on the ':' and
-// ',' pattern separators, but NOT inside '[...]' host ranges — so
-// `web[01:05]` stays one token instead of being torn into `web[01`
-// and `05]`. Whitespace-trimmed, empties dropped.
-function splitTargetPattern(pattern) {
+// ',' pattern separators (or only on those given), but NOT inside
+// '[...]' host ranges — so `web[01:05]` stays one token instead of
+// being torn into `web[01` and `05]`. Whitespace-trimmed, empties
+// dropped.
+function splitTargetPattern(pattern, separators = ':,') {
   const toks = [];
   let cur = '';
   let depth = 0;
   for (const ch of pattern) {
     if (ch === '[') depth += 1;
     else if (ch === ']') depth = Math.max(0, depth - 1);
-    if ((ch === ':' || ch === ',') && depth === 0) {
+    if (separators.includes(ch) && depth === 0) {
       if (cur.trim()) toks.push(cur.trim());
       cur = '';
     } else {
@@ -75,6 +76,47 @@ function splitTargetPattern(pattern) {
   }
   if (cur.trim()) toks.push(cur.trim());
   return toks;
+}
+
+// resolveTargetHosts approximates what ansible will expand `target`
+// to: 'all', host names and group names (with their descendant
+// groups), joined by ':' or ','. It does not model the pattern
+// operators ('!' exclusion, '&' intersection, wildcards, regexes,
+// ranges); a pattern using them resolves to more hosts than ansible
+// would pick, or to none.
+//
+// ':' is both a pattern separator and part of an IPv6 address, and an
+// inventory host can be named by one (`2001:db8::1`). Ansible settles
+// that by splitting on ',' first and trying the whole piece as an
+// address before it splits on ':'. The same order is used here, with
+// the inventory as the test: a comma-separated piece that IS a host
+// name is that host, and only otherwise is it split on ':'. Splitting
+// first tore such a name into tokens that matched nothing.
+//
+// Used for the composer's host count and status grid, and by History
+// (as AnsbuiResolveTargetHosts) to keep "Retry failed" inside the
+// hosts the original run was aimed at.
+function resolveTargetHosts(target, hosts, descendants) {
+  const byName = new Map(hosts.map(h => [h.name, h]));
+  const out = [];
+  const seen = new Set();
+  const add = (h) => { if (!seen.has(h.id)) { seen.add(h.id); out.push(h); } };
+  const addToken = (tok) => {
+    if (tok === 'all') { hosts.forEach(add); return; }
+    const host = byName.get(tok);
+    if (host) { add(host); return; }
+    const set = descendants[tok];
+    const matches = set
+      ? hosts.filter(h => (h.groups || []).some(g => set.has(g)))
+      : hosts.filter(h => (h.groups || []).includes(tok));
+    matches.forEach(add);
+  };
+  for (const piece of splitTargetPattern(target || '', ',')) {
+    const host = byName.get(piece);
+    if (host) { add(host); continue; }
+    splitTargetPattern(piece, ':').forEach(addToken);
+  }
+  return out;
 }
 
 const STATE_TO_CLASS = { ok: 'ok', changed: 'changed', failed: 'err' };
@@ -150,21 +192,7 @@ function AdhocView({ prefill }) {
     if (prefill?.selectedHosts && target === prefill.target) {
       return prefill.selectedHosts;
     }
-    const byName = new Map(HOSTS.map(h => [h.name, h]));
-    const out = [];
-    const seen = new Set();
-    const add = (h) => { if (!seen.has(h.id)) { seen.add(h.id); out.push(h); } };
-    for (const tok of splitTargetPattern(target)) {
-      if (tok === 'all') { HOSTS.forEach(add); continue; }
-      const host = byName.get(tok);
-      if (host) { add(host); continue; }
-      const set = descendants[tok];
-      const matches = set
-        ? HOSTS.filter(h => (h.groups || []).some(g => set.has(g)))
-        : HOSTS.filter(h => (h.groups || []).includes(tok));
-      matches.forEach(add);
-    }
-    return out;
+    return resolveTargetHosts(target, HOSTS, descendants);
   }, [target, HOSTS, descendants, prefill]);
 
   const mod = MODULES.find(m => m.name === moduleName)
@@ -632,18 +660,33 @@ function suggestFilename(moduleName) {
   return `plays/${safe}.yml`;
 }
 
+// renderAdhocAsPlaybook writes the composer's state as a one-task
+// playbook. EVERY value that is not a fixed word of the template goes
+// through yamlScalar — the target, the module name, the argument
+// names and the two descriptive names, as well as the argument values.
+//
+// Only the values used to be quoted. The target can arrive from
+// History's "Retry failed", which takes host names out of run output,
+// and run output includes whatever a managed host printed: a "host
+// name" with a line break in it (CR and U+2028 are line breaks to a
+// YAML parser) added `pre_tasks:` and `become: true` to the saved
+// play. The module and argument names are typed by the operator, but
+// a file that is saved and later run should not depend on that either.
 function renderAdhocAsPlaybook({ target, module, args, become }) {
   const argEntries = Object.entries(args || {}).filter(([, v]) => v !== '' && v != null);
+  const hosts = target || 'all';
+  const playName = yamlScalar(module + ' on ' + hosts);
+  const taskName = yamlScalar('run ' + module);
   const lines = [
     '---',
-    `- name: ${module} on ${target}`,
-    `  hosts: ${target || 'all'}`,
+    `- name: ${playName}`,
+    `  hosts: ${yamlScalar(hosts)}`,
     '  gather_facts: false',
     ...(become ? ['  become: true'] : []),
     '  tasks:',
-    `    - name: run ${module}`,
-    `      ${module}:`,
-    ...argEntries.map(([k, v]) => `        ${k}: ${yamlScalar(v)}`)
+    `    - name: ${taskName}`,
+    `      ${yamlScalar(module)}:`,
+    ...argEntries.map(([k, v]) => `        ${yamlScalar(k)}: ${yamlScalar(v)}`)
   ];
   return lines.join('\n') + '\n';
 }
@@ -660,19 +703,36 @@ function renderAdhocAsPlaybook({ target, module, args, become }) {
 const YAML_BACKSLASH = String.fromCodePoint(92);
 const YAML_QUOTE_ESCAPE = YAML_BACKSLASH + '"';
 
+// YAML_PLAIN is what may be written without quotes: a word of letters,
+// digits and '_' that may contain '.', '/', '@' and '-' inside it.
+// Anything else is quoted. That includes every character with a
+// meaning in YAML: ':' (a value ending in one, or "a: b", starts a
+// mapping), '#', a leading '-', '@', '*', '&', '!' or '%', brackets,
+// braces, commas and quotes.
+const YAML_PLAIN = /^\w([\w./@-]*\w)?$/;
+
+// yamlNeedsEscape reports whether a code point must be written as a
+// \u escape inside a double-quoted scalar: the C0 and C1 controls,
+// DEL, and the characters a YAML parser treats as a line break or
+// strips — U+0085, U+2028, U+2029 and the byte-order mark.
+function yamlNeedsEscape(code) {
+  return code < 0x20 || (code >= 0x7f && code <= 0x9f) || code === 0x2028 || code === 0x2029 || code === 0xfeff;
+}
+
 function yamlScalar(v) {
   if (v == null) return '""';
   const s = String(v);
-  if (/^(true|false|null|yes|no|\d+(\.\d+)?)$/i.test(s)) return `"${s}"`;
-  if (/^[\w./@:-]+$/.test(s)) return s;
+  if (/^(true|false|null|yes|no|on|off|~|\d+(\.\d+)?)$/i.test(s)) return `"${s}"`;
+  if (YAML_PLAIN.test(s)) return s;
   // Build a YAML double-quoted scalar, escaping everything that would
   // otherwise corrupt the saved, executable playbook: backslash (the
-  // escape char) and quote must be escaped, and a literal newline/CR/tab
-  // or other C0 control char would break the scalar (a trailing
-  // backslash escapes the closing quote and swallows the next line; a
-  // bare newline folds). Scanning code points instead of using a
-  // control-char regex keeps eslint's no-control-regex happy and handles
-  // astral chars (emoji) correctly.
+  // escape char) and quote must be escaped, and a literal line break
+  // or control char would end or fold the scalar (a trailing backslash
+  // escapes the closing quote and swallows the next line). Only the
+  // escapes JSON also has are used, so the result reads the same to a
+  // YAML 1.1 parser, a YAML 1.2 parser and JSON.parse. Scanning code
+  // points instead of using a control-char regex keeps eslint's
+  // no-control-regex happy and handles astral chars (emoji) correctly.
   let out = '';
   for (const ch of s) {
     const code = ch.codePointAt(0);
@@ -681,10 +741,14 @@ function yamlScalar(v) {
     else if (ch === '\n') out += YAML_BACKSLASH + 'n';
     else if (ch === '\r') out += YAML_BACKSLASH + 'r';
     else if (ch === '\t') out += YAML_BACKSLASH + 't';
-    else if (code < 0x20 || code === 0x7f) out += YAML_BACKSLASH + 'x' + code.toString(16).padStart(2, '0');
+    else if (yamlNeedsEscape(code)) out += YAML_BACKSLASH + 'u' + code.toString(16).padStart(4, '0');
     else out += ch;
   }
   return `"${out}"`;
 }
 
 globalThis.AdhocView = AdhocView;
+// Shared with History, which uses the same expansion to keep a retry
+// inside the hosts the recorded run was aimed at.
+globalThis.AnsbuiResolveTargetHosts = (target, hosts, groups) =>
+  resolveTargetHosts(target, hosts || [], buildTargetDescendants(groups || []));
