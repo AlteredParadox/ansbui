@@ -68,9 +68,36 @@ func confineToWorkDirScript(workDir, rel string) string {
 	if workDir == "" {
 		workDir = "."
 	}
-	return `WD=$(realpath -e -- ` + shellQuote(workDir) + `) || { echo "workDir not found on control node" >&2; exit 3; }; ` +
-		`TGT=$(realpath -m -- "$WD"/` + shellQuote(rel) + `) || { echo "cannot resolve target path" >&2; exit 3; }; ` +
+	return resolveExact("WD", `-e -- `+shellQuote(workDir), "workDir not found on control node") + `; ` +
+		resolveExact("TGT", `-m -- "$WD"/`+shellQuote(rel), "cannot resolve target path") + `; ` +
 		`case "$TGT" in "$WD"/*) ;; *) echo "refusing: path resolves outside the configured workDir (symlinked directory?)" >&2; exit 3;; esac`
+}
+
+// resolveExact emits shell that assigns realpath's output to the
+// variable name, byte for byte, or prints failMsg and exits 3.
+//
+// A plain NAME=$(realpath ...) is not byte for byte: command
+// substitution strips trailing newlines, and a newline is a legal
+// character in a file name. That turned the confinement check into a
+// check of a different path from the one realpath resolved. Take a
+// link `a` whose target is the name "b" followed by a newline — a name
+// that does not exist — beside a second link `b` pointing out of the
+// tree. realpath resolves `a` to "<workDir>/b\n" and stops there (-m
+// tolerates the missing last component). The substitution dropped the
+// newline, the check saw "<workDir>/b" and passed it as in-tree, and
+// the command that followed opened `b`: a symlink, and the escape the
+// check exists to prevent.
+//
+// So a sentinel is printed after the path and removed again: the
+// substitution then ends in the sentinel, has no trailing newline to
+// strip, and what is left after removing realpath's own line ending
+// plus the sentinel is the exact physical path. A name that really
+// ends in a newline stays that name — nonexistent in the case above,
+// so the read or write that follows fails instead of following a
+// second link.
+func resolveExact(name, realpathArgs, failMsg string) string {
+	return name + `=$(realpath ` + realpathArgs + ` && printf .) || { echo "` + failMsg + `" >&2; exit 3; }; ` +
+		name + `=${` + name + `%$'\n'.}`
 }
 
 // readFileInWorkDir cats rel (confined to workDir — see
@@ -105,8 +132,8 @@ func confineParentToWorkDirScript(workDir, rel string) string {
 	}
 	// validateRelPath guarantees rel has no "", ".", ".." segments,
 	// so Dir/Base split cleanly ("." parent for top-level files).
-	return `WD=$(realpath -e -- ` + shellQuote(workDir) + `) || { echo "workDir not found on control node" >&2; exit 3; }; ` +
-		`TGTD=$(realpath -m -- "$WD"/` + shellQuote(path.Dir(rel)) + `) || { echo "cannot resolve target directory" >&2; exit 3; }; ` +
+	return resolveExact("WD", `-e -- `+shellQuote(workDir), "workDir not found on control node") + `; ` +
+		resolveExact("TGTD", `-m -- "$WD"/`+shellQuote(path.Dir(rel)), "cannot resolve target directory") + `; ` +
 		`case "$TGTD"/ in "$WD"/*) ;; *) echo "refusing: path resolves outside the configured workDir (symlinked directory?)" >&2; exit 3;; esac; ` +
 		`TGT="$TGTD"/` + shellQuote(path.Base(rel))
 }
@@ -121,21 +148,31 @@ func confineParentToWorkDirScript(workDir, rel string) string {
 //
 // Hardening (see atomicWriteScriptFor for the script itself):
 //   - `set -eo pipefail` so any pipeline failure aborts before chmod/mv.
-//   - EXIT trap removes the `*.tmp.$$` if anything goes wrong midway
+//   - the temp file is created by mktemp: exclusively, under an
+//     unpredictable name, mode 0600. It gets the destination's mode
+//     only once the content is complete, just before the rename.
+//   - EXIT trap removes the temp file if anything goes wrong midway
 //     (other than SIGKILL, which bash can't trap).
 //   - `[ -L "$TGT" ]` refuses to write when the destination is a
 //     symlink. rename(2) wouldn't follow the link at the destination
 //     (it would replace the symlink with a regular file), so this is
 //     defense-in-depth against an honest-mistake symlink being
-//     destroyed and replaced with a regular file. A determined local
-//     racer can swap a regular file for a symlink between the check
-//     and the rename; accepted residual risk for a single-operator
-//     deployment.
+//     destroyed and replaced with a regular file. A directory at the
+//     destination is refused too, and `mv -T` keeps a directory that
+//     appears there later from being moved INTO.
 //   - mode bits are preserved via stat+chmod for files that already
 //     exist; new files get 0644 (matches the umask-default that the
 //     previous `>`-based writers would have produced). Owner is not
 //     preserved — the new file is owned by the SSH user, which for
 //     ansbui's typical setup is the operator who owns the workdir.
+//
+// Residual, accepted for a single-operator deployment: every step
+// after mktemp names the temp file and the destination by path again.
+// Another local user who can WRITE the destination's directory can
+// swap either for a symlink between two steps. Closing that needs the
+// write, chmod and rename done through one descriptor, which a shell
+// script cannot do; the alternative is not to let other users write
+// the playbook tree.
 //
 // Returns trimmed stderr (empty if the run succeeded) plus any
 // underlying error from the SSH execution. Callers should wrap the
@@ -174,19 +211,47 @@ func atomicWriteScript(full string) string {
 // is fsync'd (coreutils `sync FILE` = fsync) before the rename, and
 // the parent directory after it, so a control-node power loss can't
 // silently revert a write the API already reported as successful.
+//
+// The temp file. It used to be `<dest>.tmp.$$`, opened with a plain
+// `cat >`. Three things were wrong with that, all for another local
+// user on the control node:
+//
+//   - The file was created under the account's umask and only chmod'ed
+//     afterwards, so while a 0600 file (vault, group_vars) was being
+//     uploaded its NEW content sat in a 0644 file for the length of
+//     the upload — and anyone who opened it in that window kept
+//     reading after the chmod.
+//   - The name is predictable ($$ is a pid) and the open followed
+//     symlinks, so a link planted in advance at `<dest>.tmp.<pid>`
+//     for a range of upcoming pids sent the operator's content to a
+//     file of the planter's choosing, chmod'ed that file, and then
+//     renamed the LINK over the destination. No race needed.
+//   - The EXIT trap read a variable called TMP before the script had
+//     assigned it. A login environment that exports TMP (common: it
+//     is a conventional name for the temp directory) made every early
+//     exit run `rm -f` on that inherited value.
+//
+// mktemp creates the file exclusively (O_EXCL: a planted name is an
+// error, not something to follow), with a name nobody can plant in
+// advance, and `umask 077` makes it 0600 from its first byte. The
+// trap variable is assigned before the trap is installed, so nothing
+// inherited is ever acted on, and cleared after the rename.
 func atomicWriteScriptFor(q string) string {
 	return fmt.Sprintf(
-		`set -eo pipefail; trap '[ -n "${TMP:-}" ] && rm -f "$TMP"' EXIT; `+
-			`if [ -L %s ]; then echo "refusing to write through symlink" >&2; exit 2; fi; `+
-			`if [ -e %s ]; then PERM=$(stat -c '%%a' %s); else PERM=0644; fi; `+
-			`D=$(dirname -- %s); `+
-			`TMP=%s.tmp.$$; `+
-			`cat > "$TMP"; `+
-			`chmod "$PERM" "$TMP"; `+
-			`sync -- "$TMP"; `+
-			`mv "$TMP" %s; `+
+		`set -eo pipefail; ANSBUI_TMPF=; trap '[ -n "$ANSBUI_TMPF" ] && rm -f -- "$ANSBUI_TMPF"' EXIT; `+
+			`if [ -L %[1]s ]; then echo "refusing to write through symlink" >&2; exit 2; fi; `+
+			`if [ -d %[1]s ]; then echo "refusing to replace a directory" >&2; exit 2; fi; `+
+			`if [ -e %[1]s ]; then PERM=$(stat -c '%%a' -- %[1]s); else PERM=0644; fi; `+
+			`D=$(dirname -- %[1]s); `+
+			`umask 077; `+
+			`ANSBUI_TMPF=$(mktemp -- %[1]s.tmp.XXXXXXXXXX); `+
+			`cat > "$ANSBUI_TMPF"; `+
+			`chmod -- "$PERM" "$ANSBUI_TMPF"; `+
+			`sync -- "$ANSBUI_TMPF"; `+
+			`mv -T -- "$ANSBUI_TMPF" %[1]s; `+
+			`ANSBUI_TMPF=; `+
 			`sync -- "$D"`,
-		q, q, q, q, q, q,
+		q,
 	)
 }
 
