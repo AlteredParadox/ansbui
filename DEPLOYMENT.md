@@ -314,3 +314,24 @@ but both are good hygiene for a prod binary.
   ansbui redacts common password/token/key shapes, but arbitrary
   module output can still contain sensitive material under unusual
   names.
+
+  What is redacted: any extra-var or module argument whose **name**
+  contains `password`, `passphrase`, `passwd`, `token`, `secret`,
+  `api_key`, `private_key` or `credential`, or **ends in** `pass`
+  (`ansible_become_pass`, `ansible_ssh_pass`, …) — the whole value,
+  whatever its type, in the saved inputs and in the `$ …` command
+  line at the top of the run. The same names followed by `:` or `=`
+  are scrubbed from output lines, best effort. A secret passed under
+  any other name (`db_pw`, `auth`) is stored as typed.
+
+  Rules added in an upgrade are applied to the existing `runs.json`
+  the next time ansbui starts. They are **not** applied to copies
+  ansbui does not own: backups of the data directory, and the
+  `runs.json.bad-<timestamp>` files left when a corrupt history was
+  set aside. Releases before the one that added the `pass` and
+  `passwd` rules stored `ansible_become_pass` and friends in the
+  clear, and kept the tail of any secret containing a single quote,
+  or every element of a list-valued one, in the saved command line.
+  If such values were ever supplied through the UI, treat older
+  backups and `.bad-` files as holding them: delete what you do not
+  need, and rotate the passwords if those copies left the host.

@@ -10,7 +10,18 @@ import "regexp"
 // scrubbed while the same name echoed in module output or an HTTP
 // error body was written to runs.json in the clear. One list means
 // they can't drift apart again.
-const sensitiveWords = `password|passphrase|token|secret|api[_-]?key|apikey|private[_-]?key|credential`
+//
+// `passwd` and a key that ENDS in `pass` are in the list because that
+// is how Ansible itself spells its connection secrets:
+// ansible_become_pass, ansible_ssh_pass, ansible_sudo_pass,
+// ansible_su_pass. Without them an operator who supplied the fleet's
+// sudo password as an extra-var had it written to runs.json and served
+// back by the history API in the clear. `pass\b` rather than `pass`
+// so the match needs the word to end there: `ansible_become_pass` and
+// `dbPass` are secrets, `passed`, `passenger` and `pass_through_mode`
+// are not. It does take `bypass` and `compass` with it, which is the
+// cheap side to err on — a redacted flag, not a leaked password.
+const sensitiveWords = `password|passphrase|passwd|pass\b|token|secret|api[_-]?key|apikey|private[_-]?key|credential`
 
 // sensitiveKeyRE matches structured argument / extra-var keys whose
 // values should not be retained in run history. It intentionally
@@ -38,9 +49,18 @@ var sensitiveKeyRE = regexp.MustCompile(`(?i)(` + sensitiveWords + `)`)
 // brace, bracket, quote, newline) rather than to whitespace, so
 // multi-word passphrases are scrubbed whole. The key is preserved so
 // readers can tell a secret *was* present.
+//
+// A value that is a list or an object is taken up to its closing
+// bracket on the same line. The unquoted alternative used to get
+// those: it accepted the opening bracket and then stopped at the
+// first quote, so `"api_tokens": ["a","b"]` kept every token. One
+// level only — a nested value is cut at the first closing bracket —
+// which is why anything ansbui builds itself (the command preview,
+// the stored replay inputs) is redacted by key from the structured
+// value, never by this pattern alone.
 var redactRE = regexp.MustCompile(
 	`(?i)"?([\w.]*(?:` + sensitiveWords + `)[\w.]*)"?\s*[:=]\s*` +
-		`("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^,}\]"\n]+)`)
+		`("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|\[[^\]\n]*\]|\{[^}\n]*\}|[^,}\]"\n]+)`)
 
 // RedactText scrubs common credential key/value shapes from a single
 // line before it is streamed to the browser or written to disk.

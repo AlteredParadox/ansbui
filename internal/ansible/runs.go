@@ -256,25 +256,38 @@ func fsyncDir(dir string) error {
 	return nil
 }
 
-// List returns a copy of the current run records (already sorted newest
-// first).
+// List returns the run records, newest first, WITHOUT their logs: one
+// record's log is fetched with Get.
+//
+// Nothing is redacted here. Every record in r.runs already is — Append
+// redacts before storing and NewRecorder scrubs what it loads — and
+// that is the only place it can be done once. List used to run the
+// redaction pattern over every event of every retained log on each
+// call, under the mutex, and then its only caller threw the logs away:
+// about half a second per retained MiB during which run completion
+// (Append) and every inventory poll (LastPlayPerHost) waited. The
+// critical section is now O(number of runs).
 func (r *Recorder) List() []RunRecord {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	out := make([]RunRecord, len(r.runs))
 	for i, run := range r.runs {
-		out[i] = RedactRunRecord(run)
+		run.Log = nil
+		out[i] = run
 	}
 	return out
 }
 
-// Get fetches a single run record by id.
+// Get fetches a single run record by id, log included. The stored
+// record is already redacted (see List). The returned record shares
+// its log and replay-input maps with the store: read it, encode it,
+// don't modify it.
 func (r *Recorder) Get(id string) (RunRecord, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for _, run := range r.runs {
 		if run.ID == id {
-			return RedactRunRecord(run), true
+			return run, true
 		}
 	}
 	return RunRecord{}, false
