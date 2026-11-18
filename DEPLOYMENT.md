@@ -336,6 +336,35 @@ Optional env vars worth knowing about:
   mode off (the default) reinstall behaves exactly as before and
   the field is ignored.
 
+### SSH peers that stop answering
+
+Every command ansbui runs goes over an SSH session to a control node
+or, during bootstrap, to the machine being set up. A peer that logs
+in normally and then stops answering cannot hold ansbui's shared
+capacity (16 metadata queries, 8 runs, 4 bootstrap jobs):
+
+- A request for a new session or command that gets **no reply for
+  20 seconds** fails with *"the SSH server did not answer a session
+  request"* and ansbui **closes that connection**. Anything else
+  running over the same connection ends with it — a healthy `sshd`
+  answers in milliseconds, so this only happens on a link that is
+  already broken. The next request dials a new connection.
+- A request that is cancelled, times out or whose browser tab closes
+  returns at once, whether or not the peer has answered.
+- A cancelled command is sent `SIGTERM`, then its channel is closed
+  after 2 seconds; if the peer does not acknowledge the close within
+  another 5 seconds the connection is closed.
+- **Cancel** on a bootstrap job takes effect within a few seconds in
+  every state, including a job queued behind another bootstrap of the
+  same target.
+
+Bootstrap logs are bounded too. Text a target sends back (its
+`os-release`, command output, error messages) is cut to 16 KiB per
+log line with the middle removed, and a job keeps at most 2000 lines
+or 1 MiB — the same limits run history has always applied to ad-hoc
+and playbook runs. A log that hits a limit says so and still ends
+with the job's result.
+
 ## 8. Backup & restore
 
 Two paths matter:

@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/AlteredParadox/ansbui/internal/config"
@@ -217,45 +218,254 @@ func RunStdin(ctx context.Context, client *ssh.Client, cmd string, stdin io.Read
 	return so.buf.String(), se.buf.String(), err
 }
 
+// Bounds on the waits Stream makes for the peer. Every one of them is
+// a reply only the SSH server can send, so without a bound a control
+// node (or bootstrap target) that authenticates, keeps answering
+// keepalives and then goes quiet on the session channel parks the
+// caller for as long as it likes — holding a query slot, a run slot or
+// a bootstrap job slot that is shared by every other server.
+//
+//   - sessionOpenTimeout covers the channel-open confirmation plus the
+//     exec reply. A healthy sshd answers both in milliseconds (a full
+//     MaxSessions table is refused at once, not stalled), so a peer
+//     still silent after this long is broken or hostile.
+//   - termGrace is how long a cancelled command gets to exit on SIGTERM
+//     before its channel is closed.
+//   - closeAckTimeout is how long the peer gets to acknowledge that
+//     close. OpenSSH acknowledges immediately even when the child
+//     ignores the signal.
+//
+// When sessionOpenTimeout or closeAckTimeout expires the whole client
+// is closed. That is the only way to fail a pending channel-open or an
+// unacknowledged close, and it is deliberately tied to these fixed
+// timeouts rather than to the caller's context: a context can end for
+// reasons that say nothing about the peer (a closed tab, a short
+// request deadline), and closing a pooled client then would kill an
+// unrelated playbook run sharing the connection. A closed client fails
+// the pool's next health ping and is redialled.
+//
+// Held behind an atomic pointer so tests can shorten them while
+// reapers from an earlier Stream call are still reading; each call
+// loads the set once and keeps it.
+type peerLimits struct {
+	sessionOpenTimeout time.Duration
+	termGrace          time.Duration
+	closeAckTimeout    time.Duration
+}
+
+var currentPeerLimits atomic.Pointer[peerLimits]
+
+func init() {
+	currentPeerLimits.Store(&peerLimits{
+		sessionOpenTimeout: 20 * time.Second,
+		termGrace:          2 * time.Second,
+		closeAckTimeout:    5 * time.Second,
+	})
+}
+
+// errStreamEnded is what the gated writers return once Stream has
+// returned without the command finishing; it stops the session's copy
+// loops from touching the caller's buffers afterwards.
+var errStreamEnded = errors.New("ssh stream ended")
+
+// streamGate sits between an SSH session's copy goroutines and the
+// caller's stdin/stdout/stderr. Stream can return while those
+// goroutines are still alive (the peer never answered, or never
+// acknowledged a close); shutting the gate guarantees none of them
+// reads or writes the caller's values after that point.
+type streamGate struct {
+	mu     sync.Mutex
+	closed bool
+	stdin  io.Reader
+	stdout io.Writer
+	stderr io.Writer
+}
+
+func (g *streamGate) shut() {
+	g.mu.Lock()
+	g.closed = true
+	g.mu.Unlock()
+}
+
+func (g *streamGate) isShut() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.closed
+}
+
+func (g *streamGate) write(w io.Writer, p []byte) (int, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.closed {
+		return 0, errStreamEnded
+	}
+	if w == nil {
+		return len(p), nil
+	}
+	return w.Write(p)
+}
+
+type gateStdout struct{ g *streamGate }
+
+func (w gateStdout) Write(p []byte) (int, error) { return w.g.write(w.g.stdout, p) }
+
+type gateStderr struct{ g *streamGate }
+
+func (w gateStderr) Write(p []byte) (int, error) { return w.g.write(w.g.stderr, p) }
+
+// gateStdin deliberately does not hold the gate's mutex across Read:
+// a caller-supplied reader may block, and shut() must never wait on
+// it. Checking the flag first is enough — every stdin passed to Stream
+// is an in-memory reader the caller does not touch again.
+type gateStdin struct{ g *streamGate }
+
+func (r gateStdin) Read(p []byte) (int, error) {
+	if r.g.isShut() {
+		return 0, io.EOF
+	}
+	return r.g.stdin.Read(p)
+}
+
 // Stream opens a session and runs cmd, forwarding stdout and stderr to
 // the supplied writers line-by-line. If stdin is non-nil it's wired to
 // the session's stdin — used for piping vault passwords without putting
 // them in argv; pass nil for commands that don't need input. The
 // session is aborted if ctx is cancelled.
+//
+// Every wait on the peer is bounded (see peerLimits): Stream
+// returns when ctx ends even if the peer never answers the session
+// request, and after it returns nothing reads stdin or writes stdout
+// or stderr again.
 func Stream(ctx context.Context, client *ssh.Client, cmd string, stdin io.Reader, stdout, stderr io.Writer) error {
-	sess, err := client.NewSession()
+	g := &streamGate{stdin: stdin, stdout: stdout, stderr: stderr}
+	lim := *currentPeerLimits.Load()
+	sess, err := openSession(ctx, client, cmd, g, lim)
 	if err != nil {
-		return fmt.Errorf("new session: %w", err)
-	}
-	defer sess.Close()
-	if stdin != nil {
-		sess.Stdin = stdin
-	}
-	sess.Stdout = stdout
-	sess.Stderr = stderr
-	if err := sess.Start(cmd); err != nil {
-		return fmt.Errorf("start command: %w", err)
+		return err
 	}
 	done := make(chan error, 1)
 	go func() { done <- sess.Wait() }()
 	select {
-	case <-ctx.Done():
-		_ = sess.Signal(ssh.SIGTERM)
-		// If the remote ignores SIGTERM we'd park forever on
-		// <-done; force the session shut after a short grace so
-		// Wait() returns and we don't leak a goroutine.
-		// Wait's own error is deliberately dropped on both receives
-		// below: the caller is told the run was cancelled (ctx.Err()),
-		// which is the cause; the receive only confirms Wait returned.
-		select {
-		case <-done: //nolint:errcheck // superseded by ctx.Err()
-		case <-time.After(2 * time.Second):
-			_ = sess.Close()
-			<-done //nolint:errcheck // superseded by ctx.Err()
-		}
-		return ctx.Err()
 	case err := <-done:
+		// Wait returned, so the copy loops are finished and the peer
+		// is answering; a plain Close cannot stall here.
+		_ = sess.Close()
 		return err
+	case <-ctx.Done():
+	}
+	// Wait's own error is deliberately dropped: the caller is told the
+	// run was cancelled (ctx.Err()), which is the cause.
+	stopSession(client, sess, done, lim)
+	g.shut()
+	return ctx.Err()
+}
+
+type openedSession struct {
+	sess *ssh.Session
+	err  error
+}
+
+// openSession opens a session channel and starts cmd on it, giving up
+// when ctx ends or sessionOpenTimeout passes. Neither wait can be
+// cancelled on its own (x/crypto/ssh takes no context for them), so
+// the work runs in a goroutine that is reaped afterwards:
+//
+//   - ctx ends first: return at once so the caller frees its slot. The
+//     goroutine keeps the remainder of sessionOpenTimeout; a command
+//     that still manages to start is stopped, and a peer that stays
+//     silent has its client closed.
+//   - the timeout passes first: close the client and report the peer.
+func openSession(ctx context.Context, client *ssh.Client, cmd string, g *streamGate, lim peerLimits) (*ssh.Session, error) {
+	res := make(chan openedSession, 1)
+	go func() {
+		sess, err := startSession(client, cmd, g)
+		res <- openedSession{sess, err}
+	}()
+	deadline := time.NewTimer(lim.sessionOpenTimeout)
+	select {
+	case r := <-res:
+		deadline.Stop()
+		return r.sess, r.err
+	case <-ctx.Done():
+		g.shut()
+		go reapAbandonedOpen(client, res, deadline, lim)
+		return nil, fmt.Errorf("waiting for the SSH session to open: %w", ctx.Err())
+	case <-deadline.C:
+		g.shut()
+		_ = client.Close()
+		return nil, fmt.Errorf("the SSH server did not answer a session request within %s — connection closed", lim.sessionOpenTimeout)
+	}
+}
+
+// reapAbandonedOpen finishes an open the caller stopped waiting for.
+func reapAbandonedOpen(client *ssh.Client, res <-chan openedSession, deadline *time.Timer, lim peerLimits) {
+	defer deadline.Stop()
+	select {
+	case r := <-res:
+		if r.sess == nil {
+			return
+		}
+		done := make(chan error, 1)
+		go func() { done <- r.sess.Wait() }()
+		stopSession(client, r.sess, done, lim)
+	case <-deadline.C:
+		_ = client.Close()
+	}
+}
+
+// startSession is the blocking half of openSession.
+func startSession(client *ssh.Client, cmd string, g *streamGate) (*ssh.Session, error) {
+	sess, err := client.NewSession()
+	if err != nil {
+		return nil, fmt.Errorf("new session: %w", err)
+	}
+	// The caller may have gone while the channel was opening. Do not
+	// fire a command nobody is waiting for at the control node.
+	if g.isShut() {
+		_ = sess.Close()
+		return nil, errStreamEnded
+	}
+	if g.stdin != nil {
+		sess.Stdin = gateStdin{g}
+	}
+	sess.Stdout = gateStdout{g}
+	sess.Stderr = gateStderr{g}
+	if err := sess.Start(cmd); err != nil {
+		_ = sess.Close()
+		return nil, fmt.Errorf("start command: %w", err)
+	}
+	return sess, nil
+}
+
+// stopSession ends a started command whose result nobody wants:
+// SIGTERM, then close the channel, then — only if the peer does not
+// acknowledge the close — close the client. Signal and Close each
+// write a packet and so can block behind a peer that has stopped
+// reading the socket; they run in their own goroutines and the client
+// close (a plain socket close) is what finally releases them.
+func stopSession(client *ssh.Client, sess *ssh.Session, done <-chan error, lim peerLimits) {
+	go func() { _ = sess.Signal(ssh.SIGTERM) }()
+	if waitFor(done, lim.termGrace) {
+		go func() { _ = sess.Close() }()
+		return
+	}
+	go func() { _ = sess.Close() }()
+	if waitFor(done, lim.closeAckTimeout) {
+		return
+	}
+	_ = client.Close()
+	waitFor(done, lim.closeAckTimeout)
+}
+
+// waitFor reports whether done delivered within d.
+func waitFor(done <-chan error, d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-done: //nolint:errcheck // the caller reports its own cause
+		return true
+	case <-t.C:
+		return false
 	}
 }
 

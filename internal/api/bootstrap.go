@@ -251,12 +251,13 @@ func BootstrapRunRecord(job *jobs.Job) (ansible.RunRecord, bool) {
 		return ansible.RunRecord{}, false
 	}
 	events := job.Events()
-	logEvents := make([]ansible.Event, 0, len(events)+1)
+	all := make([]ansible.Event, 0, len(events))
 	for _, e := range events {
-		logEvents = append(logEvents, ansible.Event{Type: e.Type, Text: e.Text})
+		all = append(all, ansible.Event{Type: e.Type, Text: e.Text})
 	}
-	logEvents = ensureTerminalEvent(logEvents, snap)
-	okCount, failCount := tallyOkFail(logEvents)
+	// Counted over everything the job kept, before the history caps.
+	okCount, failCount := tallyOkFail(all)
+	logEvents := ensureTerminalEvent(cappedHistory(all), snap)
 	status := "err"
 	if snap.Status == jobs.StatusSucceeded {
 		status = "ok"
@@ -280,6 +281,26 @@ func BootstrapRunRecord(job *jobs.Job) (ansible.RunRecord, bool) {
 		Log:       logEvents,
 		Args:      snap.Summary,
 	}, true
+}
+
+// cappedHistory applies the run-history caps (historyLog: per-event,
+// per-record and event-count limits, with a truncation marker) to a
+// finished job's events. Ad-hoc and playbook runs have always gone
+// through historyLog; bootstrap records were built beside it and so
+// reached runs.json at whatever size the target's output gave them.
+// When the caps cut the log short, the job's own closing event is
+// kept after the marker so the record still ends with the outcome.
+func cappedHistory(events []ansible.Event) []ansible.Event {
+	hist := historyLog{events: make([]ansible.Event, 0, len(events)+1)}
+	for _, e := range events {
+		hist.add(e)
+	}
+	if n := len(events); hist.truncated && n > 0 {
+		if last := events[n-1]; last.Type == "done" || last.Type == "fail" {
+			hist.events = append(hist.events, capEventStrings(ansible.RedactEvent(last)))
+		}
+	}
+	return hist.events
 }
 
 // ensureTerminalEvent synthesizes the terminal line when the

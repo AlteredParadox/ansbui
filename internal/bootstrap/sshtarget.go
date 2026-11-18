@@ -4,12 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/AlteredParadox/ansbui/internal/sshpool"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -447,42 +449,28 @@ func outputWasTruncated(s string) bool {
 // run executes cmd with the given stdin. Returns stdout + trimmed
 // stderr + the underlying error. Execution is bounded in time and
 // buffered output — see the constants above.
+//
+// The session itself goes through sshpool.Stream, which bounds every
+// wait on the target: the channel-open and exec replies, and the
+// acknowledgement of a close after a timeout or Cancel. Those used to
+// be plain blocking calls made before ctx was ever consulted, so a
+// target that authenticated and then went quiet on the session
+// channel held the job — and its slot, and the per-target lock — for
+// as long as it kept the TCP connection open, with Cancel doing
+// nothing. Stream returns when ctx ends and closes the client if the
+// target stays silent; this client belongs to the one job, so nothing
+// else is affected.
 func (s *targetSession) run(ctx context.Context, cmd, stdin string) (string, string, error) {
 	ctx, cancel := stepContext(ctx)
 	defer cancel()
-	sess, err := s.client.NewSession()
-	if err != nil {
-		return "", "", fmt.Errorf("new session: %w", err)
-	}
-	defer sess.Close()
 	so := &tailBuffer{max: targetStdoutMax}
 	se := &tailBuffer{max: targetStderrMax}
-	sess.Stdout = so
-	sess.Stderr = se
+	var in io.Reader
 	if stdin != "" {
-		sess.Stdin = strings.NewReader(stdin)
+		in = strings.NewReader(stdin)
 	}
-	if err := sess.Start(cmd); err != nil {
-		return "", "", fmt.Errorf("start: %w", err)
-	}
-	done := make(chan error, 1)
-	go func() { done <- sess.Wait() }()
-	select {
-	case e := <-done:
-		return so.String(), strings.TrimSpace(se.String()), e
-	case <-ctx.Done():
-		_ = sess.Signal(ssh.SIGTERM)
-		// Wait's own error is deliberately dropped on both receives
-		// below: the step reports ctx.Err(), which is the cause; the
-		// receive only confirms Wait returned.
-		select {
-		case <-done: //nolint:errcheck // superseded by ctx.Err()
-		case <-time.After(2 * time.Second):
-			_ = sess.Close()
-			<-done //nolint:errcheck // superseded by ctx.Err()
-		}
-		return so.String(), strings.TrimSpace(se.String()), ctx.Err()
-	}
+	err := sshpool.Stream(ctx, s.client, cmd, in, so, se)
+	return so.String(), strings.TrimSpace(se.String()), err
 }
 
 // shellQuote single-quotes s for safe embedding inside another

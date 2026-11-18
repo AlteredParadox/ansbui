@@ -76,32 +76,57 @@ const (
 	dnsTTLSeconds             = 300
 )
 
-// keyedMu is a process-local registry of named mutexes serialising
-// bootstrap operations that must not interleave. A single sync.Mutex
-// per key is enough because every WS handler lives in this process.
-// Entries are never evicted; the key space is operator-driven
-// (targets, inventory files, DNS records — hundreds at most), so the
-// map stays small. Callers take ownership of the returned mutex and
-// are responsible for unlocking; ctx cancellation isn't honoured
-// because each critical section is short and queueing a second
-// operator behind the lock is the correct UX.
+// keyedMu is a process-local registry of named locks serialising
+// bootstrap operations that must not interleave. One lock per key is
+// enough because every WS handler lives in this process. Entries are
+// never evicted; the key space is operator-driven (targets, inventory
+// files, DNS records — hundreds at most), so the map stays small.
+// Callers take ownership of the returned lock and are responsible for
+// unlocking.
 var (
 	keyedMuRegistry sync.Mutex
-	keyedMu         = map[string]*sync.Mutex{}
+	keyedMu         = map[string]*ctxLock{}
 )
+
+// ctxLock is a mutex whose Lock gives up when the caller's context
+// ends. The target lock is held for a whole bootstrap run — minutes,
+// or most of an hour with a reinstall — so a second job for the same
+// target queues behind it; with a plain sync.Mutex that queued job
+// ignored its own Cancel and kept one of the four job slots until the
+// first one finished.
+type ctxLock struct{ slot chan struct{} }
+
+func newCtxLock() *ctxLock { return &ctxLock{slot: make(chan struct{}, 1)} }
+
+// Lock acquires the lock, or returns ctx's error if ctx ends first.
+// A context that is already done never acquires, even when the lock
+// is free.
+func (l *ctxLock) Lock(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	select {
+	case l.slot <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (l *ctxLock) Unlock() { <-l.slot }
 
 // lockFor returns the mutex for (namespace, parts...). The namespace
 // makes each lock domain disjoint; parts are joined under a NUL
 // separator (which can't appear in a validated address, provider,
 // path, or fqdn) so keys from different domains — or with different
 // components — can never collide.
-func lockFor(namespace string, parts ...string) *sync.Mutex {
+func lockFor(namespace string, parts ...string) *ctxLock {
 	key := namespace + "\x00" + strings.Join(parts, "\x00")
 	keyedMuRegistry.Lock()
 	defer keyedMuRegistry.Unlock()
 	m, ok := keyedMu[key]
 	if !ok {
-		m = &sync.Mutex{}
+		m = newCtxLock()
 		keyedMu[key] = m
 	}
 	return m
@@ -112,7 +137,7 @@ func lockFor(namespace string, parts ...string) *sync.Mutex {
 // same form would otherwise race the SSH bootstrap: chpasswd runs
 // twice with different random passwords, the sshd-port flip
 // interleaves with another reload, etc.
-func lockTarget(ipPort string) *sync.Mutex { return lockFor("target", ipPort) }
+func lockTarget(ipPort string) *ctxLock { return lockFor("target", ipPort) }
 
 // lockInventory serialises the read-modify-write of one inventory
 // file on one control server. lockTarget only covers the *same*
@@ -120,14 +145,14 @@ func lockTarget(ipPort string) *sync.Mutex { return lockFor("target", ipPort) }
 // srv.Inventory, and their RMW cycles would interleave — the second
 // write silently erasing the first run's host though both report
 // success.
-func lockInventory(srv config.Server) *sync.Mutex {
+func lockInventory(srv config.Server) *ctxLock {
 	return lockFor("inventory", srv.ID, path.Join(srv.WorkDir, srv.Inventory))
 }
 
 // lockDNSRecord serialises the find→create window for one DNS record
 // set, so two concurrent bootstraps of the same fqdn with different
 // IPs can't both see zero records and both create a round-robin pair.
-func lockDNSRecord(recordType, fqdn string) *sync.Mutex {
+func lockDNSRecord(recordType, fqdn string) *ctxLock {
 	return lockFor("dns", recordType, strings.ToLower(fqdn))
 }
 
@@ -192,7 +217,10 @@ func Run(ctx context.Context, pool *sshpool.Pool, srv config.Server, req Request
 	}
 
 	mu := lockTarget(net.JoinHostPort(req.IP, strconv.Itoa(req.Port)))
-	mu.Lock()
+	if err := mu.Lock(ctx); err != nil {
+		emit("fail", "cancelled while waiting for another bootstrap of the same target to finish")
+		return err
+	}
 	defer mu.Unlock()
 
 	if err := runPorkbunStepIfNeeded(ctx, pool, srv, req, emit); err != nil {
@@ -982,7 +1010,9 @@ func ensureRecord(ctx context.Context, pb *porkbun.Client, recordType, domain, s
 	// prevent. lockTarget doesn't cover this (it keys on ip:port, and
 	// the racing runs have different IPs).
 	mu := lockDNSRecord(recordType, fqdn)
-	mu.Lock()
+	if err := mu.Lock(ctx); err != nil {
+		return fmt.Errorf("waiting for another bootstrap to finish with the %s record for %s: %w", recordType, fqdn, err)
+	}
 	defer mu.Unlock()
 	// Canonicalize ip so a mixed-case IPv6 input (`2001:DB8::1`)
 	// round-trips against porkbun's lowercased read-back. Without
@@ -1159,7 +1189,9 @@ func updateInventoryFile(ctx context.Context, pool *sshpool.Pool, srv config.Ser
 	// targetMu doesn't cover that, and the atomic write only makes
 	// each write safe, not the cycle.
 	mu := lockInventory(srv)
-	mu.Lock()
+	if err := mu.Lock(ctx); err != nil {
+		return fmt.Errorf("waiting for another bootstrap to finish editing the inventory: %w", err)
+	}
 	defer mu.Unlock()
 	cli, err := pool.Client(ctx, srv)
 	if err != nil {
@@ -1203,10 +1235,32 @@ func detectDistro(osRelease string) string {
 		line = strings.TrimSpace(line)
 		if strings.HasPrefix(line, "ID=") {
 			id := strings.Trim(strings.TrimPrefix(line, "ID="), `"`)
-			return strings.ToLower(id)
+			return clipOSReleaseValue(strings.ToLower(id))
 		}
 	}
 	return "unknown"
+}
+
+// osReleaseValueMax bounds a value read from the target's
+// /etc/os-release. Real IDs and version numbers are a few bytes
+// ("debian", "24.04"); the file's content is whatever the machine at
+// the other end chose to send, up to the 2 MiB stdout tail, and these
+// values are echoed into job events, error strings and the reinstall
+// wait loop's status line, which is repeated on every heartbeat.
+const osReleaseValueMax = 64
+
+// clipOSReleaseValue shortens v to osReleaseValueMax bytes and
+// replaces control characters, so the value is safe to print as it is.
+func clipOSReleaseValue(v string) string {
+	if len(v) > osReleaseValueMax {
+		v = strings.ToValidUTF8(v[:osReleaseValueMax], "") + "…"
+	}
+	return strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return '?'
+		}
+		return r
+	}, v)
 }
 
 func isDebianFamily(distro string) bool {
