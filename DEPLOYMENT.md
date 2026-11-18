@@ -408,6 +408,10 @@ policy:
   location." if it gets no answer**. A target that cannot reach it
   cannot be reinstalled;
 - `dl-cdn.alpinelinux.org` (**plain HTTP**): the installer;
+- the public resolvers `1.1.1.1` and `8.8.8.8` (and their IPv6
+  addresses) on TCP ports 443 and 80: the installer decides whether
+  it has a working network by connecting to them, and configures the
+  new system's network from the answer;
 - `cdimage.debian.org` or `cloud-images.ubuntu.com` (HTTPS): the OS
   image;
 - if the location answer is `CN`, `mirror.nju.edu.cn` instead of the
@@ -635,6 +639,30 @@ option reads only the public key.
 
 This describes the upstream script at the commit ansbui currently
 pins (`reinstallScriptCommit` in `internal/bootstrap/reinstall.go`).
+
+### Reinstall: when it starts failing
+
+The script is pinned, so it never changes under you. Everything it
+downloads does: the Alpine installer is rebuilt at every Alpine point
+release, the Debian and Ubuntu images about weekly, and upstream
+adapts the script to those changes only on its `main` branch. A pin
+that worked for months can therefore start failing without anything
+in ansbui having changed. Two things to do:
+
+- From a checkout of ansbui, run `scripts/check-reinstall-pin.sh`.
+  It downloads the pinned files and checks them against everything
+  ansbui depends on — the checksum, the rewrites ansbui applies, the
+  flags it passes, the output it parses — and that the location
+  lookup, the installer files and the OS images still answer. It runs
+  nothing from the script. A failure names what broke. A pass means
+  the pin is intact, **not** that a reinstall works.
+- If it passes and reinstalls still fail, the pin is probably too old
+  for today's installer and images. Compare with upstream: if the
+  current upstream script reinstalls the same machine by hand, update
+  ansbui to a release with a newer pin (or bump it — the steps are in
+  the comment above `reinstallScriptCommit`). A box that failed in
+  the installer stays up in the installer environment: `ssh root@host
+  -p 4242` with the bootstrap key and read `/reinstall.log`.
 
 ### SSH peers that stop answering
 

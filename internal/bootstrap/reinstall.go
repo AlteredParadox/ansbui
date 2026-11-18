@@ -123,17 +123,34 @@ var reinstallOSMatrix = map[string][]string{
 //
 //	curl -fsSL https://raw.githubusercontent.com/bin456789/reinstall/<sha>/reinstall.sh | sha256sum
 //
-// and update both constants in the same commit. Then re-read how the
-// new script fetches its installer and OS image, and bring that
-// DEPLOYMENT.md section in line with it.
-const reinstallScriptCommit = "52c5a29fba0cef139b1193eee1efe09879205f52"
+// and update both constants in the same commit. Then:
+//
+//   - run scripts/check-reinstall-pin.sh, which downloads the pinned
+//     files and checks every point this package depends on: the
+//     checksum, the three rewrites reinstallPrepScript applies, the
+//     flags it passes, the "Network Info" lines it parses, and the
+//     hold / error markers and log path the installer stage polls;
+//   - re-read how the new script fetches its installer and OS image,
+//     and bring that DEPLOYMENT.md section in line with it;
+//   - run one real reinstall against a disposable machine. Nothing in
+//     this repository can stand in for that.
+//
+// Do not let the pin age. The script's surroundings keep moving — the
+// Alpine installer it boots is rebuilt at every Alpine point release
+// and the OS images are rebuilt weekly — and upstream fixes what
+// breaks only on main. The pin before this one (52c5a29, 2026-06-28)
+// was 67 commits behind when reinstalls started failing in November
+// 2026 while the same day's upstream script worked.
+//
+// Current pin: upstream main as of 2026-11-18.
+const reinstallScriptCommit = "2fcd14b4564bc21740b85d473b4a140e283bf292"
 
 // reinstallScriptSHA256 is the expected sha256 of reinstall.sh at
 // reinstallScriptCommit. Verified on the target after download
 // before we hand it to bash. A mismatch aborts the run with a
 // clear error so the operator notices a tampered mirror or a
 // stale pin rather than silently running unverified code.
-const reinstallScriptSHA256 = "c7931dfa847adc41c58b60eceb3237ef7b2eb676e38e00efeb9b7e29274b70bc"
+const reinstallScriptSHA256 = "7627cd10d50b14ebec8960e0bd28cbe4d8d42a53d705cf7282295f4c767a540f"
 
 // reinstallConfhomeURL is the commit-pinned base URL for upstream
 // files. reinstallScriptURL fetches reinstall.sh from it, and
