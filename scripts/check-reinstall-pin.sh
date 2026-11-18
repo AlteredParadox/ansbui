@@ -48,12 +48,27 @@ failed=0
 ok() { echo "  ok    $*"; }
 bad() { echo "  FAIL  $*"; failed=1; }
 # has <file> <fixed string> <description>
-has() { if grep -qF -- "$2" "$1"; then ok "$3"; else bad "$3"; fi; }
+has() {
+	local file=$1 text=$2 what=$3
+	if grep -qF -- "$text" "$file"; then ok "$what"; else bad "$what"; fi
+}
 # answers <url>: the URL responds 2xx (redirects followed, headers only).
 answers() {
-	local code
-	code=$(curl -sS -o /dev/null -L -I --max-time 30 -w '%{http_code}' "$1" 2>/dev/null || true)
-	if [[ "$code" == 2* ]]; then ok "$1"; else bad "$1 (HTTP ${code:-none})"; fi
+	local url=$1 code
+	code=$(curl -sS -o /dev/null -L -I --max-time 30 -w '%{http_code}' "$url" 2>/dev/null || true)
+	if [[ "$code" == 2* ]]; then ok "$url"; else bad "$url (HTTP ${code:-none})"; fi
+}
+# function_body <name>: the text of a shell function in the pinned script.
+function_body() {
+	local name=$1
+	# From the line that is "name() {" to the next line that is only "}".
+	# Plain string comparison on the trimmed line, so no regex quoting.
+	awk -v head="${name}() {" '
+		{ line = $0; sub(/^[ \t]+/, "", line) }
+		line == head { on = 1 }
+		on { print }
+		on && line == "}" { exit }
+	' "$work/reinstall.sh"
 }
 
 echo "commit $commit"
@@ -123,15 +138,30 @@ has "$work/trans.sh" '/reinstall.log' 'the install log is /reinstall.log'
 
 echo "7. helpers and outside downloads answer"
 for f in trans.sh initrd-network.sh fix-eth-name.sh get-xda.sh ttys.sh; do answers "$base/$f"; done
-# The location lookup must answer with a loc= line or the script exits.
-if curl -sS -L --max-time 20 http://www.qualcomm.cn/cdn-cgi/trace 2>/dev/null | grep -q '^loc='; then ok "location lookup answers"; else bad "location lookup (http://www.qualcomm.cn/cdn-cgi/trace) gave no loc= line"; fi
+# The location lookup and the installer mirror are read out of the pinned
+# script, not written here, so the check follows what that script really
+# contacts. Upstream uses plain HTTP for both on purpose (DEPLOYMENT.md,
+# "Reinstall: what is and is not verified"); here only "does it answer" is
+# read from the replies.
+lookup=$(function_body is_in_china | grep -oE "curl -L [^ |]+" | head -1 | cut -d' ' -f3)
+if [[ -z "$lookup" ]]; then
+	bad "cannot find the location lookup in is_in_china()"
+elif curl -sS -L --max-time 20 "$lookup" 2>/dev/null | grep -q '^loc='; then
+	ok "location lookup answers ($lookup)"
+else
+	bad "location lookup ($lookup) gave no loc= line; the script exits without one"
+fi
+# The installer is the newest Alpine release in the script's own list,
+# from the mirror setos_alpine picks outside China.
 alpine=$(grep -m1 -oE "'alpine +[0-9.|]+'" "$work/reinstall.sh" | grep -oE '[0-9.]+' | tail -1)
-if [[ -n "$alpine" ]]; then
+mirror=$(function_body setos_alpine | grep -oE 'mirror=[^ ]+' | tail -1 | cut -d= -f2)
+if [[ -n "$alpine" && "$mirror" == *'$releasever' ]]; then
+	mirror=${mirror%'$releasever'}$alpine
 	for f in vmlinuz-virt initramfs-virt modloop-virt; do
-		answers "http://dl-cdn.alpinelinux.org/alpine/v$alpine/releases/x86_64/netboot/$f"
+		answers "$mirror/releases/x86_64/netboot/$f"
 	done
 else
-	bad "cannot tell which Alpine release the installer uses"
+	bad "cannot tell which Alpine release and mirror the installer uses"
 fi
 # The images for the OS matrix in reinstall.go (amd64).
 while read -r codename ver; do
