@@ -167,7 +167,7 @@ func RedactText(s string) string {
 	if s == "" {
 		return s
 	}
-	return redactRE.ReplaceAllString(s, "${1}: <REDACTED>")
+	return redactRE.ReplaceAllString(s, "${1}: "+redactedMarker)
 }
 
 // RedactEvent returns evt with its Text field scrubbed. Other fields
@@ -184,7 +184,7 @@ func RedactStringMap(in map[string]string) map[string]string {
 	out := make(map[string]string, len(in))
 	for k, v := range in {
 		if sensitiveKeyRE.MatchString(k) {
-			out[k] = "<REDACTED>"
+			out[k] = redactedMarker
 			continue
 		}
 		out[k] = RedactText(v)
@@ -199,7 +199,7 @@ func RedactAnyMap(in map[string]any) map[string]any {
 	out := make(map[string]any, len(in))
 	for k, v := range in {
 		if sensitiveKeyRE.MatchString(k) {
-			out[k] = "<REDACTED>"
+			out[k] = redactedMarker
 			continue
 		}
 		out[k] = redactAnyValue(v)
