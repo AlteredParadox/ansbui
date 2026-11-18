@@ -44,6 +44,7 @@ var webFS embed.FS
 func main() {
 	addr := flag.String("addr", "127.0.0.1:8787", "listen address (host:port). Default binds to loopback only. Exposing it requires an explicit override (e.g. -addr 0.0.0.0:8787); set a login password with -set-password and/or put a reverse proxy with auth in front.")
 	setPassword := flag.Bool("set-password", false, "prompt for a login password, store its hash in the config dir, and exit. Enables built-in authentication; re-run to rotate.")
+	allowUnauth := flag.Bool("allow-unauthenticated", false, "start even though no login password is set. Without this (or ANSBUI_ALLOW_UNAUTHENTICATED=1) ansbui refuses to start until -set-password has been run. Only for deployments where something else authenticates every request AND no other user or process on this host can reach the listen address.")
 	flag.Parse()
 
 	runsPath, err := runsPath()
@@ -67,7 +68,7 @@ func main() {
 		log.Fatalf("auth credential: %v", err)
 	}
 	warnIfExposed(*addr, credential != nil)
-	announceAuthPosture(credential, credPath)
+	announceAuthPosture(credential != nil, *allowUnauth || envTrue(allowUnauthenticatedEnv), credPath)
 
 	cfg, err := config.New()
 	if err != nil {
@@ -172,23 +173,62 @@ func persistBootstrapRun(runs *ansible.Recorder, j *jobs.Job) {
 	}
 }
 
-// announceAuthPosture logs the startup auth state and enforces
-// ANSBUI_AUTH_REQUIRED: a deployment that has opted into auth must
-// never silently fall back to the unauthenticated posture — an
-// incomplete restore, a missing data mount, or an accidental delete
-// of the credential file would otherwise expose the control plane
-// after the next restart. The env var lives in the service unit, not
-// the data dir, so it survives exactly the failures it guards
-// against.
-func announceAuthPosture(credential *auth.Credential, credPath string) {
-	if credential != nil {
-		log.Print("built-in authentication is enabled (login required).")
-		return
+// allowUnauthenticatedEnv is the environment form of the
+// -allow-unauthenticated flag, for service units that configure by
+// Environment= lines.
+const allowUnauthenticatedEnv = "ANSBUI_ALLOW_UNAUTHENTICATED"
+
+// authPosture is what ansbui does at startup about login: refuse to
+// start (fatal non-empty), or start and log notice.
+type authPosture struct {
+	fatal  string
+	notice string
+}
+
+// decideAuthPosture is the startup rule for built-in login.
+//
+// Without a password, every /api route — including the WebSocket
+// streams that run ansible — answers anyone who can connect. That
+// used to be the default, with a warning in the log. The listener is
+// a TCP port on loopback, and TCP carries no identity: every account
+// and every process on the host can connect to it, with or without a
+// reverse proxy in front, so "bound to loopback" or "the proxy does
+// the auth" never separated the operator from other local users. The
+// data directory is 0700 for exactly that separation; the API was the
+// open door beside it.
+//
+// So the unauthenticated mode is now something the operator asks for,
+// by flag or environment, and gets with a statement of what it means.
+//
+// ANSBUI_AUTH_REQUIRED keeps its meaning and wins over the opt-out: a
+// unit that sets both never starts without a credential. It guards
+// the case the opt-out reopens — the credential file going missing
+// (incomplete restore, unmounted data dir, accidental delete) under a
+// unit that still carries -allow-unauthenticated from before a
+// password was set.
+func decideAuthPosture(hasCredential, allowUnauthenticated, required bool, credPath string) authPosture {
+	switch {
+	case hasCredential && allowUnauthenticated:
+		return authPosture{notice: "built-in authentication is enabled (login required). ⚠  -allow-unauthenticated / " + allowUnauthenticatedEnv + " is also set: it has no effect while a password exists, but if the credential file were ever lost ansbui would start WITHOUT login. Remove it."}
+	case hasCredential:
+		return authPosture{notice: "built-in authentication is enabled (login required)."}
+	case required:
+		return authPosture{fatal: fmt.Sprintf("ANSBUI_AUTH_REQUIRED is set but no credential exists at %s — refusing to start unauthenticated. Restore the file or re-run `ansbui -set-password`.", credPath)}
+	case !allowUnauthenticated:
+		return authPosture{fatal: fmt.Sprintf("no login password is set (no credential at %s) — refusing to start. Run `ansbui -set-password` and start again. To run without built-in login, start with -allow-unauthenticated (or %s=1): do that only when something else authenticates every request AND no other user or process on this host can reach the listen address, because a reverse proxy does not protect the port from local connections.", credPath, allowUnauthenticatedEnv)}
+	default:
+		return authPosture{notice: "⚠  running WITHOUT built-in login (-allow-unauthenticated). Anyone who can connect to the listen address has full control of ansible on the control node — that includes every user and process on this host, whatever a reverse proxy in front requires. Run `ansbui -set-password` to require a login."}
 	}
-	if authRequired() {
-		log.Fatalf("ANSBUI_AUTH_REQUIRED is set but no credential exists at %s — refusing to start unauthenticated. Restore the file or re-run `ansbui -set-password`.", credPath)
+}
+
+// announceAuthPosture applies decideAuthPosture: exit, or log the
+// posture ansbui is starting in.
+func announceAuthPosture(hasCredential, allowUnauthenticated bool, credPath string) {
+	p := decideAuthPosture(hasCredential, allowUnauthenticated, authRequired(), credPath)
+	if p.fatal != "" {
+		log.Fatal(p.fatal)
 	}
-	log.Print("⚠  no login password is set — the web UI is UNAUTHENTICATED. Run `ansbui -set-password` to enable built-in auth, or keep it behind a reverse proxy / VPN.")
+	log.Print(p.notice)
 }
 
 // shutdown drains the HTTP server and the job manager in parallel.
@@ -246,15 +286,20 @@ func runSetPassword(path string) error {
 		return err
 	}
 	fmt.Fprintf(os.Stderr, "Password saved to %s. Restart ansbui for it to take effect.\n", path)
-	fmt.Fprint(os.Stderr, "Tip: set ANSBUI_AUTH_REQUIRED=1 in the service environment so ansbui refuses to start if this file ever goes missing (instead of falling back to unauthenticated).\n")
+	fmt.Fprint(os.Stderr, "If the service was started with -allow-unauthenticated or "+allowUnauthenticatedEnv+"=1, remove that now: with it set, ansbui would start without login if this file ever went missing.\n")
 	return nil
 }
 
 // authRequired reports whether the deployment has declared that
 // built-in auth must be configured (ANSBUI_AUTH_REQUIRED=1/true).
-// Same accepted values as ANSBUI_INSECURE_SSH.
-func authRequired() bool {
-	v := strings.TrimSpace(os.Getenv("ANSBUI_AUTH_REQUIRED"))
+func authRequired() bool { return envTrue("ANSBUI_AUTH_REQUIRED") }
+
+// envTrue reports whether an on/off environment variable is on: "1"
+// or "true" in any case, surrounding space ignored. Same accepted
+// values as ANSBUI_INSECURE_SSH. Anything else — including "yes" —
+// is off, so a typo never switches a protection off or an opt-out on.
+func envTrue(name string) bool {
+	v := strings.TrimSpace(os.Getenv(name))
 	return v == "1" || strings.EqualFold(v, "true")
 }
 
@@ -284,8 +329,10 @@ func warnIfExposed(addr string, authEnabled bool) {
 		log.Printf("ℹ  ansbui is reachable beyond loopback (%s) with built-in login enabled — for untrusted networks, terminate TLS in front so the password and session cookie don't travel in cleartext.", addr)
 		return
 	}
-	log.Printf("⚠  ansbui is reachable beyond loopback (%s) with NO authentication.", addr)
-	log.Print("⚠  Set a login password (-set-password) and/or put it behind an SSH tunnel, VPN, or reverse proxy with auth before exposing to untrusted networks.")
+	// Only reached when the operator opted out of login (or startup is
+	// about to be refused for want of a password).
+	log.Printf("⚠  ansbui is set to listen beyond loopback (%s) with NO login password.", addr)
+	log.Print("⚠  Set one (-set-password) before exposing it to any network you do not fully control.")
 }
 
 func runsPath() (string, error) {

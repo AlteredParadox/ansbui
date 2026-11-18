@@ -79,6 +79,20 @@ type Server struct {
 	// the per-source token-bucket backoff (see loginlimit.go). The
 	// zero value is ready to use.
 	loginLimit loginLimiter
+
+	// clock, when set, replaces time.Now for the login throttle, whose
+	// behaviour is a function of elapsed time. Tests set it; a test
+	// that reads the wall clock while verifying real argon2 hashes
+	// passes or fails with the load on the machine.
+	clock func() time.Time
+}
+
+// now is the server's notion of the current time (see clock).
+func (s *Server) now() time.Time {
+	if s.clock != nil {
+		return s.clock()
+	}
+	return time.Now()
 }
 
 func (s *Server) geoResolver() *geoResolver {

@@ -2,11 +2,14 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/AlteredParadox/ansbui/internal/auth"
 )
@@ -22,7 +25,14 @@ func authTestServer(t *testing.T, password string) *Server {
 	if err != nil || cred == nil {
 		t.Fatalf("LoadCredential: %v", err)
 	}
-	return &Server{Credential: cred, Sessions: auth.NewSessionStore()}
+	// The login throttle refills by elapsed time, and each attempt
+	// here verifies a real argon2 hash — a second or more apiece under
+	// the race detector on a busy machine. Read from the wall clock,
+	// the throttle tests passed or failed with the machine's load (a
+	// token refilled mid-test). A fixed clock makes them say the same
+	// thing everywhere.
+	fixed := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	return &Server{Credential: cred, Sessions: auth.NewSessionStore(), clock: func() time.Time { return fixed }}
 }
 
 func login(t *testing.T, s *Server, password string) *http.Cookie {
@@ -176,6 +186,72 @@ func TestAuth_LoginThrottleDoesNotLockOutOtherSources(t *testing.T) {
 	// Operator on a different IP logs straight in.
 	if code := attempt("10.0.0.5:6000", "pw"); code != http.StatusOK {
 		t.Fatalf("operator login while attacker throttled = %d, want 200", code)
+	}
+}
+
+// The lockout an IPv6 client could cause: cycling through addresses
+// of its own /64 it was never throttled, kept both verification slots
+// busy, and the operator — different address, correct password — got
+// 429 "already being verified" for as long as it went on. Now the /64
+// is one source with one budget and one slot.
+func TestAuth_OneSubnetCannotLockOutTheOperator(t *testing.T) {
+	s := authTestServer(t, "pw")
+	attempt := func(remoteAddr, password string) int {
+		r := httptest.NewRequest(http.MethodPost, "/api/login", strings.NewReader(`{"password":`+quote(password)+`}`))
+		r.RemoteAddr = remoteAddr
+		w := httptest.NewRecorder()
+		s.handleLogin(w, r)
+		return w.Code
+	}
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	codes := map[int]int{}
+	for g := range 4 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; ; i++ {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				// A different address of the same /64 every time.
+				code := attempt(fmt.Sprintf("[2001:db8:0:1::%x:%x]:4242", g+1, i+1), "nope")
+				mu.Lock()
+				codes[code]++
+				mu.Unlock()
+			}
+		}()
+	}
+
+	// Let the flood get going, then log in as the operator.
+	time.Sleep(200 * time.Millisecond)
+	for i := range 3 {
+		if code := attempt("198.51.100.9:6000", "pw"); code != http.StatusOK {
+			close(stop)
+			wg.Wait()
+			t.Fatalf("operator login %d during the flood = %d, want 200", i, code)
+		}
+	}
+	close(stop)
+	wg.Wait()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if codes[http.StatusOK] != 0 {
+		t.Fatalf("a wrong password was accepted: %v", codes)
+	}
+	// The clock is fixed, so nothing refills: the whole /64 gets one
+	// burst of real password checks and everything else is refused
+	// without one.
+	if got := codes[http.StatusUnauthorized]; got > loginBurst {
+		t.Fatalf("%d password checks for one /64, budget is %d (%v)", got, loginBurst, codes)
+	}
+	if codes[http.StatusTooManyRequests] == 0 {
+		t.Fatalf("the flood was never refused: %v", codes)
 	}
 }
 

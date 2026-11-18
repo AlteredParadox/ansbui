@@ -9,15 +9,23 @@ Type=simple
 User=ansbui
 Group=ansbui
 WorkingDirectory=/opt/ansbui
+# ansbui refuses to start until a login password exists. Set one
+# first (see DEPLOYMENT.md section 0):
+#   sudo -u ansbui ANSBUI_CONFIG=/opt/ansbui/data/config.json \
+#     /opt/ansbui/bin/ansbui -set-password
+# To run WITHOUT the built-in login, add -allow-unauthenticated here.
+# Do that only if a reverse proxy authenticates every request AND no
+# other user or process on this host can connect to the port below:
+# the proxy does not stand between local processes and 127.0.0.1.
 ExecStart=/opt/ansbui/bin/ansbui -addr 127.0.0.1:8787
 Restart=on-failure
 RestartSec=3
 Environment=ANSBUI_CONFIG=/opt/ansbui/data/config.json
 Environment=ANSBUI_RUNS=/opt/ansbui/data/runs.json
 Environment=HOME=/opt/ansbui
-# Uncomment after `ansbui -set-password`: refuse to start (instead of
-# falling back to an UNAUTHENTICATED UI) if the credential file is
-# ever missing — e.g. an incomplete restore or unmounted data dir.
+# Refuse to start without a credential even if -allow-unauthenticated
+# is (still) on the command line. Redundant while that flag is absent,
+# since a missing credential already stops the start.
 #Environment=ANSBUI_AUTH_REQUIRED=1
 
 # --- Hardening (systemd-analyze security baseline) ---

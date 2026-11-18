@@ -5,9 +5,10 @@ user, so "can reach the port and get past auth" = "can run anything
 ansible can". This doc is the checklist for getting from `go build`
 to a production deployment.
 
-## 0. Built-in login (optional but recommended)
+## 0. Built-in login
 
-ansbui ships an optional single-operator login. Set a password:
+ansbui has a single-operator login and **does not start without
+it**. Set a password before the first start:
 
 ```
 sudo -u ansbui ANSBUI_CONFIG=/opt/ansbui/data/config.json \
@@ -28,34 +29,69 @@ TLS or a proxy that sets `X-Forwarded-Proto: https`). Sessions are
 held in memory — a restart logs the operator out — with a 12h idle
 timeout and a 7-day absolute cap.
 
-Failed logins are throttled with a per-source-IP token bucket: five
-attempts of burst, one refilling every three seconds. Recovery is
-purely time-based — throttled requests consume nothing and failures
-never push it out — so a hostile client can't extend a lockout, and
-the bucket is scoped per IP so it can't lock the operator out either.
-The number of concurrently-verifying attempts is also capped globally
-to bound argon2's memory cost.
+Failed logins are throttled per source: five attempts of burst, one
+refilling every three seconds. Recovery is purely time-based —
+throttled requests consume nothing and failures never push it out —
+so a hostile client can't extend a lockout. A source is an IPv4
+address or, for IPv6, the **/64** the address is in (one host
+controls every address of its /64, so keying on the exact address
+gave it a fresh budget for each). Two more limits protect the
+password check itself, which is deliberately expensive (argon2):
+at most two checks run at once, and one source can have only one in
+progress. An attempt that finds both slots busy waits up to three
+seconds for one before answering `429`.
+
+What this does and does not give you:
+
+- **One client cannot lock the operator out.** Its failures spend
+  only its own budget, and it can occupy only one of the two slots.
+- **Many clients can still get in the way.** A sender with addresses
+  in many networks (a botnet, or one routed IPv6 prefix wider than a
+  /64) has many sources. Each gets its own budget, and between them
+  they can keep both slots busy, so a real login may wait and then
+  get `429` while that lasts. Guessing speed stays bounded by the two
+  slots and argon2's cost; existing sessions are unaffected. ansbui
+  cannot tell such senders apart from separate users — rate-limit
+  `/api/login` at the proxy, or do not expose it to them.
+- **Clients behind one address share a budget** (a NAT, or a proxy
+  that is not listed in `ANSBUI_TRUSTED_PROXIES`): an attacker there
+  cannot extend the lockout but does race the operator for each
+  refilled token.
 
 Behind a reverse proxy every client reaches ansbui from the proxy's
 IP. Set `ANSBUI_TRUSTED_PROXIES` to the proxy's address(es) (IPs or
 CIDRs, e.g. `127.0.0.1` for a same-host Caddy) and ansbui attributes
-login attempts to the rightmost non-trusted `X-Forwarded-For` hop —
-the address the proxy itself recorded, which a client can't forge.
-Without it, all proxied clients share one bucket: an attacker still
-can't extend the lockout (see above), but does race the operator for
-each refilled token — so either set the variable or rate-limit logins
-at the proxy. `X-Forwarded-For` is never believed unless the
-connection comes from a listed proxy. Clients behind one NAT
-genuinely share an address and therefore a bucket; that contention
-has no in-band fix.
+login attempts to the rightmost non-trusted `X-Forwarded-For` hop.
+`X-Forwarded-For` is never believed unless the connection comes from
+a listed proxy. Two things that setting relies on:
+
+- **The proxy must write the client's address into the header
+  itself.** ansbui cannot tell a hop the proxy appended from one the
+  client sent and the proxy passed along. Caddy's `reverse_proxy`
+  sets the header by default. **nginx does not**: a plain
+  `proxy_pass` relays whatever `X-Forwarded-For` the client sent, so
+  every client picks its own throttle bucket — a fresh budget per
+  request, or someone else's address to exhaust. With nginx you need
+  `proxy_set_header X-Forwarded-For $remote_addr;` (section 2 has the
+  full block). Check any other proxy the same way: send a request
+  with a made-up `X-Forwarded-For` and look at what reaches ansbui.
+- **Everything that connects from a listed address is believed.**
+  With `127.0.0.1` listed, that is the proxy and also every other
+  process on the host: any of them can connect to ansbui's port
+  directly and claim any client address, to dodge the throttle or to
+  use up the operator's budget. The password is still required, so
+  this affects throttling only. Closing it needs the proxy and ansbui
+  to share something a local process lacks (a Unix socket with
+  restricted permissions, or a secret header), which ansbui does not
+  have yet; until then, treat other local accounts on the ansbui host
+  as able to interfere with login throttling.
 
 Cookie-session login is deliberately the **only** authentication
 mechanism — there is no separate API-token scheme. Non-browser
-clients (curl, scripts) hitting `/api/*` on a password-protected
-instance must either present a session cookie from `POST /api/login`
-or go through whatever auth the reverse proxy adds. Enabling a
-password will therefore break any unauthenticated API consumer you
-may have pointed at the instance — that's the point.
+clients (curl, scripts) hitting `/api/*` must present a session
+cookie from `POST /api/login`, in addition to whatever auth the
+reverse proxy asks for. An API consumer that sends neither gets
+`401` — that's the point.
 
 Separately from login, a script must send the header
 `X-Ansbui-Request: 1` on the API reads that make ansbui contact the
@@ -77,38 +113,75 @@ state (`/api/health`, `/api/auth/status`, `/api/servers`,
 `/api/settings`, `/api/runs`, `/api/bootstrap/jobs`) and all
 `POST`/`PUT`/`DELETE` requests do not need it.
 
-When **no** credential is set ansbui runs UNAUTHENTICATED (the
-historical posture) and logs a loud startup warning; the reverse
-proxy below is then mandatory, not optional. Built-in login and a
-proxy compose fine — defence in depth. Note the login is
-single-operator with no roles; for multi-user or SSO, terminate auth
-at the proxy (oauth2-proxy / authelia).
+### Running without the built-in login
 
-After setting the password, add `ANSBUI_AUTH_REQUIRED=1` to the
-service environment (there's a commented line in
-`deploy/ansbui.service`). With it set, ansbui **refuses to start**
-when the credential file is missing instead of silently falling back
-to the unauthenticated posture — which is what would otherwise
-happen after an incomplete restore, an unmounted data dir, or an
-accidental delete. The variable lives in the unit file precisely so
-it survives the loss of the data dir it guards.
+With **no** credential file ansbui refuses to start:
+
+```
+no login password is set (no credential at …/auth_credential) — refusing to start.
+```
+
+This is also what happens after an incomplete restore, an unmounted
+data dir or an accidental delete of the file: the service stays down
+instead of coming up open.
+
+Starting without a password is possible, by asking for it: the
+`-allow-unauthenticated` flag, or `ANSBUI_ALLOW_UNAUTHENTICATED=1` in
+the environment. Every `/api` route, including the WebSockets that
+run ansible, then answers whoever can connect. Before choosing it,
+note what "can connect" means:
+
+- **A loopback bind does not limit access to you.** `127.0.0.1:8787`
+  is a TCP port, and TCP has no notion of which user is connecting.
+  Every account on the host, and every process running there
+  (a compromised web app, a CI job, a container sharing the host
+  network), can open it. The data directory is `0700` so those same
+  accounts cannot read `config.json` or `runs.json`; without a login,
+  the API hands them the same contents and more.
+- **A reverse proxy with auth does not change that.** The proxy
+  authenticates what comes through the proxy. A local process does
+  not go through it; it connects to the backend port directly.
+
+So the opt-out fits a machine that only the operator uses, or a
+network namespace or firewall rule that keeps everything except the
+proxy away from the port. Otherwise set a password, with or without
+a proxy in front. The two compose: the proxy for TLS, SSO or several
+users (oauth2-proxy / authelia), the built-in password so the backend
+port is not open behind it. The login itself is single-operator with
+no roles.
+
+**Upgrading from a release that started without a password:** the
+service will not come up until you either run `-set-password` or add
+the opt-out. If you add the opt-out and set a password later, take
+the opt-out out again — ansbui logs a reminder at every start while
+both are present, because a lost credential file would then start it
+without login. `ANSBUI_AUTH_REQUIRED=1` is still honoured and beats
+the opt-out: with it set there is no start without a credential,
+whatever else the unit says. On its own it no longer changes
+anything.
 
 ## 1. Loopback bind
 
 The default since `9003515` is `127.0.0.1:8787`. Don't override
-unless there's something authenticated in front (built-in login
-and/or a proxy). The startup warning fires when `-addr` resolves to
-a non-loopback host — treat it as a deployment-time error, not a
-notice.
+unless TLS terminates in front. The startup warning fires when
+`-addr` resolves to a non-loopback host — treat it as a
+deployment-time error, not a notice.
+
+Loopback keeps other *machines* out. It does not keep other *users
+of this machine* out: any local account or process can connect to
+the port. The built-in login (section 0) is what stands between them
+and the API.
 
 ## 2. Reverse proxy with auth
 
-Put ansbui behind nginx / Caddy / Apache and require auth on every
-request — unless you've set a built-in login password (section 0)
-and accept single-operator access. ansbui's `withOriginGuard`
+Put ansbui behind nginx / Caddy / Apache for TLS, and for auth if
+you need more than the single built-in password (several users,
+SSO). Keep the built-in password as well: proxy auth covers requests
+that come through the proxy, and anything on the ansbui host can
+connect to the backend port without going through it (section 0,
+"Running without the built-in login"). ansbui's `withOriginGuard`
 middleware mitigates browser CSRF but doesn't substitute for
-authentication — anyone who can TCP-connect to an instance with no
-password set bypasses both.
+authentication.
 
 Caddy is the easiest:
 
@@ -118,6 +191,37 @@ ansbui.example.com {
     reverse_proxy 127.0.0.1:8787
     basicauth {
         admin <bcrypt-hash>
+    }
+}
+```
+
+The same with nginx. The two `X-Forwarded-*` lines are not optional
+(see the list below for what each one is for), and nginx sends
+neither unless told to:
+
+```
+server {
+    listen 443 ssl;
+    server_name ansbui.example.com;
+    # ssl_certificate / ssl_certificate_key …
+
+    auth_basic           "ansbui";
+    auth_basic_user_file /etc/nginx/ansbui.htpasswd;
+
+    location / {
+        proxy_pass http://127.0.0.1:8787;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        # $remote_addr, not $proxy_add_x_forwarded_for: this proxy is
+        # the first hop, so the connecting address is the client and
+        # nothing the client sent belongs in the header.
+        proxy_set_header X-Forwarded-For   $remote_addr;
+
+        # WebSocket run streams (/api/adhoc/stream, /api/playbook/stream, …)
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade    $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_read_timeout 1h;
     }
 }
 ```
@@ -138,9 +242,13 @@ the proxy should:
   it by default; for nginx add
   `proxy_set_header X-Forwarded-Proto $scheme;` next to
   `proxy_set_header Host $host;`
-- be listed in `ANSBUI_TRUSTED_PROXIES` (and forward
-  `X-Forwarded-For`, which nginx/Caddy do by default) so login
-  throttling sees real client IPs instead of one shared proxy IP
+- be listed in `ANSBUI_TRUSTED_PROXIES` **and set `X-Forwarded-For`
+  to the connecting client's address itself**, so login throttling
+  sees real client IPs instead of one shared proxy IP. Caddy does
+  this by default. nginx does not: without
+  `proxy_set_header X-Forwarded-For $remote_addr;` it passes on
+  whatever the client sent, and each client then chooses the address
+  it is throttled as (section 0)
 - authenticate every request, including the WebSocket run streams.
   These live under `/api/`, NOT a separate `/ws/` prefix, so a proxy
   rule that only guards `/ws/*` protects nothing. The upgrade
@@ -386,12 +494,12 @@ Two paths matter:
   every bootstrap until it is fixed — it is never read as "no
   record".
 - `/opt/ansbui/data/auth_credential` — the argon2id login password
-  hash (0600), present only if you ran `-set-password`. Losing it
-  disables built-in auth on next start (falls back to the
-  unauthenticated posture) — unless `ANSBUI_AUTH_REQUIRED=1` is set
-  in the unit, in which case ansbui refuses to start until you
-  restore it or re-run `-set-password` (see section 0; recommended).
-  It's a slow hash, not plaintext, but treat it as sensitive.
+  hash (0600), written by `-set-password`. Without it ansbui refuses
+  to start until you restore it or re-run `-set-password` — unless
+  the unit carries the `-allow-unauthenticated` opt-out, in which
+  case it would start with no login (see section 0; one more reason
+  to remove the opt-out once a password exists). It's a slow hash,
+  not plaintext, but treat it as sensitive.
 
 A nightly tar-and-restic of `/opt/ansbui/data/` covers both. To
 restore: stop the service, replace the directory, restart.
@@ -467,7 +575,11 @@ rewritten for you; these are worth one look after an upgrade.
 
 ## 10. What's still on the operator
 
-- Auth in front of the proxy.
+- Keeping the built-in login password set, and strong: it is the only
+  thing between other accounts on the ansbui host and the API.
+- Rate-limiting `/api/login` at the proxy if it is reachable from
+  networks you do not control (section 0 explains what the built-in
+  throttle cannot bound).
 - Rotation of `KeyPath` SSH keys when staff turn over.
 - Watching the upstream Go security advisories — `govulncheck`
   runs in CI but a published CVE doesn't update your binary.
