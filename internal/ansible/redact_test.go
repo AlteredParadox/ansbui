@@ -88,6 +88,20 @@ func TestRedactTextSecretKeyShapes(t *testing.T) {
 		{"yaml flow list", `deploy_tokens: [SHHH-a, SHHH-b]`},
 		{"json object", `"registry_credential": {"user":"ci","key":"SHHH"}`},
 		{"list after other keys", `{"region":"eu","db_password":["SHHH"],"zone":"a"}`},
+		// A closing bracket inside a quoted string does not end the
+		// value. Stopping there left the rest of the string behind
+		// AND put the scan out of step with the quotes, so the
+		// secret-named key inside was never matched either.
+		{"brace inside a nested secret", `{"credentials":{"password":"abc},SHHH"}}`},
+		{"bracket inside a list element", `"api_tokens": ["a]b","SHHH"]`},
+		{"brace inside a single-quoted value", `registry_credential: {'a}b': 'SHHH'}`},
+		{"escaped quote then a brace", `{"secret":{"k":"a\"},SHHH"}}`},
+		{"nested object, secret after it", `{"credentials":{"a":{"b":1},"password":"SHHH"}}`},
+		{"nested list, secret after it", `"tokens": [["x"],"SHHH"], "api_token": "SHHH"`},
+		{"object in object, unnamed key after it", `"registry_credential": {"a":{"b":1},"k":"SHHH"}`},
+		{"yaml list in list", `deploy_tokens: [[a, b], SHHH]`},
+		{"list of objects", `"api_tokens": [{"v":"SHHH"},{"v":"SHHH"}]`},
+		{"object holding lists", `secret: {"keys":["SHHH","SHHH"],"n":[1,2]}`},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -137,6 +151,7 @@ func TestRedactTextPreservesNonSecrets(t *testing.T) {
 		// A list or object under an ordinary key is left alone.
 		`"tags": ["a","b"]`,
 		`ok: [web1] => {"ports": [80, 443]}`,
+		`"matrix": [[1,2],[3,4]], "meta": {"a":{"b":"c"}}`,
 	}
 	for _, s := range keep {
 		if got := RedactText(s); got != s {

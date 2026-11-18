@@ -357,3 +357,86 @@ func startExitingSSHServer(t *testing.T, seen *execLog) string {
 	}()
 	return ln.Addr().String()
 }
+
+// Requests that cannot be turned into a command are refused before
+// anything is sent, and the run still leaves an error event behind:
+// the persisted status is derived from the event stream alone.
+func TestRunsRefuseUnbuildableRequests(t *testing.T) {
+	srv := config.Server{WorkDir: "/srv/ansible"}
+	cases := []struct {
+		name string
+		run  func(out chan<- Event) error
+		want string
+	}{
+		{"ad-hoc without a target", func(out chan<- Event) error {
+			return RunAdhoc(context.Background(), nil, srv, AdhocRequest{Module: "ansible.builtin.ping"}, out)
+		}, "target is required"},
+		{"ad-hoc without a module", func(out chan<- Event) error {
+			return RunAdhoc(context.Background(), nil, srv, AdhocRequest{Target: "all"}, out)
+		}, "module is required"},
+		{"playbook path that leaves the tree", func(out chan<- Event) error {
+			return RunPlaybook(context.Background(), nil, srv, PlaybookRequest{Path: "../site.yml"}, out)
+		}, ""},
+		{"extra-var with an unsafe name", func(out chan<- Event) error {
+			return RunPlaybook(context.Background(), nil, srv, PlaybookRequest{Path: "site.yml", ExtraVars: map[string]any{"a b; rm -rf /": "x"}}, out)
+		}, "invalid extra-var name"},
+		{"extra-var that cannot be encoded", func(out chan<- Event) error {
+			return RunPlaybook(context.Background(), nil, srv, PlaybookRequest{Path: "site.yml", ExtraVars: map[string]any{"fn": func() {}}}, out)
+		}, "encode extra-vars"},
+		{"vault password with a newline", func(out chan<- Event) error {
+			return RunPlaybook(context.Background(), nil, srv, PlaybookRequest{Path: "site.yml", VaultPassword: "a\nb"}, out)
+		}, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			out := make(chan Event, 8)
+			err := c.run(out) // nil pool: reaching SSH would panic, and be reported as an internal error
+			if err == nil {
+				t.Fatal("request accepted")
+			}
+			if c.want != "" && !strings.Contains(err.Error(), c.want) {
+				t.Errorf("error %q does not mention %q", err, c.want)
+			}
+			var events []Event
+			for ev := range out {
+				events = append(events, ev)
+			}
+			if len(events) != 1 || events[0].Type != "error" || events[0].Text != err.Error() {
+				t.Errorf("want exactly one error event carrying %q, got %+v", err, events)
+			}
+		})
+	}
+}
+
+// Every optional flag of the two command lines appears in both the
+// command and its preview.
+func TestCommandLinesCarryEveryOption(t *testing.T) {
+	srv := config.Server{WorkDir: "/srv/ansible", Inventory: "hosts.yml"}
+	cmd, preview, err := buildAdhocCmd(srv, AdhocRequest{
+		Target: "web", Module: "ansible.builtin.command", Become: true, Check: true, Forks: 7, Timeout: 42,
+		// An argument whose name is not a safe identifier is dropped.
+		Args: map[string]string{"cmd": "uptime", "bad key": "x"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range []string{cmd, preview} {
+		for _, want := range []string{"ansible 'web'", "-i 'hosts.yml'", `-a 'cmd="uptime"'`, "--become", "--check", "--forks 7", "--timeout 42"} {
+			if !strings.Contains(line, want) {
+				t.Errorf("missing %q in: %s", want, line)
+			}
+		}
+		if strings.Contains(line, "bad key") {
+			t.Errorf("an unsafe argument name reached the command line: %s", line)
+		}
+	}
+	// No workDir, no inventory, no arguments: the bare command.
+	cmd, preview, err = buildAdhocCmd(config.Server{}, AdhocRequest{Target: "all", Module: "ansible.builtin.ping"})
+	if err != nil || cmd != preview || cmd != "ANSIBLE_FORCE_COLOR=0 ansible 'all' -m 'ansible.builtin.ping' 2>&1" {
+		t.Errorf("bare ad-hoc command: %q / %q / %v", cmd, preview, err)
+	}
+	cmd, preview, err = buildPlaybookCmd(config.Server{}, PlaybookRequest{Path: "site.yml"})
+	if err != nil || cmd != preview || cmd != "ANSIBLE_FORCE_COLOR=0 ansible-playbook 'site.yml' 2>&1" {
+		t.Errorf("bare playbook command: %q / %q / %v", cmd, preview, err)
+	}
+}

@@ -73,6 +73,14 @@ func FuzzRedactText(f *testing.F) {
 		"SeCret:0",
 		"private_key=abc",
 		"credential: x",
+		"ansible_become_pass: x",
+		"pAss:0",
+		"mysql_root_passwd=x",
+		// Bracketed values, including a bracket inside a string.
+		`"api_tokens": ["a","b"]`,
+		`{"credentials":{"password":"abc},SECRET"}}`,
+		`token: [a, 'b]c', "d]e"]`,
+		`secret: {unterminated "string`,
 	} {
 		f.Add(seed)
 	}
@@ -93,6 +101,10 @@ func FuzzRedactText(f *testing.F) {
 		// because over-scrub is the safe direction.
 		lower := strings.ToLower(s)
 		triggers := []string{
+			// "pass" covers `pass\b` and, as a substring, passwd,
+			// password and passphrase; those stay listed so the
+			// correspondence with sensitiveWords is readable.
+			"pass", "passwd",
 			"password", "passphrase", "token", "secret",
 			"apikey", "api_key", "api-key",
 			"privatekey", "private_key", "private-key",

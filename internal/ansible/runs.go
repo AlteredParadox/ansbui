@@ -57,6 +57,13 @@ type RunRecord struct {
 	Limit     string            `json:"limit,omitempty"`
 	Tags      []string          `json:"tags,omitempty"`
 	ExtraVars map[string]any    `json:"extraVars,omitempty"`
+
+	// Redaction is the generation of redaction rules this record's
+	// saved command line was produced under (see redactionCurrent).
+	// Set by the Recorder, not by callers. Absent on records written
+	// before the field existed, which is how they are recognised and
+	// repaired when the history is loaded.
+	Redaction int `json:"redaction,omitempty"`
 }
 
 // Recorder is a thread-safe on-disk list of RunRecords plus a small
@@ -128,10 +135,24 @@ func NewRecorder(path string) (*Recorder, error) {
 	return r, nil
 }
 
+// scrubLoadedRuns brings every loaded record up to the current
+// redaction rules and reports whether anything changed (so the caller
+// rewrites the file). Two steps:
+//
+//   - the key and pattern rules are applied again, to every record at
+//     every start, so a rule added in an upgrade reaches history that
+//     was stored before it;
+//   - a record whose command line was produced the old way is cut
+//     where it stops being trustworthy (cutLegacyPreviews), once, and
+//     stamped so it is not cut again.
 func (r *Recorder) scrubLoadedRuns() bool {
 	changed := false
 	for i, run := range r.runs {
 		redacted := RedactRunRecord(run)
+		if redacted.Redaction < redactionCurrent {
+			redacted = cutLegacyPreviews(redacted)
+			redacted.Redaction = redactionCurrent
+		}
 		if !reflect.DeepEqual(redacted, run) {
 			changed = true
 		}
@@ -153,6 +174,9 @@ func (r *Recorder) Append(rec RunRecord) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	rec = RedactRunRecord(rec)
+	// A record arriving here was produced by this binary, so its
+	// command line is the redacted-by-value rendering.
+	rec.Redaction = redactionCurrent
 	// Build the prospective list in a local, attempt to persist it,
 	// then commit to memory REGARDLESS of the write outcome. A run that
 	// actually executed should stay visible in History for this process
