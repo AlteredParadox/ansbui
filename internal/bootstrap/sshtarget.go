@@ -2,8 +2,10 @@ package bootstrap
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -86,6 +88,53 @@ func recordFingerprintCallback(expect hostKeyExpectation, observed *string) ssh.
 		}
 		return nil
 	}
+}
+
+// hostKeyProbeTimeout bounds the whole probe: TCP connect plus the
+// part of the SSH handshake that precedes authentication.
+const hostKeyProbeTimeout = 10 * time.Second
+
+// errHostKeyProbed ends a probe's handshake once the key is in hand.
+var errHostKeyProbed = errors.New("host key probe complete")
+
+// probeHostKey returns the fingerprint of the host key host:port
+// presents, and nothing else happens: the callback that captures the
+// key also refuses it, so the handshake stops before SSH auth and no
+// credential, user name included, is ever sent. The key exchange has
+// verified the peer's signature by the time the callback runs, so the
+// fingerprint is of a key the peer actually holds, not one it merely
+// claims.
+func probeHostKey(ctx context.Context, host string, port int) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, hostKeyProbeTimeout)
+	defer cancel()
+	addr := net.JoinHostPort(host, strconv.Itoa(port))
+	var d net.Dialer
+	conn, err := d.DialContext(ctx, "tcp", addr)
+	if err != nil {
+		return "", fmt.Errorf("dial %s: %w", addr, err)
+	}
+	defer func() { _ = conn.Close() }()
+	if deadline, ok := ctx.Deadline(); ok {
+		_ = conn.SetDeadline(deadline)
+	}
+	var fp string
+	cfg := &ssh.ClientConfig{
+		User: "probe",
+		HostKeyCallback: func(_ string, _ net.Addr, key ssh.PublicKey) error {
+			fp = ssh.FingerprintSHA256(key)
+			return errHostKeyProbed
+		},
+	}
+	sshConn, _, _, err := ssh.NewClientConn(conn, addr, cfg)
+	if err == nil {
+		// Unreachable: the callback always refuses. Close rather than
+		// leave an authenticated-as-nobody connection behind.
+		_ = sshConn.Close()
+	}
+	if fp == "" {
+		return "", fmt.Errorf("no host key from %s: %w", addr, err)
+	}
+	return fp, nil
 }
 
 // dialPasswordTarget opens an SSH connection to host:port, with

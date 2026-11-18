@@ -229,7 +229,12 @@ Optional env vars worth knowing about:
   mistyped password — the job log still shows the first-contact
   warning for that run), and after bootstrap moves sshd to port 4242
   the same fingerprint is recorded for `host:4242` too, so a re-run
-  against the new port is verified rather than trusted afresh.
+  against the new port is verified rather than trusted afresh. Before
+  writing that second record ansbui connects to port 4242 (key
+  exchange only, no login) to check it presents the same key; if
+  something else answers there with a different key, nothing is
+  written, any existing record for `host:4242` is kept, and the job
+  log says so.
 
   This also affects the **reinstall** option. A reinstall wipes the
   box and the new system generates fresh host keys, so no

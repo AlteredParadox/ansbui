@@ -241,7 +241,7 @@ func Run(ctx context.Context, pool *sshpool.Pool, srv config.Server, req Request
 	if !req.Reinstall.Enabled {
 		// A reinstall run reconnected on targetSSHPort and recorded
 		// the new system's key there already (runReinstall).
-		carryHostKeyToTargetPort(req.IP, req.Port, target.fingerprint(), hostKeys, emit)
+		carryHostKeyToTargetPort(ctx, req.IP, req.Port, target.fingerprint(), hostKeys, probeHostKey, emit)
 	}
 
 	providerGroup := normalizeProviderName(req.Provider)
@@ -881,6 +881,10 @@ func connectAndPrecheck(ctx context.Context, req Request, hostKeys *HostKeyStore
 	return target, nil
 }
 
+// hostKeyProbe fetches the fingerprint of the host key presented at
+// host:port. probeHostKey is the real one; tests substitute their own.
+type hostKeyProbe func(ctx context.Context, host string, port int) (string, error)
+
 // carryHostKeyToTargetPort records fp under host:targetSSHPort once
 // bootstrapTarget has moved sshd there.
 //
@@ -890,23 +894,67 @@ func connectAndPrecheck(ctx context.Context, req Request, hostKeys *HostKeyStore
 // the record says :22, and a second run — a retry after the inventory
 // step failed, say — dials :4242, finds nothing, and treats a machine
 // ansbui has already verified as a first contact. Anyone answering on
-// :4242 at that moment received the password. The key does not change
-// when the port does, so the fingerprint this session already holds
-// is the right record for the new port.
+// :4242 at that moment received the password.
 //
-// A failed write here is reported and the run continues: the box is
-// already configured, and the next dial of :4242 is not left open by
-// it — hostKeyRecorder refuses to authenticate when it cannot record.
-func carryHostKeyToTargetPort(host string, dialedPort int, fp string, hostKeys *HostKeyStore, emit func(string, string)) {
+// The key does not change when the port does — IF it is the same sshd
+// answering. That is not guaranteed: sshdPortScript returns success
+// without touching anything when something is already listening on
+// the target port, and behind a port-forward host:22 and host:4242 can
+// be different machines. So the new port is asked which key it
+// presents before the record is written:
+//
+//   - the same key as this session: record it (replacing an older
+//     record if there is one — the listener has just proved it holds
+//     the key the operator's run verified).
+//   - a different key: record nothing and say so. Writing fp would
+//     replace a possibly valid record with one the listener can never
+//     match.
+//   - no answer: with no record yet, write fp — it is the best
+//     knowledge there is, and a wrong guess fails closed as a
+//     mismatch. With a different record already there, leave it.
+//
+// Nothing here is fatal: the box is already configured, and whatever
+// this leaves in the store, the next dial of :4242 is not opened up by
+// it — hostKeyRecorder refuses to authenticate when it cannot record,
+// and a record that does not match the listener is a refusal too.
+func carryHostKeyToTargetPort(ctx context.Context, host string, dialedPort int, fp string, hostKeys *HostKeyStore, probe hostKeyProbe, emit func(string, string)) {
 	if hostKeys == nil || dialedPort == targetSSHPort || fp == "" {
 		return
 	}
 	moved := net.JoinHostPort(host, strconv.Itoa(targetSSHPort))
+	existing, has, err := hostKeys.Get(moved)
+	if err != nil {
+		emit("meta", "could not record the host key fingerprint for "+moved+" ("+err.Error()+") — the next bootstrap of that address will be treated as a first contact")
+		return
+	}
+	if has && existing == fp {
+		return // already on record
+	}
+	seen, probeErr := probe(ctx, host, targetSSHPort)
+	switch {
+	case probeErr == nil && seen != fp:
+		msg := "⚠ " + moved + " presents a different host key (" + seen + ") than the session this run verified (" + fp + ") — something other than this sshd is answering there, so no record was written for it"
+		if has {
+			msg += "; the existing record (" + existing + ") is unchanged"
+		}
+		emit("meta", msg)
+		return
+	case probeErr != nil && has:
+		emit("meta", "a different host key ("+existing+") is already recorded for "+moved+" and that port could not be reached to compare ("+probeErr.Error()+") — the record is unchanged; if this box was reinstalled, supply its fingerprint in the form on the next run")
+		return
+	}
 	if err := hostKeys.Put(moved, fp); err != nil {
 		emit("meta", "could not record the host key fingerprint for "+moved+" ("+err.Error()+") — the next bootstrap of that address will be treated as a first contact")
 		return
 	}
-	emit("ok", "host key recorded for "+moved+" as well — sshd now listens there with the same key")
+	switch {
+	case probeErr != nil:
+		emit("ok", "host key recorded for "+moved+" as well (sshd was moved there; the port could not be reached to confirm: "+probeErr.Error()+")")
+	case has:
+		emit("ok", "host key recorded for "+moved+" as well — that port presents this session's key; the older record ("+existing+") was replaced")
+	default:
+		emit("ok", "host key recorded for "+moved+" as well — sshd now listens there with the same key")
+	}
 }
 
 // ensureRecord makes the porkbun record set of recordType for fqdn

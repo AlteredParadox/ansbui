@@ -368,19 +368,53 @@ func TestKnownHostNeedsNoWrite(t *testing.T) {
 	_ = sess.Close()
 }
 
+// probeReturning is a hostKeyProbe that reports a fixed result and
+// counts its calls.
+func probeReturning(fp string, err error, calls *int) hostKeyProbe {
+	return func(context.Context, string, int) (string, error) {
+		if calls != nil {
+			*calls++
+		}
+		return fp, err
+	}
+}
+
 // bootstrapTarget moves sshd to targetSSHPort. The record has to move
 // with it, or the next run against the new port is a first contact
-// with a machine ansbui has already verified.
+// with a machine ansbui has already verified. But only when the new
+// port really is the same sshd: the record is written on the evidence
+// of what that port presents.
 func TestHostKeyCarriedToTargetPort(t *testing.T) {
 	genuine, genuineFP := testHostKey(t)
-	impostor, _ := testHostKey(t)
+	other, otherFP := testHostKey(t)
 	const host = "192.0.2.10"
 	moved := net.JoinHostPort(host, strconv.Itoa(targetSSHPort))
+	unreachable := errors.New("connection refused")
+	ctx := context.Background()
 
-	t.Run("recorded under the new port and enforced there", func(t *testing.T) {
-		store := NewHostKeyStore(filepath.Join(t.TempDir(), "hk.json"))
+	newStore := func(t *testing.T, seed string) *HostKeyStore {
+		t.Helper()
+		s := NewHostKeyStore(filepath.Join(t.TempDir(), "hk.json"))
+		if seed != "" {
+			if err := s.Put(moved, seed); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return s
+	}
+	recorded := func(t *testing.T, s *HostKeyStore) string {
+		t.Helper()
+		fp, _, err := s.Get(moved)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return fp
+	}
+
+	t.Run("same key on the new port: recorded and enforced there", func(t *testing.T) {
+		store := newStore(t, "")
 		var log emitLog
-		carryHostKeyToTargetPort(host, 22, genuineFP, store, log.emit)
+		carryHostKeyToTargetPort(ctx, host, 22, genuineFP, store, probeReturning(genuineFP, nil, nil), log.emit)
 
 		expect, err := resolveHostKeyExpectation(Request{}, moved, store)
 		if err != nil {
@@ -391,7 +425,7 @@ func TestHostKeyCarriedToTargetPort(t *testing.T) {
 		}
 		var observed string
 		cb := recordFingerprintCallback(expect, &observed)
-		if err := cb(moved, nil, impostor); err == nil {
+		if err := cb(moved, nil, other); err == nil {
 			t.Error("a different key on the new port was accepted")
 		}
 		if err := cb(moved, nil, genuine); err != nil {
@@ -407,31 +441,177 @@ func TestHostKeyCarriedToTargetPort(t *testing.T) {
 		}
 	})
 
-	t.Run("already on the target port: nothing to do", func(t *testing.T) {
-		path := filepath.Join(t.TempDir(), "hk.json")
+	// The review finding: host:22 and host:4242 need not be the same
+	// sshd (sshdPortScript is a no-op when something already listens
+	// on the target port; a port-forward can put another machine
+	// there). A record for that other listener must survive.
+	t.Run("different key on the new port: existing record kept", func(t *testing.T) {
+		store := newStore(t, otherFP)
 		var log emitLog
-		carryHostKeyToTargetPort(host, targetSSHPort, genuineFP, NewHostKeyStore(path), log.emit)
-		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
-			t.Errorf("store written for a run that never changed port (stat err %v)", err)
+		carryHostKeyToTargetPort(ctx, host, 22, genuineFP, store, probeReturning(otherFP, nil, nil), log.emit)
+		if got := recorded(t, store); got != otherFP {
+			t.Fatalf("the valid record for %s was replaced: %q, want %q", moved, got, otherFP)
 		}
-		if log.String() != "" {
-			t.Errorf("unexpected events:\n%s", log.String())
+		if log.count("presents a different host key") != 1 || log.count(otherFP) == 0 || log.count("ok:") != 0 {
+			t.Errorf("conflict not reported:\n%s", log.String())
+		}
+	})
+
+	t.Run("different key on the new port: nothing recorded", func(t *testing.T) {
+		store := newStore(t, "")
+		var log emitLog
+		carryHostKeyToTargetPort(ctx, host, 22, genuineFP, store, probeReturning(otherFP, nil, nil), log.emit)
+		if got := recorded(t, store); got != "" {
+			t.Fatalf("recorded %q for a port that presents %q", got, otherFP)
+		}
+		if log.count("presents a different host key") != 1 {
+			t.Errorf("conflict not reported:\n%s", log.String())
+		}
+	})
+
+	// A box reinstalled out of band and re-bootstrapped with a pinned
+	// fingerprint: the old :4242 record is stale, and the port proving
+	// it holds the new key is what allows replacing it.
+	t.Run("stale record replaced once the port proves the new key", func(t *testing.T) {
+		store := newStore(t, otherFP)
+		var log emitLog
+		carryHostKeyToTargetPort(ctx, host, 22, genuineFP, store, probeReturning(genuineFP, nil, nil), log.emit)
+		if got := recorded(t, store); got != genuineFP {
+			t.Fatalf("record = %q, want the proven key %q", got, genuineFP)
+		}
+		if log.count("older record ("+otherFP+") was replaced") != 1 {
+			t.Errorf("replacement not reported:\n%s", log.String())
+		}
+	})
+
+	t.Run("port unreachable, no record yet: recorded on the session's word", func(t *testing.T) {
+		store := newStore(t, "")
+		var log emitLog
+		carryHostKeyToTargetPort(ctx, host, 22, genuineFP, store, probeReturning("", unreachable, nil), log.emit)
+		if got := recorded(t, store); got != genuineFP {
+			t.Fatalf("record = %q, want %q", got, genuineFP)
+		}
+		if log.count("could not be reached to confirm") != 1 {
+			t.Errorf("unconfirmed write not labelled as such:\n%s", log.String())
+		}
+	})
+
+	t.Run("port unreachable, different record present: record kept", func(t *testing.T) {
+		store := newStore(t, otherFP)
+		var log emitLog
+		carryHostKeyToTargetPort(ctx, host, 22, genuineFP, store, probeReturning("", unreachable, nil), log.emit)
+		if got := recorded(t, store); got != otherFP {
+			t.Fatalf("an unverified key replaced the record: %q, want %q", got, otherFP)
+		}
+		if log.count("is already recorded for "+moved) != 1 || log.count("ok:") != 0 {
+			t.Errorf("kept record not reported:\n%s", log.String())
+		}
+	})
+
+	t.Run("already recorded: no probe, no write, no event", func(t *testing.T) {
+		store := newStore(t, genuineFP)
+		calls := 0
+		var log emitLog
+		carryHostKeyToTargetPort(ctx, host, 22, genuineFP, store, probeReturning(otherFP, nil, &calls), log.emit)
+		if calls != 0 || log.String() != "" || recorded(t, store) != genuineFP {
+			t.Errorf("probe calls=%d, record=%q, events:\n%s", calls, recorded(t, store), log.String())
+		}
+	})
+
+	t.Run("run that never changed port: nothing to do", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "hk.json")
+		calls := 0
+		var log emitLog
+		carryHostKeyToTargetPort(ctx, host, targetSSHPort, genuineFP, NewHostKeyStore(path), probeReturning(genuineFP, nil, &calls), log.emit)
+		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("store written (stat err %v)", err)
+		}
+		if calls != 0 || log.String() != "" {
+			t.Errorf("probe calls=%d, events:\n%s", calls, log.String())
 		}
 	})
 
 	t.Run("a failed write is reported, not swallowed", func(t *testing.T) {
 		var log emitLog
-		carryHostKeyToTargetPort(host, 22, genuineFP, unwritableStore(t), log.emit)
+		carryHostKeyToTargetPort(ctx, host, 22, genuineFP, unwritableStore(t), probeReturning(genuineFP, nil, nil), log.emit)
 		if log.count("meta: could not record the host key fingerprint for "+moved) != 1 {
 			t.Errorf("failure not reported:\n%s", log.String())
 		}
 	})
 
-	t.Run("nil store is a no-op", func(t *testing.T) {
+	t.Run("an unreadable store is reported, and not probed", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "hk.json")
+		if err := os.WriteFile(path, []byte("{not json"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		calls := 0
 		var log emitLog
-		carryHostKeyToTargetPort(host, 22, genuineFP, nil, log.emit)
-		if log.String() != "" {
-			t.Errorf("unexpected events:\n%s", log.String())
+		carryHostKeyToTargetPort(ctx, host, 22, genuineFP, NewHostKeyStore(path), probeReturning(genuineFP, nil, &calls), log.emit)
+		if calls != 0 || log.count("meta: could not record the host key fingerprint for "+moved) != 1 {
+			t.Errorf("probe calls=%d, events:\n%s", calls, log.String())
 		}
 	})
+
+	t.Run("nil store is a no-op", func(t *testing.T) {
+		calls := 0
+		var log emitLog
+		carryHostKeyToTargetPort(ctx, host, 22, genuineFP, nil, probeReturning(genuineFP, nil, &calls), log.emit)
+		if calls != 0 || log.String() != "" {
+			t.Errorf("probe calls=%d, events:\n%s", calls, log.String())
+		}
+	})
+}
+
+// probeHostKey must report the key a listener really presents, and
+// must not authenticate: it is pointed at a port that may belong to
+// something other than the box being bootstrapped.
+func TestProbeHostKey(t *testing.T) {
+	target := startFakeTarget(t, "dummy-password")
+
+	fp, err := probeHostKey(precheckCtx(t), target.host, target.port)
+	if err != nil {
+		t.Fatalf("probe failed: %v", err)
+	}
+	if fp != target.fp {
+		t.Errorf("probe returned %q, the listener's key is %q", fp, target.fp)
+	}
+	if got := target.offered(); len(got) != 0 {
+		t.Errorf("the probe attempted authentication: %d password(s) offered", len(got))
+	}
+
+	// Nothing listening: an error and no fingerprint.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	closed := ln.Addr().(*net.TCPAddr).Port
+	_ = ln.Close()
+	if fp, err := probeHostKey(precheckCtx(t), "127.0.0.1", closed); err == nil || fp != "" {
+		t.Errorf("probe of a closed port returned (%q, %v)", fp, err)
+	}
+
+	// A listener that accepts and says nothing: bounded by the context.
+	silent, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = silent.Close() })
+	go func() {
+		for {
+			c, err := silent.Accept()
+			if err != nil {
+				return
+			}
+			t.Cleanup(func() { _ = c.Close() })
+		}
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	if fp, err := probeHostKey(ctx, "127.0.0.1", silent.Addr().(*net.TCPAddr).Port); err == nil || fp != "" {
+		t.Errorf("probe of a silent listener returned (%q, %v)", fp, err)
+	}
+	if took := time.Since(started); took > 5*time.Second {
+		t.Errorf("probe of a silent listener took %s, want it bounded by the context", took)
+	}
 }
