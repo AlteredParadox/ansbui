@@ -2,7 +2,7 @@
 // Regenerates the README screenshots in docs/screenshots/.
 //
 // Nothing real is ever on screen. The script starts the ansbui binary on a
-// spare loopback port with an empty, throw-away config, and answers every
+// free loopback port with an empty, throw-away config, and answers every
 // /api call in the browser from the made-up fleet below: names under
 // example.com, addresses from the ranges reserved for documentation
 // (192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24), invented playbooks and
@@ -18,12 +18,16 @@
 //
 // PLAYWRIGHT_MODULE may name an existing install instead (the directory of
 // the `playwright` package); ANSBUI_BIN the binary (default ./ansbui).
-// Dates are relative to "now" so run history always looks recent; apart
-// from that the output is the same on every run.
+// Run times are relative to "now", so history always reads "3h ago"; the
+// one absolute date on screen (a playbook's modification time) is fixed and
+// the browser runs in UTC with an en-US locale. Two runs therefore give
+// byte-identical images, and a diff in docs/screenshots/ means the UI
+// changed.
 
 import { spawn } from 'node:child_process';
 import { mkdtempSync, mkdirSync, rmSync } from 'node:fs';
 import { createRequire } from 'node:module';
+import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -31,8 +35,6 @@ import { fileURLToPath } from 'node:url';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const OUT = path.join(ROOT, 'docs', 'screenshots');
 const BIN = process.env.ANSBUI_BIN || path.join(ROOT, 'ansbui');
-const PORT = 18877;
-const APP = `http://127.0.0.1:${PORT}`;
 const VIEWPORT = { width: 1440, height: 810 };
 
 const { chromium } = createRequire(import.meta.url)(process.env.PLAYWRIGHT_MODULE || 'playwright');
@@ -88,8 +90,11 @@ const HOSTS = [
   lastPlaybookAt: ago(role === 'db' ? 9 * HOUR : 3 * HOUR),
 }));
 
+// Shown as an absolute date, so it must not move with the clock.
+const MODIFIED_BASE = Date.UTC(2026, 10, 14, 9, 30);
 const playbook = (name, description, tags, targets, modifiedMinutes, yaml) => ({
-  id: name, name, path: name, title: '', description, tags, targets, size: yaml.length, modified: ago(modifiedMinutes), yaml,
+  id: name, name, path: name, title: '', description, tags, targets, size: yaml.length,
+  modified: new Date(MODIFIED_BASE - modifiedMinutes * 60_000).toISOString(), yaml,
 });
 
 const PLAYBOOKS = [
@@ -295,6 +300,10 @@ async function mockApi(page, { loggedOut = false } = {}) {
 
 // ------------------------------------------------------------- capture
 
+// Set once the server is up (see main): the address of the ansbui that
+// this run started, and nothing else.
+let APP = '';
+
 async function shot(page, name) {
   await page.waitForTimeout(350); // let transitions and fonts settle
   await page.screenshot({ path: path.join(OUT, `${name}.png`) });
@@ -307,7 +316,7 @@ async function openView(page, label) {
 }
 
 async function capture(browser) {
-  const context = await browser.newContext({ viewport: VIEWPORT, deviceScaleFactor: 1.5, colorScheme: 'dark' });
+  const context = await browser.newContext({ viewport: VIEWPORT, deviceScaleFactor: 1.5, colorScheme: 'dark', timezoneId: 'UTC', locale: 'en-US' });
 
   const login = await context.newPage();
   await mockApi(login, { loggedOut: true });
@@ -359,31 +368,68 @@ async function capture(browser) {
 
 // ---------------------------------------------------------------- main
 
-async function waitForServer() {
-  for (let i = 0; i < 50; i++) {
+// freePort asks the kernel for a loopback port nobody is using.
+function freePort() {
+  return new Promise((resolve, reject) => {
+    const probe = createServer();
+    probe.once('error', reject);
+    probe.listen(0, '127.0.0.1', () => {
+      const { port } = probe.address();
+      probe.close(() => resolve(port));
+    });
+  });
+}
+
+// startServer runs the binary and resolves once THAT process answers.
+//
+// The page's HTML, CSS and scripts come from this server, so the pictures
+// are of whatever binary is listening. Polling a fixed port would accept
+// any ansbui that happened to be there — an older build left running, say —
+// while the one just built died on the bind error, and the screenshots
+// would quietly show the wrong UI. So the port is one nobody had a moment
+// ago, and the child exiting at any point before it answers is a failure,
+// reported with what it printed.
+async function startServer(dataDir) {
+  const port = await freePort();
+  const app = `http://127.0.0.1:${port}`;
+  const child = spawn(BIN, ['-addr', `127.0.0.1:${port}`, '-allow-unauthenticated'], {
+    env: { ...process.env, ANSBUI_CONFIG: path.join(dataDir, 'config.json'), ANSBUI_RUNS: path.join(dataDir, 'runs.json'), HOME: dataDir },
+    stdio: ['ignore', 'ignore', 'pipe'],
+  });
+  let stderr = '';
+  child.stderr.on('data', (chunk) => { stderr = (stderr + chunk).slice(-4000); });
+  let gone = null;
+  child.once('error', (err) => { gone = `could not start ${BIN}: ${err.message}`; });
+  child.once('exit', (code, signal) => { gone = `${BIN} exited (${signal || `status ${code}`}) before it was ready:\n${stderr.trim()}`; });
+
+  for (let i = 0; i < 100 && !gone; i++) {
     try {
-      const res = await fetch(`${APP}/api/health`);
-      if (res.ok) return;
-    } catch { /* not up yet */ }
+      const res = await fetch(`${app}/api/health`);
+      if (res.ok) {
+        // An answer counts only while our child is alive. Give a bind
+        // failure a moment to surface as an exit before believing it.
+        await new Promise((r) => setTimeout(r, 150));
+        if (!gone && child.exitCode === null) return { app, child };
+      }
+    } catch { /* not listening yet */ }
     await new Promise((r) => setTimeout(r, 100));
   }
-  throw new Error(`ansbui did not answer on ${APP}`);
+  child.kill();
+  throw new Error(gone || `ansbui did not answer on ${app} within 10s:\n${stderr.trim()}`);
 }
 
 const dataDir = mkdtempSync(path.join(tmpdir(), 'ansbui-shots-'));
-mkdirSync(OUT, { recursive: true });
-const server = spawn(BIN, ['-addr', `127.0.0.1:${PORT}`, '-allow-unauthenticated'], {
-  env: { ...process.env, ANSBUI_CONFIG: path.join(dataDir, 'config.json'), ANSBUI_RUNS: path.join(dataDir, 'runs.json'), HOME: dataDir },
-  stdio: 'ignore',
-});
+let server;
 let browser;
 try {
-  await waitForServer();
+  server = await startServer(dataDir);
+  APP = server.app;
+  mkdirSync(OUT, { recursive: true });
   browser = await chromium.launch();
   console.log(`writing ${path.relative(ROOT, OUT)}/`);
   await capture(browser);
 } finally {
   await browser?.close();
-  server.kill();
+  server?.child.kill();
   rmSync(dataDir, { recursive: true, force: true });
 }
