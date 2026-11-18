@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"flag"
 	"log"
 	"path/filepath"
 	"strings"
@@ -173,6 +174,69 @@ func TestWarnIfExposed(t *testing.T) {
 		}
 		if tc.want != "" && !strings.Contains(out, tc.want) {
 			t.Errorf("warnIfExposed(%q, auth=%v) logged %q, want it to contain %q", tc.addr, tc.authEnabled, out, tc.want)
+		}
+	}
+}
+
+// ownFlags returns the flags ansbui itself registers, by name. The
+// test binary adds its own (-test.*) to the same set.
+func ownFlags() map[string]*flag.Flag {
+	out := map[string]*flag.Flag{}
+	flag.VisitAll(func(f *flag.Flag) {
+		if !strings.HasPrefix(f.Name, "test.") {
+			out[f.Name] = f
+		}
+	})
+	return out
+}
+
+// With no arguments ansbui listens on loopback and neither sets a
+// password nor skips the login.
+func TestFlagDefaults(t *testing.T) {
+	flags := ownFlags()
+	for name, want := range map[string]string{
+		"addr":                  "127.0.0.1:8787",
+		"set-password":          "false",
+		"allow-unauthenticated": "false",
+	} {
+		f, ok := flags[name]
+		if !ok {
+			t.Errorf("flag -%s is not registered", name)
+			continue
+		}
+		if f.DefValue != want {
+			t.Errorf("-%s defaults to %q, want %q", name, f.DefValue, want)
+		}
+	}
+	if len(flags) != 3 {
+		t.Errorf("%d flags registered, want 3: a new flag needs its default and help checked here", len(flags))
+	}
+}
+
+// The help text must describe the login as required. It used to
+// offer a password "and/or" a reverse proxy, from the time ansbui
+// started without one.
+func TestFlagHelpSaysThePasswordIsRequired(t *testing.T) {
+	flags := ownFlags()
+	for name, want := range map[string][]string{
+		"addr":                  {"A login password is required", "-set-password", "not other users and processes on this host"},
+		"set-password":          {"refuses to start", "-allow-unauthenticated"},
+		"allow-unauthenticated": {"refuses to start", allowUnauthenticatedEnv + "=1"},
+	} {
+		f, ok := flags[name]
+		if !ok {
+			t.Errorf("flag -%s is not registered", name)
+			continue
+		}
+		for _, w := range want {
+			if !strings.Contains(f.Usage, w) {
+				t.Errorf("-%s help does not say %q:\n%s", name, w, f.Usage)
+			}
+		}
+	}
+	for name, f := range flags {
+		if strings.Contains(f.Usage, "and/or") {
+			t.Errorf("-%s help offers the login as one option among several:\n%s", name, f.Usage)
 		}
 	}
 }
