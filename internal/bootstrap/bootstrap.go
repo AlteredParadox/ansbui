@@ -238,6 +238,11 @@ func Run(ctx context.Context, pool *sshpool.Pool, srv config.Server, req Request
 	if err := bootstrapTarget(ctx, target, pubKey, emit); err != nil {
 		return err
 	}
+	if !req.Reinstall.Enabled {
+		// A reinstall run reconnected on targetSSHPort and recorded
+		// the new system's key there already (runReinstall).
+		carryHostKeyToTargetPort(req.IP, req.Port, target.fingerprint(), hostKeys, emit)
+	}
 
 	providerGroup := normalizeProviderName(req.Provider)
 	emit("meta", fmt.Sprintf("Adding %s to inventory under group %q...", req.Hostname, providerGroup))
@@ -781,6 +786,62 @@ func resolveHostKeyExpectation(req Request, hostport string, hostKeys *HostKeySt
 	return hostKeyExpectation{}, nil
 }
 
+// hostKeyRecorder makes the acceptance of a target's host key durable
+// before the dial is allowed to authenticate. Its accept method is the
+// hostKeyExpectation.accept hook, so it runs inside the key exchange.
+//
+// The record used to be written after the connection was up, and a
+// failed write was only a warning. That left a hole: with the store
+// unwritable (full disk, wrong owner after a restore, read-only
+// mount) the first-contact key was accepted, the password was sent,
+// nothing was recorded — and so the NEXT run was a first contact
+// again, and the one after that. Every run handed the root password
+// to whatever answered, which is exactly the warn-only
+// trust-on-first-use the store exists to end. Writing first and
+// refusing on failure means a password is only ever sent to a key
+// that is on disk.
+//
+// The cost is that a key is recorded even when authentication then
+// fails (a mistyped password, say). That is the right way round: the
+// retry is checked against the key the operator was just warned
+// about, where before it would have been a second blind first
+// contact.
+type hostKeyRecorder struct {
+	store    *HostKeyStore
+	hostport string
+
+	mu      sync.Mutex
+	written string // fingerprint this recorder wrote, "" if none
+}
+
+func (r *hostKeyRecorder) accept(fp string) error {
+	stored, ok, err := r.store.Get(r.hostport)
+	if err != nil {
+		return fmt.Errorf("refusing to authenticate to %s: %w — no credential was sent", r.hostport, err)
+	}
+	if ok && stored == fp {
+		return nil // already on disk; nothing to write
+	}
+	if err := r.store.Put(r.hostport, fp); err != nil {
+		return fmt.Errorf("refusing to authenticate to %s: its host key %s could not be recorded in %s (%w), and without a record the next bootstrap of this target would trust whatever key it is shown — fix the store (free space, ownership, permissions) and retry; no credential was sent", r.hostport, fp, r.store.Path(), err)
+	}
+	r.mu.Lock()
+	r.written = fp
+	r.mu.Unlock()
+	return nil
+}
+
+// recorded returns the fingerprint accept wrote during the dial, or ""
+// if the key was already on record or the dial never got that far.
+// Locked because the SSH handshake runs the callback on its own
+// goroutine, and a dial that times out can return while it is still
+// in there.
+func (r *hostKeyRecorder) recorded() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.written
+}
+
 func connectAndPrecheck(ctx context.Context, req Request, hostKeys *HostKeyStore, emit func(string, string)) (*targetSession, error) {
 	sudoPw := ""
 	if req.UseSudo {
@@ -792,19 +853,25 @@ func connectAndPrecheck(ctx context.Context, req Request, hostKeys *HostKeyStore
 		emit("fail", err.Error())
 		return nil, err
 	}
+	rec := &hostKeyRecorder{store: hostKeys, hostport: hostport}
+	expect.accept = rec.accept
 	target, err := dialPasswordTarget(ctx, req.IP, req.Port, req.Username, req.Password, sudoPw, expect)
+	// The first-contact warning is emitted whether or not the dial
+	// went on to succeed. The key is on record from the moment it was
+	// accepted, so a run that then fails at authentication must still
+	// tell the operator what was trusted: the retry will report the
+	// key as "verified against the record", and this line is the only
+	// place that says the record itself was taken on trust.
+	if fp := rec.recorded(); fp != "" && expect.fp == "" {
+		emit("meta", "⚠ first contact — host key accepted on trust: "+fp+
+			" — compare it against the provider console (ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub). It is now recorded; future bootstraps of this target must present the same key")
+	}
 	if err != nil {
 		emit("fail", err.Error())
 		return nil, err
 	}
 	if expect.fp != "" {
 		emit("ok", "host key verified against "+expect.src+" ("+target.fingerprint()+")")
-	} else {
-		emit("meta", "⚠ first contact — host key accepted on trust: "+target.fingerprint()+
-			" — compare it against the provider console (ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub). It is now recorded; future bootstraps of this target must present the same key")
-	}
-	if perr := hostKeys.Put(hostport, target.fingerprint()); perr != nil {
-		emit("meta", "could not record the host key fingerprint ("+perr.Error()+") — verification will fall back to first-use trust next run")
 	}
 	if err := target.requireSudo(ctx); err != nil {
 		_ = target.Close()
@@ -812,6 +879,34 @@ func connectAndPrecheck(ctx context.Context, req Request, hostKeys *HostKeyStore
 		return nil, err
 	}
 	return target, nil
+}
+
+// carryHostKeyToTargetPort records fp under host:targetSSHPort once
+// bootstrapTarget has moved sshd there.
+//
+// The store is keyed by host:port, and until now only the port the
+// operator dialed got a record. But the product itself then moves the
+// listener: after a first bootstrap on :22 the box answers on :4242,
+// the record says :22, and a second run — a retry after the inventory
+// step failed, say — dials :4242, finds nothing, and treats a machine
+// ansbui has already verified as a first contact. Anyone answering on
+// :4242 at that moment received the password. The key does not change
+// when the port does, so the fingerprint this session already holds
+// is the right record for the new port.
+//
+// A failed write here is reported and the run continues: the box is
+// already configured, and the next dial of :4242 is not left open by
+// it — hostKeyRecorder refuses to authenticate when it cannot record.
+func carryHostKeyToTargetPort(host string, dialedPort int, fp string, hostKeys *HostKeyStore, emit func(string, string)) {
+	if hostKeys == nil || dialedPort == targetSSHPort || fp == "" {
+		return
+	}
+	moved := net.JoinHostPort(host, strconv.Itoa(targetSSHPort))
+	if err := hostKeys.Put(moved, fp); err != nil {
+		emit("meta", "could not record the host key fingerprint for "+moved+" ("+err.Error()+") — the next bootstrap of that address will be treated as a first contact")
+		return
+	}
+	emit("ok", "host key recorded for "+moved+" as well — sshd now listens there with the same key")
 }
 
 // ensureRecord makes the porkbun record set of recordType for fqdn

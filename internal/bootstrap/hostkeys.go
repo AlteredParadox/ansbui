@@ -53,6 +53,17 @@ func (s *HostKeyStore) Path() string {
 // read/parse failure is returned — treating a corrupt or unreadable
 // store as empty would silently downgrade every verification back
 // to trust-on-first-use.
+//
+// "Corrupt" includes a file that parses but cannot be a store this
+// code wrote:
+//
+//   - the JSON value null. It decodes to a nil map, which read as an
+//     empty store and then panicked in Put — after the password
+//     connection was already open.
+//   - an entry whose value is not a fingerprint. An empty string in
+//     particular read as "a record exists" (so strict mode was
+//     satisfied) with nothing to compare against (so any key was
+//     accepted): the worst of both.
 func (s *HostKeyStore) load() (map[string]string, error) {
 	data, err := os.ReadFile(s.path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -61,9 +72,17 @@ func (s *HostKeyStore) load() (map[string]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read bootstrap host key store %s: %w", s.path, err)
 	}
-	m := map[string]string{}
+	var m map[string]string
 	if err := json.Unmarshal(data, &m); err != nil {
 		return nil, fmt.Errorf("parse bootstrap host key store %s (fix or remove the file): %w", s.path, err)
+	}
+	if m == nil {
+		return nil, fmt.Errorf("bootstrap host key store %s holds null instead of an object (fix or remove the file)", s.path)
+	}
+	for hostport, fp := range m {
+		if !hostKeyFPRE.MatchString(fp) {
+			return nil, fmt.Errorf("bootstrap host key store %s: the entry for %q is not a SHA256 host key fingerprint (fix or remove the entry)", s.path, hostport)
+		}
 	}
 	return m, nil
 }
@@ -87,6 +106,11 @@ func (s *HostKeyStore) Get(hostport string) (fp string, ok bool, err error) {
 func (s *HostKeyStore) Put(hostport, fp string) error {
 	if s == nil {
 		return nil
+	}
+	// Only what ssh.FingerprintSHA256 produces is ever stored, so
+	// load can treat anything else as corruption.
+	if !hostKeyFPRE.MatchString(fp) {
+		return fmt.Errorf("refusing to record %q for %s: not a SHA256 host key fingerprint", fp, hostport)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
