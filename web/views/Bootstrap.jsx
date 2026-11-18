@@ -26,6 +26,30 @@ const { useState: useStateBoot, useEffect: useEffectBoot, useRef: useRefBoot } =
 
 const BOOTSTRAP_JOB_KEY = 'ansbui.bootstrapJobId';
 
+// parseTcpPort returns the port number for a string that is nothing
+// but digits naming a TCP port, or 0. Number.parseInt alone would
+// take "22abc" as 22.
+function parseTcpPort(text) {
+  const t = String(text).trim();
+  if (!/^\d{1,5}$/.test(t)) return 0;
+  const n = Number.parseInt(t, 10);
+  return n >= 1 && n <= 65535 ? n : 0;
+}
+
+// parseBootstrapPorts reads the form's two port fields: where sshd
+// answers now, and where bootstrap moves it. Both go through
+// parseTcpPort — the current port decides which machine and service
+// the root password is sent to, so a typo there must not be rounded
+// to the nearest number either. Returns { portNum, newPortNum } or
+// { error }.
+function parseBootstrapPorts(port, newPort) {
+  const portNum = parseTcpPort(port);
+  if (!portNum) return { error: 'Current SSH port must be a valid TCP port (1–65535).' };
+  const newPortNum = parseTcpPort(newPort);
+  if (!newPortNum) return { error: 'New SSH port must be a valid TCP port (1–65535).' };
+  return { portNum, newPortNum };
+}
+
 // REINSTALL_MATRIX must mirror reinstallOSMatrix in
 // internal/bootstrap/reinstall.go — the backend re-validates, so a
 // drift here just means the form rejects something the backend
@@ -115,6 +139,9 @@ function BootstrapView() {
   const [provider, setProvider] = useStateBoot('');
   const [ip, setIp] = useStateBoot('');
   const [port, setPort] = useStateBoot('22');
+  // The port sshd is moved to (and a reinstalled system is given).
+  // 4242 is the backend's default too; see Request.NewSSHPort.
+  const [newPort, setNewPort] = useStateBoot('4242');
   const [username, setUsername] = useStateBoot('root');
   const [useSudo, setUseSudo] = useStateBoot(false);
   const [password, setPassword] = useStateBoot('');
@@ -417,16 +444,17 @@ function BootstrapView() {
   };
 
   // validateForm returns either { error } describing the first
-  // failed check or { portNum } with the parsed SSH port. Pulled
+  // failed check or { portNum, newPortNum } with the parsed SSH
+  // ports. Pulled
   // out of start() so each function stays under Sonar's S3776
   // cognitive-complexity ceiling.
   const validateForm = () => {
     if (!provider.trim()) return { error: 'Provider is required.' };
     if (!ip.trim()) return { error: 'Address is required.' };
     if (!classifyAddress(ip.trim())) return { error: 'Address must be an IPv4 address (e.g. 203.0.113.42), IPv6 address (e.g. 2001:db8::1), or DNS hostname (e.g. host.example.com).' };
-    const portNum = Number.parseInt(port, 10);
-    const portOk = Number.isInteger(portNum) && portNum > 0 && portNum <= 65535;
-    if (!portOk) return { error: 'SSH port must be a valid TCP port.' };
+    const ports = parseBootstrapPorts(port, newPort);
+    if (ports.error) return ports;
+    const { portNum, newPortNum } = ports;
     if (!username.trim()) return { error: 'Username is required.' };
     if (!password) return { error: 'Password is required.' };
     if (useSudo && !sudoPassword) return { error: 'Sudo password is required when using sudo.' };
@@ -439,7 +467,7 @@ function BootstrapView() {
     if (classifyAddress(ip.trim()) !== 'host' && !vaultPassword) return { error: 'Vault password is required (used to decrypt porkbun credentials).' };
     const reErr = reinstallError();
     if (reErr) return { error: reErr };
-    return { portNum };
+    return { portNum, newPortNum };
   };
 
   const start = async () => {
@@ -447,7 +475,7 @@ function BootstrapView() {
     setError('');
     const v = validateForm();
     if (v.error) { setError(v.error); return; }
-    const { portNum } = v;
+    const { portNum, newPortNum } = v;
 
     setOutput([]); setRunning(true); setViewingJob(null);
 
@@ -455,6 +483,7 @@ function BootstrapView() {
       provider: provider.trim(),
       ip: ip.trim(),
       port: portNum,
+      newSshPort: newPortNum,
       username: username.trim(),
       password,
       useSudo,
@@ -514,7 +543,7 @@ function BootstrapView() {
         <div>
           <h1 className="view-title">Bootstrap</h1>
           <div className="view-sub mute">
-            Bootstrap a fresh VPS into the inventory: porkbun DNS, ansible user with key auth, sshd → 4242, then add to a provider group.
+            Bootstrap a fresh VPS into the inventory: porkbun DNS, ansible user with key auth, sshd moved to the port you choose, then add to a provider group.
           </div>
         </div>
       </div>
@@ -543,7 +572,7 @@ function BootstrapView() {
           </div>
         </div>
 
-        <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 10, marginTop: 10 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 1fr', gap: 10, marginTop: 10 }}>
           <div>
             <label htmlFor="boot-ip" className="cm-field-label">Address</label>
             <input id="boot-ip" className="input mono" placeholder="203.0.113.42, 2001:db8::1, or host.example.com" value={ip} onChange={e => setIp(e.target.value)} disabled={running}/>
@@ -552,9 +581,18 @@ function BootstrapView() {
             </div>
           </div>
           <div>
-            <label htmlFor="boot-port" className="cm-field-label">SSH port</label>
-            <input id="boot-port" className="input mono" placeholder="22" value={port} onChange={e => setPort(e.target.value)} disabled={running}/>
+            <label htmlFor="boot-port" className="cm-field-label">Current SSH port</label>
+            <input id="boot-port" className="input mono" inputMode="numeric" placeholder="22" value={port} onChange={e => setPort(e.target.value)} disabled={running}/>
+            <div className="mute" style={{ fontSize: 11, marginTop: 4 }}>Where sshd answers now.</div>
           </div>
+          <div>
+            <label htmlFor="boot-newport" className="cm-field-label">New SSH port</label>
+            <input id="boot-newport" className="input mono" inputMode="numeric" placeholder="4242" value={newPort} onChange={e => setNewPort(e.target.value)} disabled={running}/>
+            <div className="mute" style={{ fontSize: 11, marginTop: 4 }}>Where it answers afterwards.</div>
+          </div>
+        </div>
+        <div className="mute" style={{ fontSize: 11, marginTop: 6 }}>
+          Bootstrap moves sshd to the new port, a reinstalled system is installed with it, and it is written to the inventory entry as <span className="mono">ansible_port</span>. Use the current port to leave sshd where it is. The new port must be reachable from ansbui: open it in any firewall or security group first.
         </div>
 
         <div style={{ marginTop: 10 }}>
@@ -621,7 +659,7 @@ function BootstrapView() {
                 </div>
               </div>
               <div className="mute" style={{ fontSize: 11, marginTop: 6 }}>
-                The target reboots into the chosen OS, sshd is set to <span className="mono">:4242</span> with the ansible public key in root&rsquo;s <span className="mono">authorized_keys</span>, then bootstrap continues. Expect 10&ndash;30 minutes; the run lives on the backend so you can close this tab and re-attach later. <b>Assumes the target&rsquo;s address (IP or hostname&rsquo;s DNS) still points at the same machine after the reboot.</b>
+                The target reboots into the chosen OS, sshd is set to <span className="mono">:{parseTcpPort(newPort) || 4242}</span> with the ansible public key in root&rsquo;s <span className="mono">authorized_keys</span>, then bootstrap continues. Expect 10&ndash;30 minutes; the run lives on the backend so you can close this tab and re-attach later. <b>Assumes the target&rsquo;s address (IP or hostname&rsquo;s DNS) still points at the same machine after the reboot.</b>
               </div>
               <div className="mute" style={{ fontSize: 11, marginTop: 6 }}>
                 <b>Only the reinstall script itself is checksum-verified.</b> The installer it boots is downloaded by the target over plain HTTP, and the OS image is not checked against a digest, so someone on the target&rsquo;s network path could substitute either. Use this where you trust that network; details are in <span className="mono">DEPLOYMENT.md</span> under &ldquo;Reinstall: what is and is not verified&rdquo;.
@@ -730,3 +768,4 @@ function BootstrapView() {
 }
 
 globalThis.BootstrapView = BootstrapView;
+globalThis.AnsbuiParseTcpPort = parseTcpPort;

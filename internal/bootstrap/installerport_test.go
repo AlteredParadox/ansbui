@@ -330,7 +330,7 @@ func TestVerifyInstalledSystemNamesTheInstallersRealPort(t *testing.T) {
 	if !strings.Contains(err.Error(), "ssh root@192.0.2.5 -p 22 ") {
 		t.Errorf("recovery instructions do not name the installer's port:\n%v", err)
 	}
-	if strings.Contains(err.Error(), "-p "+strconv.Itoa(reinstallSSHPort)) {
+	if strings.Contains(err.Error(), "-p "+strconv.Itoa(defaultNewSSHPort)) {
 		t.Errorf("recovery instructions name the requested port, which does not answer:\n%v", err)
 	}
 }
@@ -353,7 +353,7 @@ func TestRunInstallerHoldStageOverDefaultPort(t *testing.T) {
 	defer cancel()
 	netInfo := parseReinstallNetInfo("IPv4 Address: 192.0.2.5/24\nIPv4 Gateway: 192.0.2.1\n")
 	var log emitLog
-	verified, err := runInstallerHoldStage(ctx, host, testClientKey(t), netInfo, "debian", log.emit)
+	verified, err := runInstallerHoldStage(ctx, heldInstaller{host: host, port: closedPort(t)}, testClientKey(t), netInfo, "debian", log.emit)
 	if err != nil || !verified {
 		t.Fatalf("runInstallerHoldStage = %v, %v; want the install verified\n%s", verified, err, log.text())
 	}

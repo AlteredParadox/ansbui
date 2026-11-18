@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -71,7 +72,7 @@ func reservedProviderError(name string) error {
 // unchanged. A host found under any other group is an error — the
 // same host in two groups is silent fan-out the bootstrap workflow
 // can't undo.
-func addHostToInventoryYAML(content []byte, provider, fqdn string) ([]byte, error) {
+func addHostToInventoryYAML(content []byte, provider, fqdn string, sshPort int) ([]byte, error) {
 	if provider == "" {
 		return nil, errors.New("provider name is required")
 	}
@@ -107,7 +108,7 @@ func addHostToInventoryYAML(content []byte, provider, fqdn string) ([]byte, erro
 	if err != nil {
 		return nil, err
 	}
-	appendHostNode(hostsNode, fqdn)
+	appendHostNode(hostsNode, fqdn, sshPort)
 	return encodeInventory(root, content, preamble)
 }
 
@@ -240,13 +241,26 @@ func ensureUmbrellaPath(top *yaml.Node) (*yaml.Node, error) {
 	return findOrCreateMapValue(cur, "children")
 }
 
-// appendHostNode adds fqdn as a `<fqdn>:` (bare-key, no value) entry
-// under hostsNode. Empty scalar with the !!null tag renders that
-// way, matching how operators usually hand-write ansible inventory
-// entries.
-func appendHostNode(hostsNode *yaml.Node, fqdn string) {
+// appendHostNode adds fqdn under hostsNode with its SSH port as a
+// host variable:
+//
+//	<fqdn>:
+//	  ansible_port: <port>
+//
+// The port is written for every host, whatever its value. Bootstrap
+// has just put sshd on that port, and an entry without it only works
+// in an inventory that happens to set the same port for the whole
+// group; ansible otherwise tries 22. A port of 0 — a caller that has
+// none to record — leaves the bare `<fqdn>:` key.
+func appendHostNode(hostsNode *yaml.Node, fqdn string, sshPort int) {
 	keyNode := &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: fqdn}
 	valNode := &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!null"}
+	if sshPort > 0 {
+		valNode = &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map", Content: []*yaml.Node{
+			{Kind: yaml.ScalarNode, Tag: "!!str", Value: "ansible_port"},
+			{Kind: yaml.ScalarNode, Tag: "!!int", Value: strconv.Itoa(sshPort)},
+		}}
+	}
 	hostsNode.Content = append(hostsNode.Content, keyNode, valNode)
 }
 

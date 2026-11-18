@@ -175,7 +175,7 @@ func dialPasswordTarget(ctx context.Context, host string, port int, user, passwo
 // the freshly-installed system's /root/.ssh/authorized_keys, sshd is
 // already listening on the requested port, and we need to drive the
 // rest of the bootstrap steps (ansible user setup, sshd flip if
-// not already on 4242, inventory edit) from this new session.
+// not already on the new port, inventory edit) from this new session.
 //
 // The reinstall replaces the host's keys, so no pin from before it
 // can cover the first post-reinstall dial and expect is empty there

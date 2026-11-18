@@ -371,9 +371,11 @@ From the ansbui host, this is everything:
 
 - **The control node(s)**, SSH on the port in each connection. Every
   ansible command runs there.
-- **Bootstrap targets**, SSH on the port typed into the form and then
-  on `4242`, which bootstrap moves `sshd` to. ansbui dials the target
-  itself, not through the control node.
+- **Bootstrap targets**, SSH on the current port typed into the form
+  and then on the new port bootstrap moves `sshd` to (4242 unless the
+  form says otherwise). During a reinstall also port 22, where the
+  installer sometimes answers whatever port it was given. ansbui
+  dials the target itself, not through the control node.
 - **Prometheus**, only if a URL is set, and only hosts permitted by
   `ANSBUI_PROM_ALLOWED_HOSTS` / `ANSBUI_PROM_ALLOWED_CIDRS`.
 - **`https://ipinfo.io`**, only while *Look up host regions via
@@ -534,14 +536,14 @@ Optional env vars worth knowing about:
   sent". Fix the data directory and retry. Two consequences worth
   knowing: a key is on record even if the login then fails (a
   mistyped password — the job log still shows the first-contact
-  warning for that run), and after bootstrap moves sshd to port 4242
-  the same fingerprint is recorded for `host:4242` too, so a re-run
-  against the new port is verified rather than trusted afresh. Before
-  writing that second record ansbui connects to port 4242 (key
-  exchange only, no login) to check it presents the same key; if
-  something else answers there with a different key, nothing is
-  written, any existing record for `host:4242` is kept, and the job
-  log says so.
+  warning for that run), and after bootstrap moves sshd to its new
+  port (4242 by default) the same fingerprint is recorded for
+  `host:<new port>` too, so a re-run against the new port is verified
+  rather than trusted afresh. Before writing that second record
+  ansbui connects to the new port (key exchange only, no login) to
+  check it presents the same key; if something else answers there
+  with a different key, nothing is written, any existing record for
+  that port is kept, and the job log says so.
 
   This also affects the **reinstall** option. A reinstall wipes the
   box and the new system generates fresh host keys, so no
@@ -668,7 +670,9 @@ in ansbui having changed. Two things to do:
   ansbui to a release with a newer pin (or bump it — the steps are in
   the comment above `reinstallScriptCommit`). A box that failed in
   the installer stays up in the installer environment: `ssh root@host
-  -p 4242` with the bootstrap key and read `/reinstall.log`.
+  -p <port>` with the bootstrap key and read `/reinstall.log`. The
+  error in the job log names the port; it is the new SSH port, or 22
+  if the installer was found there.
 
 ### SSH peers that stop answering
 

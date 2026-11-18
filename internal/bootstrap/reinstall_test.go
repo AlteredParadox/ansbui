@@ -167,7 +167,7 @@ func TestEvalReinstallProbe(t *testing.T) {
 // install-time helper downloads (trans.sh, debian.cfg, ...) can't
 // drift with upstream's main branch.
 func TestReinstallPrepScriptPinsConfhome(t *testing.T) {
-	script := reinstallPrepScript(ReinstallOpts{Enabled: true, OS: "debian", Version: "13"}, "ssh-ed25519 AAAA test")
+	script := reinstallPrepScript(ReinstallOpts{Enabled: true, OS: "debian", Version: "13"}, "ssh-ed25519 AAAA test", defaultNewSSHPort)
 	for _, want := range []string{
 		"sha256sum -c",
 		"confhome=" + reinstallConfhomeURL,
@@ -219,7 +219,7 @@ func TestReinstallPrepGuardsRunUnderBash(t *testing.T) {
 	if _, err := exec.LookPath("bash"); err != nil {
 		t.Skip("bash not available")
 	}
-	script := reinstallPrepScript(ReinstallOpts{Enabled: true, OS: "debian", Version: "13"}, "ssh-ed25519 AAAA test")
+	script := reinstallPrepScript(ReinstallOpts{Enabled: true, OS: "debian", Version: "13"}, "ssh-ed25519 AAAA test", defaultNewSSHPort)
 	start := strings.Index(script, "sed -i")
 	end := strings.Index(script, "chmod +x reinstall.sh")
 	if start < 0 || end < start {
