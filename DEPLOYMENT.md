@@ -21,6 +21,10 @@ It prompts twice (echo off) and writes an argon2id hash to
 Set `ANSBUI_AUTH_CREDENTIAL` to override the location. **Restart
 ansbui** for it to take effect. Rotate by re-running the command.
 
+Run it **as the service user**, as shown, not as root. A credential
+file written by root is owned by root; the service cannot read it,
+and ansbui stops at startup rather than run without a login.
+
 Once a credential exists, every `/api/*` request (reads, writes, and
 the WebSocket run streams) requires a session cookie obtained by
 logging in through the UI. The cookie is `HttpOnly`, `SameSite=Strict`,
@@ -162,10 +166,13 @@ anything.
 
 ## 1. Loopback bind
 
-The default since `9003515` is `127.0.0.1:8787`. Don't override
-unless TLS terminates in front. The startup warning fires when
-`-addr` resolves to a non-loopback host — treat it as a
-deployment-time error, not a notice.
+The default is `127.0.0.1:8787`. Don't override unless TLS
+terminates in front. ansbui logs a line at startup when `-addr` is a
+wildcard (`0.0.0.0`, `::`, or no host at all) or a non-loopback IP
+address — treat it as a deployment-time error, not a notice. A
+**hostname** in `-addr` is not resolved for this check, so it never
+triggers the line even when it points at a public address; bind by
+IP address.
 
 Loopback keeps other *machines* out. It does not keep other *users
 of this machine* out: any local account or process can connect to
@@ -231,7 +238,11 @@ the proxy should:
 
 - terminate TLS (let's encrypt or your CA)
 - forward the browser's original `Host` header and list that name in
-  `ANSBUI_ALLOWED_HOSTS` (see the README's "Remote access" section)
+  `ANSBUI_ALLOWED_HOSTS` (see the README's "Remote access" section).
+  A proxy that replaces `Host` with the backend address — nginx does
+  when the `proxy_set_header Host $host;` line is missing — makes
+  login and every other action fail with `403`, because the browser's
+  `Origin` no longer matches the host ansbui was asked for
 - send `X-Forwarded-Proto: https`. This is **required**, not
   advisory: ansbui compares the scheme of the browser's `Origin`
   with the scheme the request arrived on, so that a plain-HTTP page
@@ -343,6 +354,62 @@ sudo ufw deny 8787
 Loopback bind already prevents external dials, but the firewall
 catches an accidental `-addr 0.0.0.0:8787`.
 
+### Outbound connections
+
+Two separate lists: what the **ansbui host** connects to, which is
+complete, and what a **bootstrap target** connects to, which is not.
+The browser is in neither: the UI loads nothing from anywhere but
+ansbui.
+
+From the ansbui host, this is everything:
+
+- **The control node(s)**, SSH on the port in each connection. Every
+  ansible command runs there.
+- **Bootstrap targets**, SSH on the port typed into the form and then
+  on `4242`, which bootstrap moves `sshd` to. ansbui dials the target
+  itself, not through the control node.
+- **Prometheus**, only if a URL is set, and only hosts permitted by
+  `ANSBUI_PROM_ALLOWED_HOSTS` / `ANSBUI_PROM_ALLOWED_CIDRS`.
+- **`https://ipinfo.io`**, only while *Look up host regions via
+  ipinfo.io* is switched on in Settings (off by default). It sends
+  the **public IP addresses of your inventory hosts** to that service
+  to fill the Region column. Private and loopback addresses are never
+  sent.
+- **`https://api.porkbun.com`**, during a bootstrap whose target was
+  given as an IP address: ansbui creates or updates the DNS record
+  for the new hostname. The API key and secret are read from the
+  vault file on the control node (`porkbun_api_key` and
+  `porkbun_secret_key` in `inventory/group_vars/all/vault.yml`) with
+  the vault password typed into the form; ansbui does not store them.
+
+From a bootstrap target, without the reinstall option: its
+distribution's package mirrors, for `apt-get install` of `sudo` and
+`python3`.
+
+From a bootstrap target, **with** the reinstall option, at least the
+following. This part is driven by the upstream script and the
+installer it boots, not by ansbui, and has **not been inventoried in
+full** — expect more (the installer's package repository and time
+synchronisation, and the new system's own first-boot traffic), and
+treat the list as a starting point for an egress policy, not as the
+policy:
+
+- its package mirrors, as above, plus `curl`;
+- `raw.githubusercontent.com` (HTTPS): the script and its helpers;
+- `http://www.qualcomm.cn/cdn-cgi/trace` (**plain HTTP**, following
+  redirects): the script asks this address which country the target
+  is in before doing anything else, and **stops with "Can not get
+  location." if it gets no answer**. A target that cannot reach it
+  cannot be reinstalled;
+- `dl-cdn.alpinelinux.org` (**plain HTTP**): the installer;
+- `cdimage.debian.org` or `cloud-images.ubuntu.com` (HTTPS): the OS
+  image;
+- if the location answer is `CN`, `mirror.nju.edu.cn` instead of the
+  last two — plain HTTP for the installer, HTTPS for the image.
+
+See "Reinstall: what is and is not verified" in section 7 before
+allowing any of these.
+
 ## 5. systemd sandboxing
 
 The hardened unit lives at `deploy/ansbui.service`. Key
@@ -393,27 +460,54 @@ install:
 
 ```
 $ sudo ls -la /opt/ansbui/data/
-drwx------ 3 ansbui ansbui  config.json  (0600)
-drwx------ 2 ansbui ansbui  runs/
--rw------- 1 ansbui ansbui  runs.json    (0600)
+drwx------ ansbui ansbui  .
+-rw------- ansbui ansbui  auth_credential
+-rw------- ansbui ansbui  bootstrap_known_hosts.json
+-rw------- ansbui ansbui  config.json
+-rw------- ansbui ansbui  runs.json
 ```
 
-`config.json` contains the Prometheus URL, server connection
-details, and the ssh KeyPath strings (not the keys themselves).
-`runs.json` contains historical playbook stdout/stderr — treat
-both as sensitive.
+(`bootstrap_known_hosts.json` appears after the first bootstrap.)
+
+- `config.json` holds the server connection details, the SSH
+  `KeyPath` strings (not the keys themselves) and the Prometheus URL
+  — **including a username and password if you wrote one into it**.
+- `runs.json` holds the output of past playbook, ad-hoc and bootstrap
+  runs, and the values they were started with (secret-looking ones
+  redacted, see section 10).
+- `auth_credential` is the login password hash, and
+  `bootstrap_known_hosts.json` the host keys bootstrap has recorded.
+- `runs.json.bad-<timestamp>` appears if ansbui found the history
+  unreadable at startup and set it aside. It is a full copy of the
+  old history. ansbui never deletes it and never applies newer
+  redaction rules to it; remove it once you have looked at it.
+
+Treat all of them as sensitive. The service user's `~/.ssh`
+(`/opt/ansbui/.ssh` with the shipped unit) holds the private keys for
+the control nodes and the `known_hosts` file their host keys are
+checked against.
 
 ## 7. Environment hardening
 
 Optional env vars worth knowing about:
 
-- `ANSBUI_PROM_ALLOWED_HOSTS=host1,host2` — pin the Prometheus
-  URL setting to a known allowlist. Without it, only loopback
-  hosts are accepted by `normalisePromURL`. Set this when the
-  Prom server lives anywhere other than the same host.
-- `ANSBUI_INSECURE_SSH=1` — skip SSH host-key verification.
-  **Lab only.** MITM attacks become undetectable. The startup
-  log emits a one-time warning when this is set.
+- `ANSBUI_PROM_ALLOWED_HOSTS=host1,host2` — the hosts the
+  Prometheus URL setting may name. Without it only loopback hosts
+  are accepted. Set this when the Prom server lives anywhere other
+  than the same host.
+- `ANSBUI_PROM_ALLOWED_CIDRS=10.0.0.0/8` — the networks an allowed
+  Prometheus **hostname** may resolve to, checked when ansbui
+  connects. The host allowlist only vets the name; without this,
+  whoever controls that name's DNS chooses where ansbui's metrics
+  requests go (link-local and cloud-metadata addresses are refused
+  regardless). Set it to the network Prometheus is actually on.
+- `ANSBUI_INSECURE_SSH=1` — skip SSH host-key verification **for
+  connections to the control node**. **Lab only.** MITM attacks
+  become undetectable. The warning is logged once, when ansbui makes
+  its first SSH connection, not at startup — so it can be missing
+  from the log of a service that has not been used yet. Bootstrap
+  targets are not affected by this variable; their keys go through
+  the fingerprint store described next.
 - `ANSBUI_BOOTSTRAP_REQUIRE_HOSTKEY=1` — refuse bootstrap first
   contacts without a host key fingerprint. By default the first
   bootstrap of a target trusts whatever key it presents, records
@@ -463,6 +557,79 @@ Optional env vars worth knowing about:
   mode off (the default) reinstall behaves exactly as before and
   the field is ignored.
 
+### Reinstall: what is and is not verified
+
+The **reinstall the OS first** option in the bootstrap form wipes the
+target and installs a fresh Debian or Ubuntu by running the upstream
+[bin456789/reinstall](https://github.com/bin456789/reinstall) script
+as root on the target. Everything below is downloaded **by the
+target**, first from its current OS and then from the installer it
+reboots into. ansbui verifies the first item and not the rest:
+
+- **`reinstall.sh` — verified.** Fetched over HTTPS from
+  `raw.githubusercontent.com` at a commit fixed in the ansbui source,
+  and its SHA-256 is compared with a value compiled into ansbui. A
+  mismatch stops the run before anything from it executes.
+- **Its helper scripts (`trans.sh` and others) — HTTPS only.** ansbui
+  points them at the same commit and removes the `--insecure` the
+  upstream script passes to `curl`, so they come from that commit
+  over a checked TLS connection. ansbui holds no digest for them.
+- **Which mirrors to use — decided by an unauthenticated answer.**
+  Before downloading anything else the script asks
+  `http://www.qualcomm.cn/cdn-cgi/trace` (plain HTTP) which country
+  the target is in. For `CN` it takes the installer and the OS image
+  from `mirror.nju.edu.cn`; for anything else, from the hosts named
+  below. Nothing authenticates that answer, so whoever can alter it
+  chooses between the two sets of mirrors. With no answer at all the
+  script stops.
+- **The installer: an Alpine Linux netboot kernel, initramfs and
+  modules — not verified, and plain HTTP.** They come from
+  `http://dl-cdn.alpinelinux.org` (or `http://mirror.nju.edu.cn`).
+  Upstream uses HTTP there on purpose (some machines have a wrong
+  clock that early, which breaks HTTPS), and nothing checks a digest
+  or signature of the files.
+- **The OS image — not verified.** A Debian `…/latest/…qcow2` from
+  `cdimage.debian.org` or an Ubuntu `…/release/…img` from
+  `cloud-images.ubuntu.com` (or either from `mirror.nju.edu.cn`),
+  over HTTPS, with no digest or signature check. The path always serves the newest build, so two reinstalls
+  can install different images. It is downloaded by the installer,
+  which was itself not verified.
+
+What follows from that: whoever can alter traffic between the target
+and the Alpine mirror while a reinstall runs can swap the installer,
+and with it control the system that gets installed — including the
+`ansible` account and key that bootstrap then puts on it. That is the
+target's hosting network, any network between it and the mirror, or
+whoever can answer its DNS query for the mirror. The same holds for
+anyone able to change what a mirror or image server hands out.
+ansbui cannot notice: the reinstalled host comes back and answers
+normally. The exposure is on the **target's** network path and lasts
+for the minutes the downloads take; the path between you and ansbui,
+and between ansbui and the control node, is not involved.
+
+There is no setting that adds the missing checks. So:
+
+- Use the reinstall option only where you are willing to trust the
+  target's network path that far — in practice, a provider's
+  datacenter network you already rely on.
+- Where the provider can rebuild the machine from its own image, do
+  that instead and run bootstrap without the reinstall option.
+- A reinstalled host has a new host key that ansbui could not verify
+  either (above). Comparing the fingerprint ansbui reports against
+  the provider console tells you that you reached the right machine;
+  it says nothing about what was installed on it.
+
+A reinstall also brings the control node's ansible **private key**
+onto the ansbui host. The freshly installed system accepts only that
+key, so ansbui reads it from the control node over SSH
+(`~/.ssh/ansible_ed25519` there, or the path set in Settings) and
+uses it to reconnect. It is held in memory for that job and never
+written to disk on the ansbui host. A bootstrap without the reinstall
+option reads only the public key.
+
+This describes the upstream script at the commit ansbui currently
+pins (`reinstallScriptCommit` in `internal/bootstrap/reinstall.go`).
+
 ### SSH peers that stop answering
 
 Every command ansbui runs goes over an SSH session to a control node
@@ -494,7 +661,7 @@ with the job's result.
 
 ## 8. Backup & restore
 
-Two paths matter:
+Four files matter:
 
 - `/opt/ansbui/data/config.json` — configuration. Tiny. Back
   up on every change.
@@ -520,8 +687,12 @@ Two paths matter:
   to remove the opt-out once a password exists). It's a slow hash,
   not plaintext, but treat it as sensitive.
 
-A nightly tar-and-restic of `/opt/ansbui/data/` covers both. To
+A nightly tar-and-restic of `/opt/ansbui/data/` covers all four. To
 restore: stop the service, replace the directory, restart.
+
+A backup is a copy of everything in section 6, including run history
+as it was redacted on the day of the backup. Store it with the same
+care as the live directory.
 
 ```
 sudo systemctl stop ansbui
@@ -556,8 +727,25 @@ but both are good hygiene for a prod binary.
 
 ### Checks after upgrading
 
-Newer releases refuse some input that older ones stored. Nothing is
-rewritten for you; these are worth one look after an upgrade.
+Newer releases require things older ones did not. If ansbui does not
+come up, or the UI loads and then nothing works, check these first:
+
+- **No login password, no start.** A release that used to start
+  without a credential file now refuses to. Run `-set-password`, or
+  opt out explicitly (section 0).
+- **Behind a TLS proxy, `X-Forwarded-Proto: https` is required.**
+  Without it login and every action answer `403` naming the header.
+  Caddy sends it; nginx needs the line shown in section 2.
+- **Scripts need `X-Ansbui-Request: 1`** on the reads listed in
+  section 0, or they get `403`.
+- **The proxy must not add third-party content to the page.** The
+  `Content-Security-Policy` ansbui sends blocks anything not served
+  by ansbui itself (section 3, "Other response headers").
+- **HSTS covers the whole hostname for a year** once a browser has
+  loaded ansbui over HTTPS (section 3).
+
+Newer releases also refuse some input that older ones stored. Nothing
+is rewritten for you; these are worth one look after an upgrade.
 
 - **`~/.ssh/known_hosts` of the service user.** A connection's host
   must now be a DNS name or an IP address. Before that rule, a host
@@ -600,6 +788,13 @@ rewritten for you; these are worth one look after an upgrade.
   networks you do not control (section 0 explains what the built-in
   throttle cannot bound).
 - Rotation of `KeyPath` SSH keys when staff turn over.
+- Deciding where the bootstrap **reinstall** option may be used. Its
+  installer and OS image downloads are not verified (section 7), so
+  it is only as trustworthy as the target's network.
+- Keeping other accounts off the ansbui host. They cannot get past
+  the login, but they can connect to the backend port directly, and
+  with `127.0.0.1` in `ANSBUI_TRUSTED_PROXIES` they can interfere
+  with login throttling (section 0).
 - Watching the upstream Go security advisories — `govulncheck`
   runs in CI but a published CVE doesn't update your binary.
 - Regular `npm audit` — also in CI but worth a manual check

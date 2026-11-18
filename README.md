@@ -2,10 +2,11 @@
 
 A single-binary web UI for an Ansible control node.
 
-- **Backend**: Go 1.25 (stdlib HTTP + gorilla/websocket + golang.org/x/crypto/ssh)
+- **Backend**: Go 1.27 (stdlib HTTP + gorilla/websocket + golang.org/x/crypto/ssh)
 - **Frontend**: React / Babel served from an embedded static bundle (design by [claude.ai/design](https://claude.ai/design), ported from the `ansible-ui` handoff bundle)
 - **Integration**: connects to a remote ansible control node over SSH and runs `ansible-inventory`, `ansible`, and `ansible-playbook` there — no local Ansible install required
 - **Observability**: optionally enriches inventory with live CPU / memory / load / uptime / OS from Prometheus (node_exporter), matched by hostname
+- **Bootstrap**: prepares a fresh Debian or Ubuntu machine for ansible (DNS record, `ansible` user, sshd port, inventory entry), optionally reinstalling its OS first — see [Bootstrap](#bootstrap)
 
 ## Quick start (Debian 13)
 
@@ -30,7 +31,7 @@ To expose ansbui on another interface, put authentication in front of it first, 
 
 ## Configuration
 
-ansbui writes to `~/.config/ansbui/config.json` (and `runs.json`). The UI is the only writer — do not hand-edit while the binary is running.
+ansbui keeps its state in `~/.config/ansbui/`: `config.json` (connections and settings), `runs.json` (run history), `auth_credential` (the login password hash) and `bootstrap_known_hosts.json` (host keys recorded by bootstrap). All are written `0600`. ansbui is the only writer — do not hand-edit while the binary is running. Host keys of control nodes go to `~/.ssh/known_hosts` of the user ansbui runs as.
 
 ### Ansible server fields
 
@@ -53,16 +54,24 @@ A URL written without a scheme gets `http://`, which is what Prometheus serves b
 
 ansbui adds no credentials of its own to these requests. If your Prometheus needs a login, write it into the URL (`https://user:password@prom.example.com`); it is sent as HTTP Basic auth on every query. Because of that, **a URL with credentials is accepted only with `https://`**. With `http://`, or with no scheme, it is refused when you save it and again on every metrics fetch, so an `http://` URL with credentials already in `config.json` stops returning metrics until it is changed to `https://`. This applies to loopback too. The URL, credentials included, is stored in ansbui's `config.json` and shown in **Settings**.
 
+### Other settings
+
+Also in **Settings**:
+
+- **Auto-gather facts when the host drawer opens** — runs `ansible <host> -m setup` each time a host's detail drawer is opened. Off: the drawer shows a button instead.
+- **Look up host regions via ipinfo.io** — off by default. When on, ansbui sends the **public IP addresses of your inventory hosts** to `ipinfo.io` to fill the Region column; private, loopback and CGNAT addresses are never sent. This and the Porkbun call in [Bootstrap](#bootstrap) are the only requests ansbui makes to a third party.
+- **Control-node private key path** — used by the bootstrap reinstall flow; see [Bootstrap](#bootstrap).
+
 ### Environment variables
 
-All optional. The security-relevant ones (`ANSBUI_ALLOWED_HOSTS`, `ANSBUI_PROM_ALLOWED_HOSTS`) matter mainly for non-loopback / reverse-proxy deployments.
+All optional. A loopback-only instance with a login password needs none of them; a reverse-proxy deployment needs `ANSBUI_ALLOWED_HOSTS` and should set `ANSBUI_TRUSTED_PROXIES`.
 
 | Variable | Purpose | Default |
 |----------|---------|---------|
 | `ANSBUI_ALLOWED_HOSTS` | Comma-separated `host` or `host:port` values the DNS-rebinding guard accepts in the request `Host` header. **Required when behind a reverse proxy that forwards a public hostname** (see below). The port is optional — it's stripped on both sides before matching. | Only loopback (`localhost`, `*.localhost`, IP literals) and the hostname from `-addr` are accepted. |
 | `ANSBUI_PROM_ALLOWED_HOSTS` | Comma-separated `host` or `host:port` allowed as the Prometheus scrape target (SSRF guard). | Loopback only. |
 | `ANSBUI_PROM_ALLOWED_CIDRS` | Comma-separated CIDRs an allowlisted Prometheus **hostname** is permitted to resolve to, enforced at dial time. Closes DNS rebinding: the hostname allowlist can only vet the name, so whoever controls its DNS otherwise chooses the destination. Set it to the network your Prometheus actually lives on (e.g. `10.0.0.0/8`). A malformed entry fails closed. | Unset — any address resolves except unspecified/multicast/link-local and the cloud-metadata addresses, which are always denied. |
-| `ANSBUI_INSECURE_SSH` | `1` or `true` disables SSH **host-key** verification for connections ansbui itself makes (the bootstrap flow's first contact with a fresh box). Lab-only; MITM is undetectable in this mode and it logs a warning on startup. | Off — host keys are verified against `~/.ssh/known_hosts` (TOFU on first sight, hard fail on mismatch). |
+| `ANSBUI_INSECURE_SSH` | `1` or `true` disables SSH **host-key** verification for connections to the **control node**. Lab-only; MITM is undetectable in this mode. The warning is logged when the first SSH connection is made, not at startup. Bootstrap targets are not affected: their keys are checked against ansbui's own fingerprint store (next row). | Off — control-node host keys are verified against `~/.ssh/known_hosts` (TOFU on first sight, hard fail on mismatch). |
 | `ANSBUI_BOOTSTRAP_REQUIRE_HOSTKEY` | `1` or `true` requires a bootstrap target's SSH host-key fingerprint to be pinned (in the form) or already recorded before ansbui will connect, so even the first contact is authenticated. Also gates the **reinstall** option: a reinstall regenerates the box's host keys and the replacement can't be authenticated in band, so such a run is rejected up front unless the operator ticks the per-run host-key acknowledgement in the bootstrap form (recorded in the job log). Per-run rather than a second env var, so strict mode keeps meaning "nothing is trusted *silently*". | Off — the first bootstrap of a target trusts the key it presents (with a loud warning), records it, and enforces it on every later run; the reinstall acknowledgement is not shown and is ignored. |
 | `ANSBUI_ALLOW_UNAUTHENTICATED` | `1` or `true` lets ansbui start with **no login password** (same as the `-allow-unauthenticated` flag). Every `/api` route, including the ones that run ansible, then answers anyone who can connect to the listen address — and on a loopback bind that is every user and process on the host, whatever a reverse proxy in front requires. Remove it once a password is set: with it left on, a lost credential file starts ansbui without login. | Off — with no credential file ansbui **refuses to start** and says to run `-set-password`. |
 | `ANSBUI_AUTH_REQUIRED` | `1` or `true` makes ansbui refuse to start when no login credential file exists **even if the opt-out above is set**. Only useful together with it, as a guard for a unit that still carries the opt-out; without the opt-out a missing credential already stops the start. | Off. |
@@ -103,28 +112,54 @@ The proxy must also tell ansbui the browser's connection was HTTPS by sending `X
 
 List multiple names comma-separated (`ANSBUI_ALLOWED_HOSTS=ansbui.example.com,ansbui.internal`). If the `403` error names a `Host` with a port, copying that value verbatim works too — the port is ignored when matching.
 
+## Bootstrap
+
+The **Bootstrap** view takes a fresh machine (Debian or Ubuntu) and its root or sudo password, and makes it an ansible-managed host:
+
+1. If the target was given as an IP address, creates or updates the DNS record for the new hostname at Porkbun. The API key and secret are read from the vault on the control node (`porkbun_api_key` / `porkbun_secret_key` in `inventory/group_vars/all/vault.yml`) using the vault password typed into the form. A target given as a hostname skips this step.
+2. Connects to the target over SSH **from the ansbui host** with the password from the form, and installs `sudo` and `python3`.
+3. Creates an `ansible` user with passwordless sudo and the control node's public key (`~/.ssh/ansible_ed25519.pub` there) in its `authorized_keys`.
+4. Moves `sshd` to port `4242`.
+5. Adds the host to the inventory file on the control node, under a group named after the provider.
+
+The passwords typed into the form are used for that job and are not stored. The target's SSH host key is recorded on first contact and enforced on later runs; `ANSBUI_BOOTSTRAP_REQUIRE_HOSTKEY` makes a pinned fingerprint mandatory instead.
+
+**Reinstall the OS first** wipes the target and installs a fresh Debian or Ubuntu before those steps, using the upstream [bin456789/reinstall](https://github.com/bin456789/reinstall) script. Two things to know before ticking it: ansbui verifies that script but **not the installer or OS image it downloads**, and for the reconnect it reads the control node's ansible private key over SSH into memory. Both are described in [DEPLOYMENT.md](DEPLOYMENT.md#reinstall-what-is-and-is-not-verified).
+
 ## Repo layout
 
 ```
-main.go                 # boot + HTTP server
-internal/config/        # JSON config store (servers, prometheus url)
-internal/sshpool/       # cached *ssh.Client pool
-internal/ansible/       # inventory / playbook / adhoc / runs
+main.go                 # boot, flags, HTTP server
+internal/api/           # HTTP + WebSocket handlers, request guards, login throttle
+internal/auth/          # password hash + sessions
+internal/config/        # JSON config store (servers, settings), Prometheus URL rules
+internal/sshpool/       # cached *ssh.Client pool, known_hosts handling
+internal/ansible/       # inventory / playbook / adhoc / vault / run history + redaction
+internal/bootstrap/     # new-host bootstrap and OS reinstall
+internal/jobs/          # background jobs (bootstrap) and their logs
 internal/prom/          # prometheus query client
-internal/api/           # HTTP + WebSocket handlers
-web/                    # static bundle (embedded)
+internal/geoip/         # ipinfo.io region lookup (opt-in)
+internal/porkbun/       # Porkbun DNS API client (bootstrap)
+internal/ttlcache/      # small bounded cache
+web/                    # static bundle (embedded): JSX views, vendored React/Babel, fonts
+tests/web/              # unit tests for the browser scripts
+eslint-rules/           # local lint rule
+deploy/                 # hardened systemd unit
+.github/                # CI, release and Dependabot config
 .claude/                # Claude Code project config (see CI)
 ```
 
 ## Security posture
 
 - **Built-in login is on by default and single-operator.** ansbui refuses to start until `ansbui -set-password` has been run (argon2id hash stored 0600 in the config dir; session cookie is `HttpOnly` + `SameSite=Strict`, `Secure` over HTTPS). Running without it is an explicit choice: `-allow-unauthenticated` or `ANSBUI_ALLOW_UNAUTHENTICATED=1`. In that mode anyone who can connect to the listen port can drive `ansible-playbook` as the configured SSH user, and **a loopback bind does not narrow that to you**: TCP on `127.0.0.1` is open to every account and process on the host, and a reverse proxy with auth in front does not change that, since local processes connect to the backend port directly. For multi-user or SSO, terminate auth at the proxy **and** keep the built-in password. Failed logins are throttled per source address (per `/64` for IPv6). See [DEPLOYMENT.md](DEPLOYMENT.md#0-built-in-login).
-- SSH auth to the ansible controller is key-based only (agent or on-disk key) — no password prompt. Host keys are verified (see `ANSBUI_INSECURE_SSH` to opt out in a lab).
+- SSH auth to the ansible controller is key-based only (agent or on-disk key) — no password prompt. Host keys are verified (see `ANSBUI_INSECURE_SSH` to opt out in a lab). A connection's host must be a DNS name or an IP address, and the account's login shell must be a POSIX shell. Bootstrap targets are the one place a password is used for SSH: the one typed into the bootstrap form, sent only after the target's host key has been recorded or matched.
+- **Run history is redacted, best effort.** Values of extra-vars and module arguments whose name looks like a secret (`password`, `token`, `secret`, `…_pass`, …) are replaced before a run is saved, and the same names are scrubbed from output lines. A secret under any other name is stored as typed, and so is anything a task prints. `runs.json` stays sensitive — see [DEPLOYMENT.md](DEPLOYMENT.md#10-whats-still-on-the-operator).
 - **DNS-rebinding guard:** every `/api/` request must carry a recognised `Host` header (loopback, the `-addr` hostname, or an `ANSBUI_ALLOWED_HOSTS` entry). Reverse-proxy deployments must set `ANSBUI_ALLOWED_HOSTS` — see [Remote access](#remote-access--the-dns-rebinding-guard).
 - **CSRF guard:** every `/api/` request — reads included — must be same-origin, and the WebSocket upgrader enforces the same check. Three rules: (1) if the browser sent `Sec-Fetch-Site`, it must be `same-origin` or `none`; (2) if an `Origin` header is present, its **scheme and host:port** must match the request's — behind a TLS-terminating proxy the scheme comes from `X-Forwarded-Proto`, so the proxy **must** send `X-Forwarded-Proto: https` (Caddy does by default) or every action returns `403`; (3) a `GET` without an `Origin` to a route that contacts the control node or Prometheus (`/api/inventory`, `/api/facts`, `/api/metrics`, `/api/playbooks`, `/api/playbooks/content`, `/api/vault`) must carry the header `X-Ansbui-Request: 1`, which the UI sends and a page on another site cannot — scripts add `-H 'X-Ansbui-Request: 1'`. Reads are covered because a cross-origin trigger still does the server-side work (e.g. `/api/facts` can run `ansible … -m setup` across the fleet) even though the response stays opaque to the caller.
 - **Nothing is loaded from another origin.** The page, its styles, scripts and fonts (Inter and JetBrains Mono, in `web/fonts/`) are all embedded in the binary, and a `Content-Security-Policy` on every response keeps it that way: styles, fonts, images and network connections are limited to ansbui itself (`style-src 'self'; font-src 'self'; img-src 'self' data:; connect-src 'self'`), with `Referrer-Policy: no-referrer`. This matters because one page holds every password field — a stylesheet from elsewhere is enough to read a password as it is typed. `script-src` still allows inline scripts, which the in-browser JSX compiler needs; the policy bounds what a script could load or contact, not whether one could run.
 - **Response headers:** every response forbids framing (`Content-Security-Policy: … frame-ancestors 'none'`, `X-Frame-Options: DENY`) and content sniffing (`X-Content-Type-Options: nosniff`). Over HTTPS ansbui also sends `Strict-Transport-Security: max-age=31536000`. HSTS applies to the **hostname on every port** for a year, so a plain-HTTP service sharing ansbui's hostname would stop loading in the operator's browser — give ansbui its own hostname. See [DEPLOYMENT.md](DEPLOYMENT.md#hsts-give-ansbui-its-own-hostname).
 - **SSRF guard:** the server-side Prometheus fetch is constrained to loopback / `ANSBUI_PROM_ALLOWED_HOSTS`, with cloud-metadata addresses always denied — enforced at save time, at fetch time, and again at **dial time** against the address DNS actually returned. The host allowlist alone can't stop rebinding (it vets the name, not the destination), so the client resolves the target itself, checks each candidate, and connects to the exact IP it approved; `ANSBUI_PROM_ALLOWED_CIDRS` narrows that to a specific network.
+- **Bootstrap's reinstall option trusts the target's network.** ansbui checksum-verifies the reinstall script it runs on the target, but the installer that script boots is downloaded by the target over plain HTTP, and the OS image is not checked against a digest. Someone on the target's network path could substitute either, so use the option only where you trust that path. See [DEPLOYMENT.md](DEPLOYMENT.md#reinstall-what-is-and-is-not-verified).
 - Playbook paths are validated against `^[A-Za-z0-9._-]+$` per segment, blocking `..` traversal.
 - Ansible argument keys are validated; values are shell-quoted.
 - The binary writes config with mode `0600` in `~/.config/ansbui/`.

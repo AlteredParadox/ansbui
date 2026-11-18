@@ -607,6 +607,9 @@ function BootstrapView() {
               <div className="mute" style={{ fontSize: 11, marginTop: 6 }}>
                 The target reboots into the chosen OS, sshd is set to <span className="mono">:4242</span> with the ansible public key in root&rsquo;s <span className="mono">authorized_keys</span>, then bootstrap continues. Expect 10&ndash;30 minutes; the run lives on the backend so you can close this tab and re-attach later. <b>Assumes the target&rsquo;s address (IP or hostname&rsquo;s DNS) still points at the same machine after the reboot.</b>
               </div>
+              <div className="mute" style={{ fontSize: 11, marginTop: 6 }}>
+                <b>Only the reinstall script itself is checksum-verified.</b> The installer it boots is downloaded by the target over plain HTTP, and the OS image is not checked against a digest, so someone on the target&rsquo;s network path could substitute either. Use this where you trust that network; details are in <span className="mono">DEPLOYMENT.md</span> under &ldquo;Reinstall: what is and is not verified&rdquo;.
+              </div>
               {strictHostKey && (
                 <div style={{ marginTop: 10 }}>
                   <label className="opt" htmlFor="boot-reinstall-hostkey-ack">
