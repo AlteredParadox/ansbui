@@ -356,11 +356,12 @@ catches an accidental `-addr 0.0.0.0:8787`.
 
 ### Outbound connections
 
-For an egress policy, this is everything ansbui connects to. The
-browser is not in the list: the UI loads nothing from anywhere but
+Two separate lists: what the **ansbui host** connects to, which is
+complete, and what a **bootstrap target** connects to, which is not.
+The browser is in neither: the UI loads nothing from anywhere but
 ansbui.
 
-From the ansbui host:
+From the ansbui host, this is everything:
 
 - **The control node(s)**, SSH on the port in each connection. Every
   ansible command runs there.
@@ -381,12 +382,33 @@ From the ansbui host:
   `porkbun_secret_key` in `inventory/group_vars/all/vault.yml`) with
   the vault password typed into the form; ansbui does not store them.
 
-From a bootstrap target, during bootstrap: its distribution's package
-mirrors (`apt-get install` of `sudo`, `python3` and, for a reinstall,
-`curl`). With the reinstall option also `raw.githubusercontent.com`,
-`dl-cdn.alpinelinux.org` (plain HTTP) and `cdimage.debian.org` or
-`cloud-images.ubuntu.com` — see "Reinstall: what is and is not
-verified" in section 7 before allowing those.
+From a bootstrap target, without the reinstall option: its
+distribution's package mirrors, for `apt-get install` of `sudo` and
+`python3`.
+
+From a bootstrap target, **with** the reinstall option, at least the
+following. This part is driven by the upstream script and the
+installer it boots, not by ansbui, and has **not been inventoried in
+full** — expect more (the installer's package repository and time
+synchronisation, and the new system's own first-boot traffic), and
+treat the list as a starting point for an egress policy, not as the
+policy:
+
+- its package mirrors, as above, plus `curl`;
+- `raw.githubusercontent.com` (HTTPS): the script and its helpers;
+- `http://www.qualcomm.cn/cdn-cgi/trace` (**plain HTTP**, following
+  redirects): the script asks this address which country the target
+  is in before doing anything else, and **stops with "Can not get
+  location." if it gets no answer**. A target that cannot reach it
+  cannot be reinstalled;
+- `dl-cdn.alpinelinux.org` (**plain HTTP**): the installer;
+- `cdimage.debian.org` or `cloud-images.ubuntu.com` (HTTPS): the OS
+  image;
+- if the location answer is `CN`, `mirror.nju.edu.cn` instead of the
+  last two — plain HTTP for the installer, HTTPS for the image.
+
+See "Reinstall: what is and is not verified" in section 7 before
+allowing any of these.
 
 ## 5. systemd sandboxing
 
@@ -552,15 +574,24 @@ reboots into. ansbui verifies the first item and not the rest:
   points them at the same commit and removes the `--insecure` the
   upstream script passes to `curl`, so they come from that commit
   over a checked TLS connection. ansbui holds no digest for them.
+- **Which mirrors to use — decided by an unauthenticated answer.**
+  Before downloading anything else the script asks
+  `http://www.qualcomm.cn/cdn-cgi/trace` (plain HTTP) which country
+  the target is in. For `CN` it takes the installer and the OS image
+  from `mirror.nju.edu.cn`; for anything else, from the hosts named
+  below. Nothing authenticates that answer, so whoever can alter it
+  chooses between the two sets of mirrors. With no answer at all the
+  script stops.
 - **The installer: an Alpine Linux netboot kernel, initramfs and
   modules — not verified, and plain HTTP.** They come from
-  `http://dl-cdn.alpinelinux.org`. Upstream uses HTTP there on
-  purpose (some machines have a wrong clock that early, which breaks
-  HTTPS), and nothing checks a digest or signature of the files.
+  `http://dl-cdn.alpinelinux.org` (or `http://mirror.nju.edu.cn`).
+  Upstream uses HTTP there on purpose (some machines have a wrong
+  clock that early, which breaks HTTPS), and nothing checks a digest
+  or signature of the files.
 - **The OS image — not verified.** A Debian `…/latest/…qcow2` from
   `cdimage.debian.org` or an Ubuntu `…/release/…img` from
-  `cloud-images.ubuntu.com`, over HTTPS, with no digest or signature
-  check. The path always serves the newest build, so two reinstalls
+  `cloud-images.ubuntu.com` (or either from `mirror.nju.edu.cn`),
+  over HTTPS, with no digest or signature check. The path always serves the newest build, so two reinstalls
   can install different images. It is downloaded by the installer,
   which was itself not verified.
 
@@ -570,7 +601,7 @@ and with it control the system that gets installed — including the
 `ansible` account and key that bootstrap then puts on it. That is the
 target's hosting network, any network between it and the mirror, or
 whoever can answer its DNS query for the mirror. The same holds for
-anyone able to change what the mirror or the image servers hand out.
+anyone able to change what a mirror or image server hands out.
 ansbui cannot notice: the reinstalled host comes back and answers
 normally. The exposure is on the **target's** network path and lasts
 for the minutes the downloads take; the path between you and ansbui,
