@@ -252,3 +252,41 @@ func TestStripBlockScalarsPreservesLineCount(t *testing.T) {
 		t.Errorf("content after the block was dropped: %q", got)
 	}
 }
+
+// TestPlaybookIDsAreUniquePerFile: the id is what the UI selects and
+// looks a playbook up by, so two files must never share one. It used
+// to be the base name without its extension, which made all of these
+// "pb-deploy"; the UI took the first match, so choosing one of them
+// displayed, saved and ran another.
+func TestPlaybookIDsAreUniquePerFile(t *testing.T) {
+	paths := []string{
+		"deploy.yml",
+		"deploy.yaml",
+		"staging/deploy.yml",
+		"staging/deploy.yaml",
+		"prod/deploy.yml",
+		"a/b/deploy.yml",
+		"deploy.yml.yml",
+		"deploy",
+	}
+	raw := ""
+	for _, p := range paths {
+		raw += p + "\t10\t1700000000.0\n"
+	}
+	list := parsePlaybookList(raw)
+	if len(list) != len(paths) {
+		t.Fatalf("parsed %d playbooks, want %d", len(list), len(paths))
+	}
+	byID := map[string]string{}
+	for _, p := range list {
+		if other, dup := byID[p.ID]; dup {
+			t.Errorf("%s and %s share the id %q", other, p.Path, p.ID)
+		}
+		byID[p.ID] = p.Path
+		// The listing and the single-file loader must agree, or a
+		// card and its loaded content would carry different ids.
+		if want := playbookID(p.Path); p.ID != want {
+			t.Errorf("%s: listed id %q, loader id %q", p.Path, p.ID, want)
+		}
+	}
+}

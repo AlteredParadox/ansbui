@@ -27,9 +27,16 @@ func (r *Recorder) ensureSorted() {
 // "other" kind are left at their zero value, so a UI can switch on
 // Kind and read only what's relevant.
 type RunRecord struct {
-	ID        string    `json:"id"`
-	Kind      string    `json:"kind"` // "adhoc" or "playbook"
-	Server    string    `json:"server"`
+	ID     string `json:"id"`
+	Kind   string `json:"kind"` // "adhoc" or "playbook"
+	Server string `json:"server"`
+	// ServerID is the config id of the connection the run went
+	// through. Server (the display name) can be renamed or shared by
+	// two connections; the UI compares this to the active connection
+	// before offering to re-run a record, so a run recorded on one
+	// control node is not replayed on another. Empty on records from
+	// before the field existed and on bootstrap records.
+	ServerID  string    `json:"serverId,omitempty"`
 	Target    string    `json:"target"`
 	Module    string    `json:"module,omitempty"`
 	Playbook  string    `json:"playbook,omitempty"`

@@ -31,6 +31,126 @@ export function reactStub() {
   };
 }
 
+// A hook runtime for running ONE function component: its body, its
+// state and its effects. Children are recorded as elements (see
+// reactStub) and not rendered, so this exercises a component's own
+// logic — which state it ends up in, what it hands its children — and
+// nothing below it.
+//
+//   const rt = hookRuntime();
+//   const page = createPage({ React: rt.React });
+//   loadScript(page, 'views/Some.jsx');
+//   const view = rt.mount(page.SomeView, props);
+//   view.tree            // the element tree of the settled render
+//   view.update(props)   // new props, re-render until settled
+//   view.rerender()      // after calling a handler that set state
+//   view.unmount()       // run effect cleanups
+//
+// Effects run synchronously after each render pass, and a pass that
+// sets state is followed by another, until nothing changes. Promises
+// are not awaited: give the component data that needs no fetch.
+export function hookRuntime() {
+  let current = null;
+  const same = (a, b) => Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((v, i) => Object.is(v, b[i]));
+  const cell = (make) => {
+    const inst = current;
+    const k = inst.next++;
+    if (!(k in inst.cells)) inst.cells[k] = make();
+    return [inst, k, inst.cells[k]];
+  };
+  const React = {
+    ...reactStub(),
+    useState(initial) {
+      const [inst, , c] = cell(() => ({ value: typeof initial === 'function' ? initial() : initial }));
+      const set = (next) => {
+        const value = typeof next === 'function' ? next(c.value) : next;
+        if (!Object.is(value, c.value)) {
+          c.value = value;
+          inst.dirty = true;
+        }
+      };
+      return [c.value, set];
+    },
+    useRef(initial) {
+      return cell(() => ({ current: initial }))[2];
+    },
+    useMemo(compute, deps) {
+      const [inst, k, c] = cell(() => ({ deps, value: compute() }));
+      if (!same(c.deps, deps)) inst.cells[k] = { deps, value: compute() };
+      return inst.cells[k].value;
+    },
+    useCallback(fn, deps) {
+      return React.useMemo(() => fn, deps);
+    },
+    useEffect(effect, deps) {
+      const [inst, k, c] = cell(() => ({ deps: null, cleanup: undefined, fresh: true }));
+      if (!c.fresh && same(c.deps, deps)) return;
+      inst.effects.push(() => {
+        c.cleanup?.();
+        const cleanup = effect();
+        inst.cells[k] = { deps, cleanup: typeof cleanup === 'function' ? cleanup : undefined, fresh: false };
+      });
+    },
+  };
+  function mount(Component, props) {
+    const inst = { cells: [], next: 0, effects: [], dirty: false, props, tree: null };
+    const render = () => {
+      for (let pass = 0; pass < 50; pass++) {
+        inst.dirty = false;
+        inst.next = 0;
+        inst.effects = [];
+        current = inst;
+        try {
+          inst.tree = Component(inst.props);
+        } finally {
+          current = null;
+        }
+        for (const run of inst.effects) run();
+        if (!inst.dirty) return;
+      }
+      throw new Error('component did not settle after 50 render passes');
+    };
+    render();
+    return {
+      get tree() {
+        return inst.tree;
+      },
+      update(next) {
+        inst.props = { ...inst.props, ...next };
+        render();
+      },
+      rerender: render,
+      unmount() {
+        for (const c of inst.cells) c?.cleanup?.();
+      },
+    };
+  }
+  return { React, mount };
+}
+
+// Every element in a recorded tree (see reactStub) for which `test`
+// returns true, depth first.
+export function findElements(tree, test) {
+  const found = [];
+  const walk = (node) => {
+    if (Array.isArray(node)) return node.forEach(walk);
+    if (!node || typeof node !== 'object') return;
+    if (test(node)) found.push(node);
+    walk(node.children);
+  };
+  walk(tree);
+  return found;
+}
+
+// The text inside a recorded element: its string and number children,
+// joined.
+export function textOf(node) {
+  if (Array.isArray(node)) return node.map(textOf).join('');
+  if (typeof node === 'string' || typeof node === 'number') return String(node);
+  if (!node || typeof node !== 'object') return '';
+  return textOf(node.children);
+}
+
 // Returns a fresh page-like context. `globals` are added to it before any
 // script runs (a `fetch` stub, for instance), and may replace `React`.
 export function createPage(globals = {}) {

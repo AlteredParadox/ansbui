@@ -277,7 +277,7 @@
 
   // annotatePlaybooksWithRuns walks the raw run records (before
   // toRunCard's string friendlification) and picks the most recent
-  // run per playbook path/name. Populates lastRun, lastStatus, and a
+  // run per playbook path. Populates lastRun, lastStatus, and a
   // per-playbook run counter so the Playbooks library can show live
   // "last ran 2h ago" / status dots without a second API call.
   function annotatePlaybooksWithRuns(playbooks, rawRuns) {
@@ -293,9 +293,12 @@
         latest[key] = r;
       }
     }
+    // Matched on the path alone. A run records the path it executed;
+    // falling back to the file name credited staging/deploy.yml with
+    // the runs (and the last status) of deploy.yml.
     return playbooks.map(p => {
-      const r = latest[p.path] || latest[p.name];
-      const runCount = counts[p.path] || counts[p.name] || 0;
+      const r = latest[p.path];
+      const runCount = counts[p.path] || 0;
       if (!r) return { ...p, runs: runCount };
       return {
         ...p,
@@ -391,6 +394,8 @@
       kind: r.kind || 'adhoc',
       pb: r.playbook || r.module || (r.kind === 'bootstrap' ? 'bootstrap' : ''),
       playbook: r.playbook || '',
+      server: r.server || '',
+      serverId: r.serverId || '',
       module: r.module || '',
       target: r.target || '',
       status: r.status || 'ok',
