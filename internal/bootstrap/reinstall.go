@@ -896,17 +896,21 @@ func evalInstallerProbe(out, expectedOS string) (int, string) {
 // box HELD and reachable for inspection instead of rebooting it
 // into a possibly-unreachable first boot.
 func runInstallerHoldStage(ctx context.Context, host string, privKey []byte, netInfo reinstallNetInfo, expectedOS string, emit func(typ, text string)) (bool, error) {
-	holdTarget, alreadyFinal, err := waitForInstallerDone(ctx, host, reinstallSSHPort, privKey, expectedOS, emit)
+	held, err := waitForInstallerDone(ctx, host, reinstallSSHPort, privKey, expectedOS, emit)
 	if err != nil {
 		return false, err
 	}
-	if alreadyFinal {
+	if held.verdict == installerFinalOS {
 		emit("meta", "target already answers as the final OS — skipping installer-env verification (rebooted out-of-band?)")
 		return false, nil
 	}
+	holdTarget := held.target
 	defer func() { _ = holdTarget.Close() }()
 	emit("ok", "installer finished writing the new system — verifying before first boot...")
-	if err := verifyInstalledSystem(ctx, holdTarget, host, netInfo, emit); err != nil {
+	// held.port, not the requested port: it is where the installer
+	// actually answers, and where the operator has to go if the
+	// verification stops the run.
+	if err := verifyInstalledSystem(ctx, holdTarget, heldInstaller{host: host, port: held.port}, netInfo, emit); err != nil {
 		return false, err
 	}
 	emit("meta", "triggering reboot into the freshly-installed system...")
@@ -914,23 +918,27 @@ func runInstallerHoldStage(ctx context.Context, host string, privKey []byte, net
 	return true, nil
 }
 
-// waitForInstallerDone polls the installer env on (host:port) until
-// trans.sh reports the install finished (hold marker), errored, or
-// the box already answers as the final OS. Returns the OPEN session
-// on hold-done — the caller runs the verification over it — and
-// (nil, true, nil) when the final OS answered. Timeout means the
-// installer env never finished or never came up at all; its own
-// network setup is the usual culprit for the latter, observable
-// only on the provider console.
-func waitForInstallerDone(ctx context.Context, host string, port int, privKey []byte, expectedOS string, emit func(typ, text string)) (*targetSession, bool, error) {
-	const (
-		initialWait     = 15 * time.Second
-		retryInterval   = 15 * time.Second
-		heartbeatPeriod = 60 * time.Second
-	)
+// installerPoll is the cadence of the installer-stage wait. Variables
+// only so a test can run the loop without sleeping for real.
+var installerPoll = struct {
+	initialWait, retryInterval, heartbeatPeriod time.Duration
+}{15 * time.Second, 15 * time.Second, 60 * time.Second}
+
+// waitForInstallerDone polls the installer env on host until trans.sh
+// reports the install finished (hold marker), errored, or the box
+// already answers as the final OS. It asks on port and, when nothing
+// usable answers there, on installerDefaultPort.
+//
+// The returned probe has verdict installerHoldDone with the session
+// OPEN — the caller runs the verification over it, on probe.port — or
+// installerFinalOS with no session. Timeout means the installer env
+// never finished or never came up at all; its own network setup is
+// the usual culprit for the latter, observable only on the provider
+// console.
+func waitForInstallerDone(ctx context.Context, host string, port int, privKey []byte, expectedOS string, emit func(typ, text string)) (installerProbe, error) {
 	deadline := time.Now().Add(reinstallWaitBudget)
-	if err := sleepCtx(ctx, initialWait); err != nil {
-		return nil, false, err
+	if err := sleepCtx(ctx, installerPoll.initialWait); err != nil {
+		return installerProbe{}, err
 	}
 	startedAt := time.Now()
 	lastBeat := time.Now()
@@ -941,7 +949,7 @@ func waitForInstallerDone(ctx context.Context, host string, port int, privKey []
 			if lastStatus != "" {
 				hint = fmt.Sprintf("last status: %s — %s", lastStatus, hint)
 			}
-			return nil, false, fmt.Errorf("timeout after %s waiting for the installer to finish writing %s: %s", friendly(reinstallWaitBudget), expectedOS, hint)
+			return installerProbe{}, fmt.Errorf("timeout after %s waiting for the installer to finish writing %s: %s", friendly(reinstallWaitBudget), expectedOS, hint)
 		}
 		p := tryInstallerDone(ctx, host, port, privKey, expectedOS)
 		switch p.verdict {
@@ -949,19 +957,19 @@ func waitForInstallerDone(ctx context.Context, host string, port int, privKey []
 			if note := installerPortNote(p.port, port); note != "" {
 				emit("meta", note)
 			}
-			return p.target, false, nil
+			return p, nil
 		case installerFinalOS:
-			return nil, true, nil
+			return p, nil
 		case installerErrored:
-			return nil, false, fmt.Errorf("the installer reported an error and is holding the box in its live env — ssh root@%s -p %d (bootstrap key) to inspect /reinstall.log and /os, then re-run bootstrap. Last log: %s", host, p.port, p.detail)
+			return installerProbe{}, fmt.Errorf("the installer reported an error and is holding the box in its live env — ssh root@%s -p %d (bootstrap key) to inspect /reinstall.log and /os, then re-run bootstrap. Last log: %s", host, p.port, p.detail)
 		}
 		lastStatus = p.detail
-		if time.Since(lastBeat) >= heartbeatPeriod {
+		if time.Since(lastBeat) >= installerPoll.heartbeatPeriod {
 			emit("meta", fmt.Sprintf("installer still writing %s (%s elapsed) — %s", expectedOS, friendly(time.Since(startedAt)), p.detail))
 			lastBeat = time.Now()
 		}
-		if err := sleepCtx(ctx, retryInterval); err != nil {
-			return nil, false, err
+		if err := sleepCtx(ctx, installerPoll.retryInterval); err != nil {
+			return installerProbe{}, err
 		}
 	}
 }
@@ -1115,6 +1123,14 @@ func installedNetVerifyScript(ips []net.IP) string {
 	}, "; ")
 }
 
+// heldInstaller is where the parked installer is reachable: the
+// address and the port it actually answers on, which is not always
+// the one it was given (installerDefaultPort).
+type heldInstaller struct {
+	host string
+	port int
+}
+
 // verifyInstalledSystem runs over the held installer session:
 // persist the log, surface its tail, and gate the reboot on the
 // rendered network config mentioning a detected address (or DHCP).
@@ -1122,7 +1138,7 @@ func installedNetVerifyScript(ips []net.IP) string {
 // likely boot unreachable, and holding the box beats losing it.
 // Everything else fails open: at this point the disk is already
 // written, so an inconclusive check must not strand a good install.
-func verifyInstalledSystem(ctx context.Context, target *targetSession, host string, netInfo reinstallNetInfo, emit func(typ, text string)) error {
+func verifyInstalledSystem(ctx context.Context, target *targetSession, at heldInstaller, netInfo reinstallNetInfo, emit func(typ, text string)) error {
 	if _, _, err := target.runRoot(ctx, persistInstallLogScript, ""); err != nil {
 		emit("meta", fmt.Sprintf("couldn't persist the install log into the new system (%v) — continuing", err))
 	} else {
@@ -1153,7 +1169,7 @@ func verifyInstalledSystem(ctx context.Context, target *targetSession, host stri
 	case "NO_CONFIG_DIRS":
 		emit("meta", "no known network-config dirs under /os — can't verify the render; continuing")
 	case "NOT_FOUND":
-		return fmt.Errorf("aborting before first boot: the installed system's network config mentions neither the detected address(es) %s nor DHCP — it would likely boot unreachable. The box is HELD in the installer env: ssh root@%s -p %d (bootstrap key), inspect/fix the config under /os/etc, run `reboot`, then re-run bootstrap without the reinstall step", netInfo.summary(), host, reinstallSSHPort)
+		return fmt.Errorf("aborting before first boot: the installed system's network config mentions neither the detected address(es) %s nor DHCP — it would likely boot unreachable. The box is HELD in the installer env: ssh root@%s -p %d (bootstrap key), inspect/fix the config under /os/etc, run `reboot`, then re-run bootstrap without the reinstall step", netInfo.summary(), at.host, at.port)
 	default:
 		emit("meta", "rendered-config check returned an unexpected verdict — continuing")
 	}

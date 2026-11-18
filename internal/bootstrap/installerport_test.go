@@ -219,3 +219,151 @@ func TestChooseInstallerProbe(t *testing.T) {
 		}
 	})
 }
+
+// fastInstallerPoll makes the installer-stage loop run without real
+// waits.
+func fastInstallerPoll(t *testing.T) {
+	t.Helper()
+	old := installerPoll
+	installerPoll.initialWait = time.Millisecond
+	installerPoll.retryInterval = 5 * time.Millisecond
+	installerPoll.heartbeatPeriod = time.Millisecond
+	t.Cleanup(func() { installerPoll = old })
+}
+
+// The whole wait, as the run performs it: the requested port is
+// silent, the parked installer is on the default port. The wait must
+// end with a session on that port and say so in the job log.
+func TestWaitForInstallerDoneFindsItOnDefaultPort(t *testing.T) {
+	fastInstallerPoll(t)
+	host, port := startKeyTarget(t, installerOutput("alpine", 1, 0, "***** HOLD 2 *****"))
+	usePortAsInstallerDefault(t, port)
+	requested := closedPort(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	var log emitLog
+	p, err := waitForInstallerDone(ctx, host, requested, testClientKey(t), "debian", log.emit)
+	if err != nil {
+		t.Fatalf("waitForInstallerDone: %v", err)
+	}
+	defer func() { _ = p.target.Close() }()
+	if p.verdict != installerHoldDone || p.port != port {
+		t.Fatalf("got verdict %d on :%d, want hold-done on :%d", p.verdict, p.port, port)
+	}
+	want := "listening on :" + strconv.Itoa(port) + ", not on :" + strconv.Itoa(requested)
+	if !strings.Contains(log.text(), want) {
+		t.Errorf("job log does not say where the installer was found (%q):\n%s", want, log.text())
+	}
+}
+
+// While the installer on the default port is still working, the job
+// log carries its progress, and the wait ends only when the caller's
+// context does.
+func TestWaitForInstallerDoneReportsProgressFromDefaultPort(t *testing.T) {
+	fastInstallerPoll(t)
+	host, port := startKeyTarget(t, installerOutput("alpine", 0, 0, "Download qcow2 image"))
+	usePortAsInstallerDefault(t, port)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
+	defer cancel()
+	var log emitLog
+	_, err := waitForInstallerDone(ctx, host, closedPort(t), testClientKey(t), "debian", log.emit)
+	if err == nil {
+		t.Fatal("the wait ended although the installer never finished")
+	}
+	if !strings.Contains(log.text(), "answering on :"+strconv.Itoa(port)) || !strings.Contains(log.text(), "Download qcow2 image") {
+		t.Errorf("job log does not carry the installer's progress:\n%s", log.text())
+	}
+}
+
+// An installer that failed on the default port ends the run with the
+// port it is really reachable on in the recovery instructions.
+func TestWaitForInstallerDoneErrorNamesTheRealPort(t *testing.T) {
+	fastInstallerPoll(t)
+	host, port := startKeyTarget(t, installerOutput("alpine", 0, 1, "Line 12 return 1"))
+	usePortAsInstallerDefault(t, port)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	var log emitLog
+	_, err := waitForInstallerDone(ctx, host, closedPort(t), testClientKey(t), "debian", log.emit)
+	if err == nil || !strings.Contains(err.Error(), "-p "+strconv.Itoa(port)+" ") {
+		t.Fatalf("error = %v, want recovery instructions for port %d", err, port)
+	}
+}
+
+// A machine that already answers as the target OS on the REQUESTED
+// port ends the wait with no session; the boot probe decides the rest.
+func TestWaitForInstallerDoneFinalOSOnRequestedPort(t *testing.T) {
+	fastInstallerPoll(t)
+	host, port := startKeyTarget(t, installerOutput("debian", 0, 0, ""))
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	var log emitLog
+	p, err := waitForInstallerDone(ctx, host, port, testClientKey(t), "debian", log.emit)
+	if err != nil || p.verdict != installerFinalOS || p.target != nil {
+		t.Fatalf("got verdict %d, session %v, err %v; want final-OS with no session", p.verdict, p.target != nil, err)
+	}
+}
+
+// When the rendered network config looks wrong the run stops and
+// leaves the box parked. The instructions must send the operator to
+// the port the installer answers on — on a fallback run that is not
+// the requested one, which is known to be silent.
+func TestVerifyInstalledSystemNamesTheInstallersRealPort(t *testing.T) {
+	host, port := startKeyTarget(t, "NOT_FOUND\n")
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	target, err := dialKeyTarget(ctx, host, port, testClientKey(t), hostKeyExpectation{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = target.Close() }()
+
+	netInfo := parseReinstallNetInfo("IPv4 Address: 192.0.2.5/24\nIPv4 Gateway: 192.0.2.1\n")
+	var log emitLog
+	err = verifyInstalledSystem(ctx, target, heldInstaller{host: "192.0.2.5", port: 22}, netInfo, log.emit)
+	if err == nil {
+		t.Fatal("a NOT_FOUND verdict did not stop the run")
+	}
+	if !strings.Contains(err.Error(), "ssh root@192.0.2.5 -p 22 ") {
+		t.Errorf("recovery instructions do not name the installer's port:\n%v", err)
+	}
+	if strings.Contains(err.Error(), "-p "+strconv.Itoa(reinstallSSHPort)) {
+		t.Errorf("recovery instructions name the requested port, which does not answer:\n%v", err)
+	}
+}
+
+// text is the whole job log, one event per line.
+func (e *emitLog) text() string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return strings.Join(e.lines, "\n")
+}
+
+// The hold stage end to end on a fallback run: the installer is found
+// on the default port, verified over that session, and told to reboot.
+func TestRunInstallerHoldStageOverDefaultPort(t *testing.T) {
+	fastInstallerPoll(t)
+	host, port := startKeyTarget(t, installerOutput("alpine", 1, 0, "***** HOLD 2 *****"))
+	usePortAsInstallerDefault(t, port)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	netInfo := parseReinstallNetInfo("IPv4 Address: 192.0.2.5/24\nIPv4 Gateway: 192.0.2.1\n")
+	var log emitLog
+	verified, err := runInstallerHoldStage(ctx, host, testClientKey(t), netInfo, "debian", log.emit)
+	if err != nil || !verified {
+		t.Fatalf("runInstallerHoldStage = %v, %v; want the install verified\n%s", verified, err, log.text())
+	}
+	for _, want := range []string{
+		"listening on :" + strconv.Itoa(port),
+		"installer finished writing the new system",
+		"triggering reboot into the freshly-installed system",
+	} {
+		if log.count(want) == 0 {
+			t.Errorf("job log is missing %q:\n%s", want, log.text())
+		}
+	}
+}
