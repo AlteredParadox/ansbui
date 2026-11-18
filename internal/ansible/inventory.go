@@ -6,13 +6,16 @@ package ansible
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/AlteredParadox/ansbui/internal/config"
 	"github.com/AlteredParadox/ansbui/internal/sshpool"
+	"golang.org/x/crypto/ssh"
 )
 
 // Group mirrors the shape of `ansible-inventory --list` group records.
@@ -201,6 +204,63 @@ func sortInventory(inv *Inventory) {
 // shellQuote wraps a value in single quotes so it survives expansion on
 // the remote shell. Used for inventory / workdir paths supplied by the
 // operator — we never splice raw user input here.
+//
+// This is POSIX quoting: inside single quotes every character is
+// literal, and a single quote is written by closing the quotes, adding
+// a double-quoted one and reopening. sh, bash, dash, ksh and zsh all
+// read it that way. fish does not — there a backslash before a quote
+// inside single quotes is an escape, so a value containing \' ends the
+// word early and the rest is parsed as commands. Every command ansbui
+// sends is read first by the control-node account's login shell, so
+// that shell has to be a POSIX one; CheckShellQuoting tests it.
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'"
+}
+
+// shellQuoteProbe is a value that only survives shellQuote when the
+// remote shell reads single quotes the POSIX way: it contains the
+// backslash-quote pair fish treats as an escape, plus the characters a
+// broken parse would act on.
+const shellQuoteProbe = `a\'b"c;d$HOME|e` + "`f`" + `\\g *h`
+
+// ErrShellQuoting is returned by CheckShellQuoting when the control
+// node's login shell did not hand a quoted value back unchanged.
+var ErrShellQuoting = errors.New("the login shell on this control node does not read quoted arguments the way a POSIX shell does")
+
+// CheckShellQuoting sends shellQuoteProbe through shellQuote and
+// printf on the control node and reports whether it came back byte
+// for byte. It tests the property the rest of this package relies on
+// rather than the shell's name. Used by the connection test.
+func CheckShellQuoting(ctx context.Context, cli *ssh.Client) error {
+	out, _, err := sshpool.Run(ctx, cli, "printf '%s' "+shellQuote(shellQuoteProbe))
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	if err != nil {
+		return fmt.Errorf("%w (the test command failed: %w)", ErrShellQuoting, err)
+	}
+	if out != shellQuoteProbe {
+		return ErrShellQuoting
+	}
+	return nil
+}
+
+// hostNameRE is what a host name may look like where ansbui takes one
+// from outside and acts on it: letters, digits, '_', '.', '-' and ':'
+// (IPv6 literals), at most 253 characters, not starting with '-'.
+var hostNameRE = regexp.MustCompile(`^[A-Za-z0-9_.:][A-Za-z0-9_.:-]{0,252}$`)
+
+// ValidHostName reports whether s is a plain host name. Two callers:
+//
+//   - the facts endpoint, whose host parameter becomes an argument of
+//     the ansible command line. A leading '-' would be read by ansible
+//     as an option, and anything outside this set has no business in a
+//     single-host lookup.
+//   - classify, which lifts a host name out of each "fatal: [name]"
+//     style output line. Those lines are free text — a managed host
+//     can print one from a command's stdout — and the name is later
+//     offered back to the operator as a retry target and written into
+//     a generated playbook.
+func ValidHostName(s string) bool {
+	return hostNameRE.MatchString(s)
 }

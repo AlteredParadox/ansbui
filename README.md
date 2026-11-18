@@ -17,7 +17,7 @@ go build -o ansbui .
 
 ansbui targets Go 1.27 (see `go.mod`). Debian 13 packages an older Go; the `go` command fetches the toolchain `go.mod` names on the first build. If your environment sets `GOTOOLCHAIN=local`, install a current Go from [go.dev/dl](https://go.dev/dl/) instead.
 
-Open `http://127.0.0.1:8787/` in a browser. On first load you'll be prompted to add an ansible server — the SSH coordinates of a remote machine that already has `ansible` installed.
+Open `http://127.0.0.1:8787/` in a browser. On first load you'll be prompted to add an ansible server — the SSH coordinates of a remote machine that already has `ansible` installed. The host is a DNS name or an IP address, and the account's login shell there must be a POSIX shell (`sh`, `bash`, `dash`, `ksh`, `zsh`); **Test connection** checks both that `ansible` answers and that the shell reads quoted arguments correctly.
 
 To expose ansbui on another interface, put authentication in front of it first, then bind explicitly:
 
@@ -42,7 +42,7 @@ ansbui writes to `~/.config/ansbui/config.json` (and `runs.json`). The UI is the
 
 ### Prometheus
 
-Paste your Prometheus URL (e.g. `http://prom.example.com:9090`) in **Settings**. The host label defaults to `instance` — change if your node_exporter scrapes use a different label. Matching strips any `:port` suffix (bracketed IPv6 instance labels are handled).
+Paste your Prometheus URL (e.g. `http://prom.example.com:9090`) in **Settings**. It is a base address: a path prefix is fine (`https://host/prometheus`), a `?query` or `#fragment` is refused. The host label defaults to `instance` — change if your node_exporter scrapes use a different label. Matching strips any `:port` suffix (bracketed IPv6 instance labels are handled).
 
 The Prometheus URL is fetched **server-side with no auth in front of it**, so it's constrained by an SSRF allowlist. By default only loopback hosts (`127.0.0.1`, `::1`, `localhost`) are accepted, and cloud-metadata addresses (169.254.0.0/16, `metadata.google.internal`, …) are always rejected. To point at a Prometheus on another host, list it in `ANSBUI_PROM_ALLOWED_HOSTS` (see below). This is enforced both when you save the URL and on every metrics fetch, so a hand-edited `config.json` can't bypass it.
 

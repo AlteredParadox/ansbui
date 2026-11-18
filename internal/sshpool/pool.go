@@ -260,6 +260,13 @@ func Stream(ctx context.Context, client *ssh.Client, cmd string, stdin io.Reader
 }
 
 func dial(ctx context.Context, srv config.Server) (*ssh.Client, error) {
+	// Checked here as well as when a record is saved: a record stored
+	// by an older release, or edited into config.json by hand, never
+	// went through that check, and the host is about to be written
+	// into known_hosts.
+	if err := config.ValidateServerHost(srv.Host); err != nil {
+		return nil, fmt.Errorf("this connection's host cannot be used: %w — edit the connection", err)
+	}
 	auth, cleanup, err := buildAuth(srv)
 	if err != nil {
 		// buildAuth may have registered a cleanup before the

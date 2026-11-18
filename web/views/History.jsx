@@ -22,6 +22,9 @@ function HistoryView({ onOpenPlaybook, onRunPlaybook, onOpenAdhoc, activeServer 
   const data = globalThis.AnsibleData || {};
   const RUNS = data.RUNS || [];
   const PLAYBOOKS = data.PLAYBOOKS || [];
+  // The active connection's inventory: what "Retry failed" checks the
+  // recorded host names against.
+  const INVENTORY = { hosts: data.HOSTS || [], groups: data.GROUPS || [] };
   const [selectedId, setSelectedId] = useStateH(RUNS[0]?.id || '');
   const [filter, setFilter] = useStateH('all');
   const [detail, setDetail] = useStateH(null);
@@ -145,9 +148,9 @@ function HistoryView({ onOpenPlaybook, onRunPlaybook, onOpenAdhoc, activeServer 
                     <button
                       type="button"
                       className="btn small"
-                      onClick={() => onRunPlaybook?.(buildRetryPrefill(detail))}
-                      disabled={failedHostsFromLog(detail.log).length === 0 || !!rerunBlocked(PLAYBOOKS, detail, activeServer)}
-                      title={rerunBlocked(PLAYBOOKS, detail, activeServer) || 'Re-run against only the hosts that failed last time'}
+                      onClick={() => onRunPlaybook?.(buildRetryPrefill(detail, INVENTORY))}
+                      disabled={!!retryBlocked(detail, INVENTORY) || !!rerunBlocked(PLAYBOOKS, detail, activeServer)}
+                      title={rerunBlocked(PLAYBOOKS, detail, activeServer) || retryBlocked(detail, INVENTORY) || 'Re-run against only the hosts that failed last time'}
                     >
                       <Icon name="refresh" size={12}/> Retry failed
                     </button>
@@ -169,9 +172,9 @@ function HistoryView({ onOpenPlaybook, onRunPlaybook, onOpenAdhoc, activeServer 
                     <button
                       type="button"
                       className="btn small"
-                      onClick={() => onOpenAdhoc?.(buildAdhocRetryPrefill(detail))}
-                      disabled={failedHostsFromLog(detail.log).length === 0}
-                      title="Re-run against only the hosts that failed last time"
+                      onClick={() => onOpenAdhoc?.(buildAdhocRetryPrefill(detail, INVENTORY))}
+                      disabled={!!retryBlocked(detail, INVENTORY)}
+                      title={retryBlocked(detail, INVENTORY) || 'Re-run against only the hosts that failed last time'}
                     >
                       <Icon name="refresh" size={12}/> Retry failed
                     </button>
@@ -298,6 +301,8 @@ function rerunBlocked(playbooks, run, activeServer) {
 // failedHostsFromLog scans a run's event log for "fail" or
 // recap-fail entries that carry a host name. Dedupes and returns
 // hostnames in the order they appeared.
+//
+// These names are NOT to be acted on as they are — see retryHosts.
 function failedHostsFromLog(log) {
   if (!Array.isArray(log)) return [];
   const seen = new Set();
@@ -310,6 +315,53 @@ function failedHostsFromLog(log) {
     }
   }
   return out;
+}
+
+// retryHosts is the list "Retry failed" may target: the failed hosts
+// from the log that are hosts of this connection's inventory and were
+// within what the recorded run was aimed at.
+//
+// The names in the log come from output lines ("fatal: [name]: …"),
+// and an output line is free text. A managed host can print one from
+// a command's stdout, naming `all`, a group, or another machine. The
+// retry used to take those names as its new target, so one line of
+// output from one host could turn "retry on the host that failed"
+// into the same command on every host. Three checks:
+//
+//   - the name must be a HOST in the inventory. `all`, group names
+//     and patterns are never hosts, so they are dropped.
+//   - for an ad-hoc run, it must be one of the hosts the recorded
+//     target expands to; for a playbook run that had a --limit, one of
+//     the hosts that limit expands to. A retry never reaches a host
+//     the original run did not.
+//   - a recorded target or limit that uses pattern operators this UI
+//     does not evaluate ('!', '&', wildcards, ranges, regexes) cannot
+//     be checked that way; then only the inventory check applies.
+//
+// A playbook run with no --limit ran on whatever its plays name, which
+// is not recorded here; a --limit only ever narrows that, so naming an
+// inventory host in it cannot add a host the playbook does not target.
+function retryHosts(run, inventory) {
+  const hosts = inventory?.hosts || [];
+  const known = new Set(hosts.map(h => h.name));
+  let names = failedHostsFromLog(run?.log).filter(n => known.has(n));
+  const scope = run?.kind === 'adhoc' ? (run.target || 'all') : (run?.limit || '');
+  if (scope && !/[!&*?~[]/.test(scope)) {
+    const resolved = globalThis.AnsbuiResolveTargetHosts?.(scope, hosts, inventory?.groups || []) || [];
+    const inScope = new Set(resolved.map(h => h.name));
+    names = names.filter(n => inScope.has(n));
+  }
+  return names;
+}
+
+// retryBlocked says why "Retry failed" is not offered, or '' when it
+// is. It distinguishes a log with no failed hosts from one whose
+// failed hosts were all set aside by retryHosts, so the operator is
+// told the names were not usable rather than shown a dead button.
+function retryBlocked(run, inventory) {
+  if (retryHosts(run, inventory).length > 0) return '';
+  if (failedHostsFromLog(run?.log).length === 0) return 'The run\'s output names no failed host';
+  return 'None of the failed hosts named in the output is a host of this connection\'s inventory that the run was aimed at';
 }
 
 // The two prefill builders below carry the record's connection
@@ -330,8 +382,8 @@ function buildRerunPrefill(run) {
   };
 }
 
-function buildRetryPrefill(run) {
-  const hosts = failedHostsFromLog(run.log);
+function buildRetryPrefill(run, inventory) {
+  const hosts = retryHosts(run, inventory);
   return {
     playbookPath: run.playbook,
     server: run.server || '',
@@ -360,8 +412,8 @@ function buildAdhocRerunPrefill(run) {
   };
 }
 
-function buildAdhocRetryPrefill(run) {
-  const hosts = failedHostsFromLog(run.log);
+function buildAdhocRetryPrefill(run, inventory) {
+  const hosts = retryHosts(run, inventory);
   return {
     ...buildAdhocRerunPrefill(run),
     target: hosts.length ? hosts.join(',') : run.target || 'all'
