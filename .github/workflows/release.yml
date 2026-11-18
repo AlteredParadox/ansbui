@@ -90,7 +90,10 @@ jobs:
         run: |
           v="${GITHUB_REF_NAME}"
           [ "${GITHUB_REF_TYPE}" = tag ] || v="dev"
-          case "$v" in ''|*[!A-Za-z0-9._+-]*) echo "refusing version stamp: $v" >&2; exit 1;; esac
+          case "$v" in
+            ''|*[!A-Za-z0-9._+-]*) echo "refusing version stamp: $v" >&2; exit 1 ;;
+            *) ;;
+          esac
           go build -trimpath -ldflags "-s -w -X main.version=${v}" \
             -o "ansbui-linux-${GOARCH}" .
 
