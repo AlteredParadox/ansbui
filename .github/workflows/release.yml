@@ -34,6 +34,8 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
+          # No cache in the release path: see the build job.
+          cache: false
       - name: Go vet
         run: go vet ./...
       - name: Go test (race)
@@ -50,9 +52,19 @@ jobs:
         goarch: [amd64, arm64]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # cache: false — the release binary is built from a fresh module
+      # download, verified against go.sum, and a cold build cache. setup-go
+      # otherwise restores GOMODCACHE and GOCACHE from the Actions cache,
+      # which jobs on main also write: the CI jobs that run linters, the
+      # vulnerability scanner and the test suite. Go does not re-verify
+      # what it finds in either cache, so anything that got to run in one
+      # of those jobs could leave an object there for the release build to
+      # link. A few minutes of rebuild is the price of not having to trust
+      # every tool CI runs with the contents of the release.
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
+          cache: false
 
       # No version is stamped: main.go has no version variable, and `-X` on
       # a symbol that does not exist is a silent no-op. Add `-X main.version`
@@ -96,12 +108,15 @@ jobs:
 
       # gh is preinstalled on the runner — no third-party action, so nothing
       # beyond GitHub itself ever sees the token. --generate-notes builds the
-      # changelog from the commits since the previous tag.
+      # changelog from the commits since the previous tag. --verify-tag
+      # makes gh refuse to create the tag itself: the release is attached
+      # to the tag that triggered this run or not made at all.
       - name: Create Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release create "${GITHUB_REF_NAME}" \
+            --verify-tag \
             --title "${GITHUB_REF_NAME}" \
             --generate-notes \
             dist/ansbui-linux-* dist/SHA256SUMS

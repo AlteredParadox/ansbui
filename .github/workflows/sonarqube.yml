@@ -19,9 +19,9 @@ on:
     branches: [main]
   pull_request:
 
-# Least privilege: read-only. This job hands SONAR_TOKEN to a third-party
-# action, so every action is pinned to a full commit SHA — a retagged action
-# must not be able to exfiltrate the secret.
+# Least privilege: read-only. The scan job hands SONAR_TOKEN to a
+# third-party action, so every action is pinned to a full commit SHA — a
+# retagged action must not be able to exfiltrate the secret.
 permissions:
   contents: read
 
@@ -29,21 +29,35 @@ concurrency:
   group: sonar-${{ github.ref }}
   cancel-in-progress: true
 
+# Two jobs, split on purpose.
+#
+# `coverage` runs the repository's code (`go test` compiles and executes
+# whatever the checkout holds, test dependencies included) and has no secret
+# in scope. `scan` holds SONAR_TOKEN and executes nothing from the checkout:
+# it receives coverage.out as an artifact and runs the pinned scanner over
+# the files.
+#
+# They used to be one job. Code from a pull request then ran on the same
+# runner, minutes before the token was handed to the scanner, and could have
+# left anything behind for that step to pick up: an edited PATH or
+# GITHUB_ENV, a background process, a replaced tool. Separate jobs are
+# separate machines, and the only thing that crosses is one data file.
+#
+# What this does not change: the scanner still reads its configuration
+# (sonar-project.properties) from the checkout, so someone who can push a
+# branch to this repository can still influence how the scan is run.
 jobs:
-  scan:
+  coverage:
     runs-on: ubuntu-latest
-    # Dependabot's event token can't read SONAR_TOKEN (GitHub scopes it to a
-    # separate dependabot secret store), and neither can a fork PR's. A scan
-    # would fail on auth alone, so skip it — ci.yml is still the gate there.
+    # Skipped where `scan` is skipped (same condition, see there): the
+    # profile has no other consumer.
     if: >-
       github.actor != 'dependabot[bot]' &&
       (github.event_name != 'pull_request' ||
-       github.event.pull_request.head.repo.full_name == github.repository)
+       (github.event.pull_request.user.login != 'dependabot[bot]' &&
+        github.event.pull_request.head.repo.full_name == github.repository))
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          # Full history: SonarQube needs blame data for new-code periods.
-          fetch-depth: 0
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
@@ -52,6 +66,43 @@ jobs:
       # -covermode=atomic because the suite runs concurrent handlers.
       - name: Go tests with coverage
         run: go test -covermode=atomic -coverprofile=coverage.out ./...
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: go-coverage
+          path: coverage.out
+          if-no-files-found: error
+          retention-days: 1
+
+  scan:
+    needs: coverage
+    runs-on: ubuntu-latest
+    # Dependabot's event token can't read SONAR_TOKEN (GitHub scopes it to a
+    # separate dependabot secret store), and neither can a fork PR's. A scan
+    # would fail on auth alone, so skip it — ci.yml is still the gate there.
+    #
+    # A Dependabot pull request is recognised by its AUTHOR as well as by the
+    # actor of this run. The actor is whoever triggered the run: when a
+    # maintainer pushes to a Dependabot branch, or re-runs its checks, the
+    # actor is the maintainer and the run does get the repository's secrets
+    # — for a dependency update nobody has reviewed yet.
+    if: >-
+      github.actor != 'dependabot[bot]' &&
+      (github.event_name != 'pull_request' ||
+       (github.event.pull_request.user.login != 'dependabot[bot]' &&
+        github.event.pull_request.head.repo.full_name == github.repository))
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Full history: SonarQube needs blame data for new-code periods.
+          fetch-depth: 0
+
+      # coverage.out lands in the workspace root, where
+      # sonar.go.coverage.reportPaths expects it. The profile names files by
+      # import path, so it does not matter that another runner produced it.
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: go-coverage
 
       # Record the version with every analysis. Without it SonarQube has no
       # version boundaries, so a "previous version" New Code definition has
@@ -64,11 +115,19 @@ jobs:
       # became its own "version" and the new-code period shrank to the
       # latest commit. --abbrev=0 prints the nearest release tag alone;
       # before the first release the version is the fixed "unreleased".
+      #
+      # The value is interpolated into the scanner's argument string below,
+      # and git accepts tag names containing characters that mean something
+      # there (quotes, `$`, `;`, a leading `-D`). Anything that is not
+      # exactly a release tag is reported as "unreleased".
       - name: Resolve version
         id: ver
         run: |
           v=$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || true)
-          echo "v=${v:-unreleased}" >> "$GITHUB_OUTPUT"
+          if [[ ! "$v" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
+            v=unreleased
+          fi
+          echo "v=$v" >> "$GITHUB_OUTPUT"
 
       - name: SonarQube Cloud scan
         uses: SonarSource/sonarqube-scan-action@59202af334b4ba7b5db01b701b8e79f8b3bef0f4 # v8.5.0
