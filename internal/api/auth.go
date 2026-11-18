@@ -89,7 +89,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	// why check-then-verify is not enough); every early return below
 	// the switch must go through loginLimit.end.
 	source := s.loginSourceKey(r)
-	switch s.loginLimit.begin(source, time.Now()) {
+	switch s.loginLimit.begin(r.Context(), source, s.now()) {
 	case loginBusy:
 		writeError(w, http.StatusTooManyRequests, errors.New("another login attempt is already being verified — retry in a moment"))
 		return
