@@ -338,6 +338,9 @@ function failedHostsFromLog(log) {
 //     does not evaluate ('!', '&', wildcards, ranges, regexes) cannot
 //     be checked that way; then only the inventory check applies.
 //
+// A host named by an IPv6 address is matched as a whole name before
+// its colons are read as separators (see resolveTargetHosts).
+//
 // A playbook run with no --limit ran on whatever its plays name, which
 // is not recorded here; a --limit only ever narrows that, so naming an
 // inventory host in it cannot add a host the playbook does not target.

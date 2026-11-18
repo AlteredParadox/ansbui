@@ -220,6 +220,44 @@ test('a scope with pattern operators falls back to the inventory check alone', (
   assert.deepEqual(plain(retryHosts(playbookRun('web[1:2]', ['web2', 'prod']), INVENTORY)), ['web2']);
 });
 
+// An inventory host can be named by an IPv6 address. Its colons are
+// part of the name, not pattern separators.
+const V6 = '2001:db8::1';
+const INVENTORY_V6 = {
+  hosts: [...INVENTORY.hosts, { id: 'h6', name: V6, groups: ['web'] }, { id: 'h7', name: 'fd00::7', groups: ['db'] }],
+  groups: INVENTORY.groups,
+};
+
+test('a host named by an IPv6 address stays in the retry scope', () => {
+  // The recorded target IS the host: the retry must offer it, not drop it.
+  assert.deepEqual(plain(retryHosts(adhocRun(V6, [V6]), INVENTORY_V6)), [V6]);
+  assert.equal(retryBlocked(adhocRun(V6, [V6]), INVENTORY_V6), '');
+  // In a comma-separated list, next to names and groups.
+  assert.deepEqual(plain(retryHosts(adhocRun(`web1,${V6},db`, [V6, 'fd00::7', 'web1']), INVENTORY_V6)), [V6, 'fd00::7', 'web1']);
+  // Reached through its group.
+  assert.deepEqual(plain(retryHosts(adhocRun('web', [V6]), INVENTORY_V6)), [V6]);
+  // A playbook run limited to it.
+  assert.deepEqual(plain(retryHosts(playbookRun(V6, [V6, 'web1']), INVENTORY_V6)), [V6]);
+  assert.equal(buildRetryPrefill(playbookRun(`${V6},web1`, [V6]), INVENTORY_V6).limit, V6);
+  // Still scoped: another IPv6 host outside the target is not added.
+  assert.deepEqual(plain(retryHosts(adhocRun(V6, ['fd00::7', V6]), INVENTORY_V6)), [V6]);
+  assert.deepEqual(plain(retryHosts(adhocRun('db', [V6]), INVENTORY_V6)), []);
+});
+
+test('target resolution: commas first, whole piece as a host before splitting on colons', () => {
+  const names = (target) => plain(page.AnsbuiResolveTargetHosts(target, INVENTORY_V6.hosts, INVENTORY_V6.groups).map((h) => h.name));
+  assert.deepEqual(names(V6), [V6]);
+  assert.deepEqual(names(`${V6},fd00::7`), [V6, 'fd00::7']);
+  assert.deepEqual(names(`db1, ${V6}`), ['db1', V6]);
+  // Colon-separated names and groups still work as before.
+  assert.deepEqual(names('web1:db1'), ['web1', 'db1']);
+  assert.deepEqual(names('db:cache'), ['db1', 'fd00::7', 'cache1']);
+  assert.deepEqual(names('web1,db:cache1'), ['web1', 'db1', 'fd00::7', 'cache1']);
+  assert.deepEqual(names('all').length, INVENTORY_V6.hosts.length);
+  assert.deepEqual(names(''), []);
+  assert.deepEqual(names('nosuch'), []);
+});
+
 test('the prefill carries only the hosts that passed', () => {
   const adhoc = buildAdhocRetryPrefill(adhocRun('web', ['all', 'web2', 'db1']), INVENTORY);
   assert.equal(adhoc.target, 'web2');

@@ -56,17 +56,18 @@ function suggestedTargets(hosts, groups, descendants) {
 }
 
 // splitTargetPattern splits an ansible target string on the ':' and
-// ',' pattern separators, but NOT inside '[...]' host ranges — so
-// `web[01:05]` stays one token instead of being torn into `web[01`
-// and `05]`. Whitespace-trimmed, empties dropped.
-function splitTargetPattern(pattern) {
+// ',' pattern separators (or only on those given), but NOT inside
+// '[...]' host ranges — so `web[01:05]` stays one token instead of
+// being torn into `web[01` and `05]`. Whitespace-trimmed, empties
+// dropped.
+function splitTargetPattern(pattern, separators = ':,') {
   const toks = [];
   let cur = '';
   let depth = 0;
   for (const ch of pattern) {
     if (ch === '[') depth += 1;
     else if (ch === ']') depth = Math.max(0, depth - 1);
-    if ((ch === ':' || ch === ',') && depth === 0) {
+    if (separators.includes(ch) && depth === 0) {
       if (cur.trim()) toks.push(cur.trim());
       cur = '';
     } else {
@@ -84,6 +85,14 @@ function splitTargetPattern(pattern) {
 // ranges); a pattern using them resolves to more hosts than ansible
 // would pick, or to none.
 //
+// ':' is both a pattern separator and part of an IPv6 address, and an
+// inventory host can be named by one (`2001:db8::1`). Ansible settles
+// that by splitting on ',' first and trying the whole piece as an
+// address before it splits on ':'. The same order is used here, with
+// the inventory as the test: a comma-separated piece that IS a host
+// name is that host, and only otherwise is it split on ':'. Splitting
+// first tore such a name into tokens that matched nothing.
+//
 // Used for the composer's host count and status grid, and by History
 // (as AnsbuiResolveTargetHosts) to keep "Retry failed" inside the
 // hosts the original run was aimed at.
@@ -92,15 +101,20 @@ function resolveTargetHosts(target, hosts, descendants) {
   const out = [];
   const seen = new Set();
   const add = (h) => { if (!seen.has(h.id)) { seen.add(h.id); out.push(h); } };
-  for (const tok of splitTargetPattern(target || '')) {
-    if (tok === 'all') { hosts.forEach(add); continue; }
+  const addToken = (tok) => {
+    if (tok === 'all') { hosts.forEach(add); return; }
     const host = byName.get(tok);
-    if (host) { add(host); continue; }
+    if (host) { add(host); return; }
     const set = descendants[tok];
     const matches = set
       ? hosts.filter(h => (h.groups || []).some(g => set.has(g)))
       : hosts.filter(h => (h.groups || []).includes(tok));
     matches.forEach(add);
+  };
+  for (const piece of splitTargetPattern(target || '', ',')) {
+    const host = byName.get(piece);
+    if (host) { add(host); continue; }
+    splitTargetPattern(piece, ':').forEach(addToken);
   }
   return out;
 }
@@ -661,14 +675,16 @@ function suggestFilename(moduleName) {
 function renderAdhocAsPlaybook({ target, module, args, become }) {
   const argEntries = Object.entries(args || {}).filter(([, v]) => v !== '' && v != null);
   const hosts = target || 'all';
+  const playName = yamlScalar(module + ' on ' + hosts);
+  const taskName = yamlScalar('run ' + module);
   const lines = [
     '---',
-    `- name: ${yamlScalar(`${module} on ${hosts}`)}`,
+    `- name: ${playName}`,
     `  hosts: ${yamlScalar(hosts)}`,
     '  gather_facts: false',
     ...(become ? ['  become: true'] : []),
     '  tasks:',
-    `    - name: ${yamlScalar(`run ${module}`)}`,
+    `    - name: ${taskName}`,
     `      ${yamlScalar(module)}:`,
     ...argEntries.map(([k, v]) => `        ${yamlScalar(k)}: ${yamlScalar(v)}`)
   ];
@@ -693,7 +709,7 @@ const YAML_QUOTE_ESCAPE = YAML_BACKSLASH + '"';
 // meaning in YAML: ':' (a value ending in one, or "a: b", starts a
 // mapping), '#', a leading '-', '@', '*', '&', '!' or '%', brackets,
 // braces, commas and quotes.
-const YAML_PLAIN = /^[A-Za-z0-9_]([\w./@-]*[A-Za-z0-9_])?$/;
+const YAML_PLAIN = /^\w([\w./@-]*\w)?$/;
 
 // yamlNeedsEscape reports whether a code point must be written as a
 // \u escape inside a double-quoted scalar: the C0 and C1 controls,
