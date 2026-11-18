@@ -235,7 +235,7 @@ func TestAuth_OneSubnetCannotLockOutTheOperator(t *testing.T) {
 				default:
 				}
 				// A different address of the same /64 every time.
-				code := attempt(fmt.Sprintf("[2001:db8:0:1::%x:%x]:4242", g+1, i+1), "nope")
+				code := attempt(floodAddr(g, i), "nope")
 				mu.Lock()
 				codes[code]++
 				mu.Unlock()
@@ -268,6 +268,56 @@ func TestAuth_OneSubnetCannotLockOutTheOperator(t *testing.T) {
 	}
 	if codes[http.StatusTooManyRequests] == 0 {
 		t.Fatalf("the flood was never refused: %v", codes)
+	}
+	// Every flood request must have landed in the one bucket the test
+	// is about. The operator's entry is gone (a success clears it), so
+	// the /64 is the only source left; anything else here means the
+	// test sent addresses that are not in it.
+	s.loginLimit.mu.Lock()
+	defer s.loginLimit.mu.Unlock()
+	if _, ok := s.loginLimit.sources[floodSubnet]; !ok || len(s.loginLimit.sources) != 1 {
+		keys := make([]string, 0, len(s.loginLimit.sources))
+		for k := range s.loginLimit.sources {
+			keys = append(keys, k)
+		}
+		t.Fatalf("tracked sources = %q, want only %s", keys, floodSubnet)
+	}
+}
+
+// floodSubnet is the one source every floodAddr address belongs to.
+const floodSubnet = "2001:db8:0:1::/64"
+
+// floodAddr is address n of goroutine g, all inside floodSubnet. The
+// counter is spread over two 16-bit groups, so it stays an IPv6
+// address for any n the loop can reach.
+//
+// It used to be printed into a single group. That stops being an
+// address at n = 0xffff ("…:10000"); the limiter keys a RemoteAddr it
+// cannot parse by its raw text, so from there on every request was
+// its own source with a fresh budget, and the test counted more
+// password checks than one bucket allows. Whether a run got that far
+// depended on how fast the machine spun the loop while the operator's
+// three logins were verified — rarely on a small or busy box, often
+// on a fast one.
+func floodAddr(g, n int) string {
+	return fmt.Sprintf("[2001:db8:0:1:%x:0:%x:%x]:4242", g+1, (n>>16)&0xffff, n&0xffff)
+}
+
+// However far the flood's counter runs, its addresses stay in the one
+// /64 — including past the point where the old format broke.
+func TestFloodAddrStaysInOneSubnet(t *testing.T) {
+	s := &Server{}
+	for _, g := range []int{0, 3} {
+		for _, n := range []int{0, 1, 0xfffe, 0xffff, 0x10000, 0x10001, 1 << 20, 1<<31 - 1} {
+			r := httptest.NewRequest(http.MethodPost, "/api/login", nil)
+			r.RemoteAddr = floodAddr(g, n)
+			if got := s.loginSourceKey(r); got != floodSubnet {
+				t.Errorf("floodAddr(%d, %#x) = %s is keyed as %q, want %s", g, n, r.RemoteAddr, got, floodSubnet)
+			}
+		}
+	}
+	if floodAddr(0, 0xffff) == floodAddr(0, 0x10000) || floodAddr(0, 5) == floodAddr(1, 5) {
+		t.Error("floodAddr repeats an address")
 	}
 }
 
