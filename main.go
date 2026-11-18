@@ -41,10 +41,28 @@ import (
 //go:embed all:web
 var webFS embed.FS
 
+// Flag help. It is the first thing an operator reads, so it has to
+// describe the binary as it behaves: a login password is required
+// unless the opt-out is given, whatever the listen address.
+const (
+	defaultAddr = "127.0.0.1:8787"
+
+	addrUsage = "listen address (host:port). The default binds to loopback only: that keeps other machines out, but not other users and processes on this host. Before binding wider (e.g. -addr 0.0.0.0:8787), put a reverse proxy that terminates TLS in front. A login password is required whatever the address; see -set-password."
+
+	setPasswordUsage = "prompt for a login password, store its hash in the config dir, and exit. ansbui refuses to start until this has been run once (or -allow-unauthenticated is given). Run it as the user the service runs as, and restart ansbui afterwards; re-run to rotate."
+
+	allowUnauthUsage = "start even though no login password is set. Without this (or " + allowUnauthenticatedEnv + "=1) ansbui refuses to start until -set-password has been run. Only for deployments where something else authenticates every request AND no other user or process on this host can reach the listen address."
+)
+
+// The flags are package-level so a test can read what the binary
+// really registers without running main.
+var (
+	addr        = flag.String("addr", defaultAddr, addrUsage)
+	setPassword = flag.Bool("set-password", false, setPasswordUsage)
+	allowUnauth = flag.Bool("allow-unauthenticated", false, allowUnauthUsage)
+)
+
 func main() {
-	addr := flag.String("addr", "127.0.0.1:8787", "listen address (host:port). Default binds to loopback only. Exposing it requires an explicit override (e.g. -addr 0.0.0.0:8787); set a login password with -set-password and/or put a reverse proxy with auth in front.")
-	setPassword := flag.Bool("set-password", false, "prompt for a login password, store its hash in the config dir, and exit. Enables built-in authentication; re-run to rotate.")
-	allowUnauth := flag.Bool("allow-unauthenticated", false, "start even though no login password is set. Without this (or ANSBUI_ALLOW_UNAUTHENTICATED=1) ansbui refuses to start until -set-password has been run. Only for deployments where something else authenticates every request AND no other user or process on this host can reach the listen address.")
 	flag.Parse()
 
 	runsPath, err := runsPath()
