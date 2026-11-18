@@ -1255,7 +1255,7 @@ func osReleaseField(osRelease, key string) string {
 	for _, line := range strings.Split(osRelease, "\n") {
 		line = strings.TrimSpace(line)
 		if strings.HasPrefix(line, prefix) {
-			return strings.ToLower(strings.Trim(strings.TrimPrefix(line, prefix), `"`))
+			return clipOSReleaseValue(strings.ToLower(strings.Trim(strings.TrimPrefix(line, prefix), `"`)))
 		}
 	}
 	return ""

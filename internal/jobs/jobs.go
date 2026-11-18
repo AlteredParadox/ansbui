@@ -18,9 +18,11 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"log"
 	"runtime/debug"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -50,6 +52,46 @@ const (
 	defaultMaxRetained = 100
 	defaultMaxRunning  = 4
 )
+
+// Caps on what one job retains. Event text is not written by ansbui
+// alone: a bootstrap job echoes what the machine being bootstrapped
+// printed (its os-release, command output, error text), and that
+// machine is the least trusted peer in the system. Without a cap, one
+// oversized answer became a multi-megabyte event, a multi-megabyte
+// error string and the same again in runs.json — kept in memory for
+// up to defaultMaxRetained jobs and rewritten on every later save.
+//
+// The numbers match the run-history caps in internal/api (2000 events,
+// 1 MiB per record), so a job log that fits here is saved whole. An
+// ordinary bootstrap emits a few dozen short events; a reinstall, a
+// few hundred.
+const (
+	maxEventText = 16 << 10 // bytes of text kept per event
+	maxJobEvents = 2000     // events kept per job
+	maxJobBytes  = 1 << 20  // total event text kept per job
+	maxJobError  = 4 << 10  // bytes kept of the terminal error string
+	// maxLateVerdicts is how many "done"/"fail" events are still kept
+	// after the caps trip, so the log always ends with what happened.
+	maxLateVerdicts = 8
+)
+
+// clipMiddle shortens s to about limit bytes by cutting out the middle
+// and saying how much was removed. Both ends are kept because both
+// carry meaning in a failure message: the head names the step, the
+// tail holds the last lines the command printed.
+func clipMiddle(s string, limit int) string {
+	if len(s) <= limit {
+		return s
+	}
+	half := limit / 2
+	head := strings.ToValidUTF8(s[:half], "")
+	tail := strings.ToValidUTF8(s[len(s)-half:], "")
+	return fmt.Sprintf("%s\n… [%d bytes omitted] …\n%s", head, len(s)-len(head)-len(tail), tail)
+}
+
+// isVerdict reports whether typ is one of the event types an
+// orchestrator ends with.
+func isVerdict(typ string) bool { return typ == "done" || typ == "fail" }
 
 // Status is a job's current lifecycle state.
 type Status string
@@ -92,6 +134,11 @@ type Job struct {
 	waiters []*waiter
 	cancel  context.CancelFunc
 	done    chan struct{}
+
+	// Retention accounting for the caps above.
+	eventBytes   int
+	truncated    bool
+	lateVerdicts int
 }
 
 // waiter is one attached subscriber's delivery slot. ch is
@@ -224,6 +271,11 @@ func (j *Job) makeUnsub(target *waiter) func() {
 // no waiter ever sees a closed channel get sent on. Sends are
 // non-blocking: a slow consumer drops events rather than
 // back-pressuring the orchestrator.
+//
+// Text is shortened to maxEventText, and once the job reaches
+// maxJobEvents or maxJobBytes one marker event is recorded and later
+// events are dropped — except the orchestrator's closing "done"/"fail"
+// events, so a truncated log still ends with the outcome.
 func (j *Job) emit(typ, text string) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
@@ -233,6 +285,23 @@ func (j *Job) emit(typ, text string) {
 		// the terminal state.
 		return
 	}
+	text = clipMiddle(text, maxEventText)
+	if !j.truncated && (len(j.events) >= maxJobEvents || j.eventBytes+len(text) > maxJobBytes) {
+		j.truncated = true
+		j.record("meta", fmt.Sprintf("… job log truncated (caps: %d events / %d bytes) — later output is not kept", maxJobEvents, maxJobBytes))
+	}
+	if j.truncated {
+		if !isVerdict(typ) || j.lateVerdicts >= maxLateVerdicts {
+			return
+		}
+		j.lateVerdicts++
+	}
+	j.eventBytes += len(text)
+	j.record(typ, text)
+}
+
+// record appends one event and fans it out. Caller holds j.mu.
+func (j *Job) record(typ, text string) {
 	e := Event{Seq: len(j.events) + 1, Time: time.Now().UTC(), Type: typ, Text: text}
 	j.events = append(j.events, e)
 	for _, w := range j.waiters {
@@ -269,7 +338,7 @@ func (j *Job) finish(err, ctxErr error) {
 		j.status = StatusCancelled
 	default:
 		j.status = StatusFailed
-		j.err = err.Error()
+		j.err = clipMiddle(err.Error(), maxJobError)
 	}
 	j.endedAt = time.Now().UTC()
 	for _, w := range j.waiters {
