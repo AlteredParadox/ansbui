@@ -145,7 +145,7 @@ internal/ttlcache/      # small bounded cache
 web/                    # static bundle (embedded): JSX views, vendored React/Babel, fonts
 tests/web/              # unit tests for the browser scripts
 eslint-rules/           # local lint rule
-scripts/                # licence header stamper, third-party notices generators
+scripts/                # licence header stamper, third-party notices generators, reinstall pin check
 Makefile                # build (stamped, notices regenerated), license-check, notices-check
 deploy/                 # hardened systemd unit
 .github/                # CI, release and Dependabot config
