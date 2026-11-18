@@ -747,16 +747,24 @@ func reinstallPrepScript(opts ReinstallOpts, pubKey string) string {
 		`rm -rf ` + reinstallPrepDir,
 		`mkdir -m 0700 ` + reinstallPrepDir,
 		`cd ` + reinstallPrepDir,
-		`if command -v curl >/dev/null 2>&1; then curl -fsSLO ` + shellQuote(reinstallScriptURL) +
-			`; elif command -v wget >/dev/null 2>&1; then wget -q ` + shellQuote(reinstallScriptURL) +
-			`; else echo "neither curl nor wget available" >&2; exit 1; fi`,
+		// HTTPS only, redirects included: the sha256 check below is what
+		// authenticates the script, but there is no reason to let the
+		// request leave TLS at all. curl is always present here —
+		// ensureCurlScript runs first and fails the job otherwise — so
+		// there is no wget fallback to keep in step.
+		`curl --proto '=https' --proto-redir '=https' -fsSLO ` + shellQuote(reinstallScriptURL),
 		`echo ` + shellQuote(reinstallScriptSHA256+"  reinstall.sh") + ` | sha256sum -c - ` +
 			`|| { echo "reinstall.sh sha256 mismatch — refusing to run (expected ` + reinstallScriptSHA256 + `)" >&2; exit 1; }`,
 		`sed -i -e 's|^confhome=.*|confhome=` + reinstallConfhomeURL + `|'` +
 			` -e 's|^confhome_cn=.*|confhome_cn=` + reinstallConfhomeURL + `|'` +
 			` -e 's|command curl --insecure |command curl |g' reinstall.sh`,
 		`if grep -q 'command curl --insecure' reinstall.sh; then echo "reinstall.sh still passes --insecure to curl after patching — refusing to run" >&2; exit 1; fi`,
+		// Both rewrites are checked. Upstream switches to confhome_cn
+		// when it decides the box is in China, so a rewrite that
+		// applied to one variable only would leave those boxes
+		// fetching helpers from an unpinned branch of another host.
 		`grep -qxF 'confhome=` + reinstallConfhomeURL + `' reinstall.sh || { echo "confhome commit-pin rewrite did not apply — refusing to run" >&2; exit 1; }`,
+		`grep -qxF 'confhome_cn=` + reinstallConfhomeURL + `' reinstall.sh || { echo "confhome_cn commit-pin rewrite did not apply — refusing to run" >&2; exit 1; }`,
 		`chmod +x reinstall.sh`,
 		`bash -o pipefail -c ` + shellQuote(runCmd),
 	}, "; ")

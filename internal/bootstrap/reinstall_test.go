@@ -3,6 +3,9 @@ package bootstrap
 import (
 	"fmt"
 	"net"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -168,6 +171,86 @@ func TestReinstallPrepScriptPinsConfhome(t *testing.T) {
 	shaIdx := strings.Index(script, "sha256sum -c")
 	if sedIdx < shaIdx {
 		t.Fatalf("confhome rewrite happens before checksum verification")
+	}
+	// Each rewrite is verified after the edit, by an exact-line match,
+	// and a failed check stops the run before reinstall.sh executes.
+	runIdx := strings.Index(script, "bash -o pipefail -c")
+	for _, v := range []string{"confhome", "confhome_cn"} {
+		guard := "grep -qxF '" + v + "=" + reinstallConfhomeURL + "' reinstall.sh || {"
+		i := strings.Index(script, guard)
+		if i < sedIdx || i > runIdx {
+			t.Errorf("no check that the %s rewrite applied between the edit and the run:\n%s", v, script)
+		}
+	}
+	// The download cannot leave HTTPS, on the first request or after a
+	// redirect, and there is one download path to keep that true for.
+	if !strings.Contains(script, "curl --proto '=https' --proto-redir '=https' -fsSLO '"+reinstallScriptURL+"'") {
+		t.Errorf("reinstall.sh download is not restricted to https:\n%s", script)
+	}
+	if strings.Contains(script, "wget") {
+		t.Errorf("prep script has a second download path:\n%s", script)
+	}
+	if !strings.HasPrefix(reinstallScriptURL, "https://") {
+		t.Errorf("reinstallScriptURL %q is not https", reinstallScriptURL)
+	}
+}
+
+// TestReinstallPrepGuardsRunUnderBash runs the edit-and-verify part of
+// the prep script against stand-ins for upstream's reinstall.sh: the
+// real layout (both variables assigned at the start of a line) passes,
+// and a script where either assignment cannot be rewritten is refused.
+func TestReinstallPrepGuardsRunUnderBash(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available")
+	}
+	script := reinstallPrepScript(ReinstallOpts{Enabled: true, OS: "debian", Version: "13"}, "ssh-ed25519 AAAA test")
+	start := strings.Index(script, "sed -i")
+	end := strings.Index(script, "chmod +x reinstall.sh")
+	if start < 0 || end < start {
+		t.Fatalf("cannot find the edit-and-verify steps in:\n%s", script)
+	}
+	steps := "set -e; " + script[start:end] + "echo VERIFIED"
+
+	cases := []struct {
+		name, upstream string
+		ok             bool
+		wantErr        string
+	}{
+		{"upstream layout", "#!/bin/bash\nconfhome=https://raw.githubusercontent.com/bin456789/reinstall/main\nconfhome_cn=https://cnb.cool/bin456789/reinstall/-/git/raw/main\n", true, ""},
+		{"confhome_cn missing", "confhome=https://raw.githubusercontent.com/bin456789/reinstall/main\n", false, "confhome_cn commit-pin rewrite did not apply"},
+		{"confhome_cn renamed", "confhome=https://x/main\nconfhome_mirror=https://y/main\n", false, "confhome_cn commit-pin rewrite did not apply"},
+		{"confhome_cn indented", "confhome=https://x/main\n  confhome_cn=https://y/main\n", false, "confhome_cn commit-pin rewrite did not apply"},
+		{"confhome missing", "confhome_cn=https://y/main\n", false, "confhome commit-pin rewrite did not apply"},
+		{"insecure curl left in a form the edit does not cover", "confhome=https://x/main\nconfhome_cn=https://y/main\nf() { command curl --insecure\t-f \"$@\"; }\n", false, "still passes --insecure"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "reinstall.sh"), []byte(c.upstream), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cmd := exec.Command("bash", "-c", steps)
+			cmd.Dir = dir
+			out, err := cmd.CombinedOutput()
+			if c.ok {
+				if err != nil || !strings.Contains(string(out), "VERIFIED") {
+					t.Fatalf("upstream's layout was refused: %v\n%s", err, out)
+				}
+				got, _ := os.ReadFile(filepath.Join(dir, "reinstall.sh"))
+				for _, v := range []string{"confhome", "confhome_cn"} {
+					if !strings.Contains(string(got), "\n"+v+"="+reinstallConfhomeURL+"\n") {
+						t.Errorf("%s not pinned in the edited script:\n%s", v, got)
+					}
+				}
+				return
+			}
+			if err == nil || strings.Contains(string(out), "VERIFIED") {
+				t.Fatalf("an unpinnable script was accepted:\n%s", out)
+			}
+			if !strings.Contains(string(out), c.wantErr) {
+				t.Errorf("refused, but not for the expected reason %q:\n%s", c.wantErr, out)
+			}
+		})
 	}
 }
 

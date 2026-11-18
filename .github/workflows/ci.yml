@@ -86,8 +86,14 @@ jobs:
 
       # Symbol-level and covers the stdlib, so advisories in code the binary
       # never calls are informational only.
+      #
+      # The tool is pinned; the vulnerability database it queries is not,
+      # so a pinned version still reports today's advisories. `@latest`
+      # meant this job ran whatever was published most recently, unreviewed,
+      # on every push. Bump the version deliberately (Dependabot does not
+      # see a version inside a `run:` line).
       - name: govulncheck
-        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.10.0 ./...
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
