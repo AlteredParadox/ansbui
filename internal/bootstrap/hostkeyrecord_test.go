@@ -395,7 +395,7 @@ func probeReturning(fp string, err error, calls *int) hostKeyProbe {
 	}
 }
 
-// bootstrapTarget moves sshd to targetSSHPort. The record has to move
+// bootstrapTarget moves sshd to defaultNewSSHPort. The record has to move
 // with it, or the next run against the new port is a first contact
 // with a machine ansbui has already verified. But only when the new
 // port really is the same sshd: the record is written on the evidence
@@ -404,7 +404,7 @@ func TestHostKeyCarriedToTargetPort(t *testing.T) {
 	genuine, genuineFP := testHostKey(t)
 	other, otherFP := testHostKey(t)
 	const host = "192.0.2.10"
-	moved := net.JoinHostPort(host, strconv.Itoa(targetSSHPort))
+	moved := net.JoinHostPort(host, strconv.Itoa(defaultNewSSHPort))
 	unreachable := errors.New("connection refused")
 	ctx := context.Background()
 
@@ -430,7 +430,7 @@ func TestHostKeyCarriedToTargetPort(t *testing.T) {
 	t.Run("same key on the new port: recorded and enforced there", func(t *testing.T) {
 		store := newStore(t, "")
 		var log emitLog
-		carryHostKeyToTargetPort(ctx, host, 22, genuineFP, store, probeReturning(genuineFP, nil, nil), log.emit)
+		carryHostKeyToTargetPort(ctx, hostPortMove{host: host, from: 22, to: defaultNewSSHPort}, genuineFP, store, probeReturning(genuineFP, nil, nil), log.emit)
 
 		expect, err := resolveHostKeyExpectation(Request{}, moved, store)
 		if err != nil {
@@ -464,7 +464,7 @@ func TestHostKeyCarriedToTargetPort(t *testing.T) {
 	t.Run("different key on the new port: existing record kept", func(t *testing.T) {
 		store := newStore(t, otherFP)
 		var log emitLog
-		carryHostKeyToTargetPort(ctx, host, 22, genuineFP, store, probeReturning(otherFP, nil, nil), log.emit)
+		carryHostKeyToTargetPort(ctx, hostPortMove{host: host, from: 22, to: defaultNewSSHPort}, genuineFP, store, probeReturning(otherFP, nil, nil), log.emit)
 		if got := recorded(t, store); got != otherFP {
 			t.Fatalf("the valid record for %s was replaced: %q, want %q", moved, got, otherFP)
 		}
@@ -476,7 +476,7 @@ func TestHostKeyCarriedToTargetPort(t *testing.T) {
 	t.Run("different key on the new port: nothing recorded", func(t *testing.T) {
 		store := newStore(t, "")
 		var log emitLog
-		carryHostKeyToTargetPort(ctx, host, 22, genuineFP, store, probeReturning(otherFP, nil, nil), log.emit)
+		carryHostKeyToTargetPort(ctx, hostPortMove{host: host, from: 22, to: defaultNewSSHPort}, genuineFP, store, probeReturning(otherFP, nil, nil), log.emit)
 		if got := recorded(t, store); got != "" {
 			t.Fatalf("recorded %q for a port that presents %q", got, otherFP)
 		}
@@ -491,7 +491,7 @@ func TestHostKeyCarriedToTargetPort(t *testing.T) {
 	t.Run("stale record replaced once the port proves the new key", func(t *testing.T) {
 		store := newStore(t, otherFP)
 		var log emitLog
-		carryHostKeyToTargetPort(ctx, host, 22, genuineFP, store, probeReturning(genuineFP, nil, nil), log.emit)
+		carryHostKeyToTargetPort(ctx, hostPortMove{host: host, from: 22, to: defaultNewSSHPort}, genuineFP, store, probeReturning(genuineFP, nil, nil), log.emit)
 		if got := recorded(t, store); got != genuineFP {
 			t.Fatalf("record = %q, want the proven key %q", got, genuineFP)
 		}
@@ -503,7 +503,7 @@ func TestHostKeyCarriedToTargetPort(t *testing.T) {
 	t.Run("port unreachable, no record yet: recorded on the session's word", func(t *testing.T) {
 		store := newStore(t, "")
 		var log emitLog
-		carryHostKeyToTargetPort(ctx, host, 22, genuineFP, store, probeReturning("", unreachable, nil), log.emit)
+		carryHostKeyToTargetPort(ctx, hostPortMove{host: host, from: 22, to: defaultNewSSHPort}, genuineFP, store, probeReturning("", unreachable, nil), log.emit)
 		if got := recorded(t, store); got != genuineFP {
 			t.Fatalf("record = %q, want %q", got, genuineFP)
 		}
@@ -515,7 +515,7 @@ func TestHostKeyCarriedToTargetPort(t *testing.T) {
 	t.Run("port unreachable, different record present: record kept", func(t *testing.T) {
 		store := newStore(t, otherFP)
 		var log emitLog
-		carryHostKeyToTargetPort(ctx, host, 22, genuineFP, store, probeReturning("", unreachable, nil), log.emit)
+		carryHostKeyToTargetPort(ctx, hostPortMove{host: host, from: 22, to: defaultNewSSHPort}, genuineFP, store, probeReturning("", unreachable, nil), log.emit)
 		if got := recorded(t, store); got != otherFP {
 			t.Fatalf("an unverified key replaced the record: %q, want %q", got, otherFP)
 		}
@@ -528,7 +528,7 @@ func TestHostKeyCarriedToTargetPort(t *testing.T) {
 		store := newStore(t, genuineFP)
 		calls := 0
 		var log emitLog
-		carryHostKeyToTargetPort(ctx, host, 22, genuineFP, store, probeReturning(otherFP, nil, &calls), log.emit)
+		carryHostKeyToTargetPort(ctx, hostPortMove{host: host, from: 22, to: defaultNewSSHPort}, genuineFP, store, probeReturning(otherFP, nil, &calls), log.emit)
 		if calls != 0 || log.String() != "" || recorded(t, store) != genuineFP {
 			t.Errorf("probe calls=%d, record=%q, events:\n%s", calls, recorded(t, store), log.String())
 		}
@@ -538,7 +538,7 @@ func TestHostKeyCarriedToTargetPort(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "hk.json")
 		calls := 0
 		var log emitLog
-		carryHostKeyToTargetPort(ctx, host, targetSSHPort, genuineFP, NewHostKeyStore(path), probeReturning(genuineFP, nil, &calls), log.emit)
+		carryHostKeyToTargetPort(ctx, hostPortMove{host: host, from: defaultNewSSHPort, to: defaultNewSSHPort}, genuineFP, NewHostKeyStore(path), probeReturning(genuineFP, nil, &calls), log.emit)
 		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
 			t.Errorf("store written (stat err %v)", err)
 		}
@@ -549,7 +549,7 @@ func TestHostKeyCarriedToTargetPort(t *testing.T) {
 
 	t.Run("a failed write is reported, not swallowed", func(t *testing.T) {
 		var log emitLog
-		carryHostKeyToTargetPort(ctx, host, 22, genuineFP, unwritableStore(t), probeReturning(genuineFP, nil, nil), log.emit)
+		carryHostKeyToTargetPort(ctx, hostPortMove{host: host, from: 22, to: defaultNewSSHPort}, genuineFP, unwritableStore(t), probeReturning(genuineFP, nil, nil), log.emit)
 		if log.count("meta: could not record the host key fingerprint for "+moved) != 1 {
 			t.Errorf("failure not reported:\n%s", log.String())
 		}
@@ -562,7 +562,7 @@ func TestHostKeyCarriedToTargetPort(t *testing.T) {
 		}
 		calls := 0
 		var log emitLog
-		carryHostKeyToTargetPort(ctx, host, 22, genuineFP, NewHostKeyStore(path), probeReturning(genuineFP, nil, &calls), log.emit)
+		carryHostKeyToTargetPort(ctx, hostPortMove{host: host, from: 22, to: defaultNewSSHPort}, genuineFP, NewHostKeyStore(path), probeReturning(genuineFP, nil, &calls), log.emit)
 		if calls != 0 || log.count("meta: could not record the host key fingerprint for "+moved) != 1 {
 			t.Errorf("probe calls=%d, events:\n%s", calls, log.String())
 		}
@@ -571,7 +571,7 @@ func TestHostKeyCarriedToTargetPort(t *testing.T) {
 	t.Run("nil store is a no-op", func(t *testing.T) {
 		calls := 0
 		var log emitLog
-		carryHostKeyToTargetPort(ctx, host, 22, genuineFP, nil, probeReturning(genuineFP, nil, &calls), log.emit)
+		carryHostKeyToTargetPort(ctx, hostPortMove{host: host, from: 22, to: defaultNewSSHPort}, genuineFP, nil, probeReturning(genuineFP, nil, &calls), log.emit)
 		if calls != 0 || log.String() != "" {
 			t.Errorf("probe calls=%d, events:\n%s", calls, log.String())
 		}

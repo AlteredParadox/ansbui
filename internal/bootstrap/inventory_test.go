@@ -41,7 +41,7 @@ const inventoryBase = `all:
 
 func mustAdd(t *testing.T, content, provider, fqdn string) string {
 	t.Helper()
-	out, err := addHostToInventoryYAML([]byte(content), provider, fqdn)
+	out, err := addHostToInventoryYAML([]byte(content), provider, fqdn, 0)
 	if err != nil {
 		t.Fatalf("addHostToInventoryYAML(%q, %q): %v", provider, fqdn, err)
 	}
@@ -63,7 +63,7 @@ func TestAddHostCreatesUmbrellaPath(t *testing.T) {
 }
 
 func TestAddHostIdempotentDirect(t *testing.T) {
-	out, err := addHostToInventoryYAML([]byte(inventoryBase), "hetzner", existingHost)
+	out, err := addHostToInventoryYAML([]byte(inventoryBase), "hetzner", existingHost, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -85,7 +85,7 @@ func TestAddHostIdempotentNestedSubgroup(t *testing.T) {
                   hosts:
                     web1.example.com:
 `
-	out, err := addHostToInventoryYAML([]byte(content), "hetzner", existingHost)
+	out, err := addHostToInventoryYAML([]byte(content), "hetzner", existingHost, 0)
 	if err != nil {
 		t.Fatalf("host nested in own provider subgroup must be idempotent, got: %v", err)
 	}
@@ -95,7 +95,7 @@ func TestAddHostIdempotentNestedSubgroup(t *testing.T) {
 }
 
 func TestAddHostCrossProviderDirect(t *testing.T) {
-	if _, err := addHostToInventoryYAML([]byte(inventoryBase), "ovh", existingHost); err == nil {
+	if _, err := addHostToInventoryYAML([]byte(inventoryBase), "ovh", existingHost, 0); err == nil {
 		t.Fatal("expected cross-provider duplicate error")
 	}
 }
@@ -113,7 +113,7 @@ func TestAddHostCrossProviderNestedSubgroup(t *testing.T) {
                   hosts:
                     web1.example.com:
 `
-	_, err := addHostToInventoryYAML([]byte(content), "ovh", existingHost)
+	_, err := addHostToInventoryYAML([]byte(content), "ovh", existingHost, 0)
 	if err == nil {
 		t.Fatal("expected duplicate error for host in another provider's nested subgroup (old check missed this)")
 	}
@@ -137,7 +137,7 @@ func TestAddHostVarsUnderAllHostsIsNotADuplicate(t *testing.T) {
         debian_servers:
           children: {}
 `
-	out, err := addHostToInventoryYAML([]byte(content), "hetzner", existingHost)
+	out, err := addHostToInventoryYAML([]byte(content), "hetzner", existingHost, 0)
 	if err != nil {
 		t.Fatalf("host with vars under all.hosts must not be a duplicate error, got: %v", err)
 	}
@@ -163,14 +163,14 @@ func TestAddHostInUnrelatedGroupIsNotADuplicate(t *testing.T) {
         debian_servers:
           children: {}
 `
-	if _, err := addHostToInventoryYAML([]byte(content), "hetzner", existingHost); err != nil {
+	if _, err := addHostToInventoryYAML([]byte(content), "hetzner", existingHost, 0); err != nil {
 		t.Fatalf("host in an unrelated group must not be a duplicate error, got: %v", err)
 	}
 }
 
 func TestAddHostReservedProviderNames(t *testing.T) {
 	for _, provider := range []string{"all", "ungrouped", "vps_servers", "debian_servers"} {
-		if _, err := addHostToInventoryYAML([]byte(inventoryBase), provider, newHost); err == nil {
+		if _, err := addHostToInventoryYAML([]byte(inventoryBase), provider, newHost, 0); err == nil {
 			t.Errorf("provider %q must be rejected as reserved", provider)
 		}
 	}
@@ -183,7 +183,7 @@ func TestAddHostRefusesNonMappingNodes(t *testing.T) {
 		"sequence children": "all:\n  children:\n    - vps_servers\n",
 	}
 	for name, content := range cases {
-		if _, err := addHostToInventoryYAML([]byte(content), "hetzner", newHost); err == nil {
+		if _, err := addHostToInventoryYAML([]byte(content), "hetzner", newHost, 0); err == nil {
 			t.Errorf("%s: expected error instead of silently rewriting the node\ninput:\n%s", name, content)
 		}
 	}

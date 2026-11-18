@@ -167,7 +167,7 @@ func TestStepReturnsOnCancelWhenTargetIgnoresChannelOpen(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	var log emitLog
 	errCh := make(chan error, 1)
-	go func() { errCh <- bootstrapTarget(ctx, target, "ssh-ed25519 AAAA test", log.emit) }()
+	go func() { errCh <- bootstrapTarget(ctx, target, "ssh-ed25519 AAAA test", defaultNewSSHPort, log.emit) }()
 
 	// Let the step reach the pending channel-open, then cancel the way
 	// POST /api/bootstrap/jobs/{id}/cancel does.
@@ -273,7 +273,7 @@ func TestOversizedOSReleaseIsClippedInEventsAndError(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	var log emitLog
-	err := bootstrapTarget(ctx, target, "ssh-ed25519 AAAA test", log.emit)
+	err := bootstrapTarget(ctx, target, "ssh-ed25519 AAAA test", defaultNewSSHPort, log.emit)
 	if err == nil || !strings.Contains(err.Error(), "unsupported distro") {
 		t.Fatalf("bootstrapTarget error = %v, want unsupported distro", err)
 	}

@@ -26,7 +26,8 @@
 //  5. create an `ansible` user with a random password and
 //     passwordless sudo, populated authorized_keys, and the
 //     control node's public key
-//  6. flip sshd to port 4242 and reload
+//  6. flip sshd to the requested port (4242 unless the form says
+//     otherwise) and reload
 //  7. add the FQDN to the configured inventory file under a
 //     provider-named group, creating the group if needed
 //
@@ -75,6 +76,21 @@ type Request struct {
 	// fingerprint is emitted loudly so the operator can eyeball it.
 	HostKeyFingerprint string        `json:"hostKeyFingerprint,omitempty"`
 	Reinstall          ReinstallOpts `json:"reinstall"`
+	// NewSSHPort is the port sshd listens on once bootstrap is done:
+	// the port an existing system's sshd is moved to, and the port a
+	// reinstalled system (and the installer it boots) is given. Port
+	// above is only how the target is reached at the start. Zero
+	// means defaultNewSSHPort, so a client that predates the field
+	// keeps getting 4242.
+	NewSSHPort int `json:"newSshPort,omitempty"`
+}
+
+// newSSHPort is the port the target's sshd ends up on.
+func (r Request) newSSHPort() int {
+	if r.NewSSHPort == 0 {
+		return defaultNewSSHPort
+	}
+	return r.NewSSHPort
 }
 
 // Defaults: where porkbun creds live, what they're named, where
@@ -88,8 +104,10 @@ const (
 	defaultPorkbunSecretVar   = "porkbun_secret_key"
 	defaultControlPubKeyPath  = "~/.ssh/ansible_ed25519.pub"
 	defaultControlPrivKeyPath = "~/.ssh/ansible_ed25519"
-	targetSSHPort             = 4242
-	dnsTTLSeconds             = 300
+	// defaultNewSSHPort is where sshd is moved when the request does
+	// not name a port (Request.NewSSHPort).
+	defaultNewSSHPort = 4242
+	dnsTTLSeconds     = 300
 )
 
 // keyedMu is a process-local registry of named locks serialising
@@ -279,24 +297,25 @@ func Run(ctx context.Context, pool *sshpool.Pool, srv config.Server, req Request
 		target = newTarget
 	}
 
-	if err := bootstrapTarget(ctx, target, pubKey, emit); err != nil {
+	newPort := req.newSSHPort()
+	if err := bootstrapTarget(ctx, target, pubKey, newPort, emit); err != nil {
 		return err
 	}
 	if !req.Reinstall.Enabled {
-		// A reinstall run reconnected on targetSSHPort and recorded
+		// A reinstall run reconnected on the new port and recorded
 		// the new system's key there already (runReinstall).
-		carryHostKeyToTargetPort(ctx, req.IP, req.Port, target.fingerprint(), hostKeys, probeHostKey, emit)
+		carryHostKeyToTargetPort(ctx, hostPortMove{host: req.IP, from: req.Port, to: newPort}, target.fingerprint(), hostKeys, probeHostKey, emit)
 	}
 
 	providerGroup := normalizeProviderName(req.Provider)
 	emit("meta", fmt.Sprintf("Adding %s to inventory under group %q...", req.Hostname, providerGroup))
-	if err := updateInventoryFile(ctx, pool, srv, providerGroup, req.Hostname); err != nil {
+	if err := updateInventoryFile(ctx, pool, srv, providerGroup, req.Hostname, newPort); err != nil {
 		emit("fail", "inventory edit: "+err.Error())
 		return err
 	}
 	emit("ok", "inventory updated")
 
-	emit("done", fmt.Sprintf("Bootstrap complete. Reach via ansible@%s:%d", req.Hostname, targetSSHPort))
+	emit("done", fmt.Sprintf("Bootstrap complete. Reach via ansible@%s:%d", req.Hostname, newPort))
 	return nil
 }
 
@@ -317,6 +336,9 @@ func Validate(req Request) error {
 	}
 	if req.Port <= 0 || req.Port > 65535 {
 		return errors.New("invalid SSH port")
+	}
+	if req.NewSSHPort < 0 || req.NewSSHPort > 65535 {
+		return errors.New("invalid SSH port for the bootstrapped system")
 	}
 	if strings.TrimSpace(req.Username) == "" {
 		return errors.New("username is required")
@@ -644,8 +666,8 @@ func boundLength(name, value string, limit int) error {
 // Run so the orchestrator stays under the cognitive-complexity
 // budget after the reinstall branch landed; same script either
 // way (post-reinstall the sshd-port flip is a no-op since
-// reinstall.sh already baked :4242 into the new image).
-func bootstrapTarget(ctx context.Context, target *targetSession, pubKey string, emit func(typ, text string)) error {
+// reinstall.sh already baked the new port into the image).
+func bootstrapTarget(ctx context.Context, target *targetSession, pubKey string, newPort int, emit func(typ, text string)) error {
 	emit("meta", "Detecting distro...")
 	distroOut, _, err := target.runRoot(ctx, "cat /etc/os-release", "")
 	if err != nil {
@@ -681,8 +703,8 @@ func bootstrapTarget(ctx context.Context, target *targetSession, pubKey string, 
 	}
 	emit("ok", "ansible user ready")
 
-	emit("meta", fmt.Sprintf("Configuring sshd to listen on port %d...", targetSSHPort))
-	portOut, stderr, err := target.runRoot(ctx, sshdPortScript(targetSSHPort), "")
+	emit("meta", fmt.Sprintf("Configuring sshd to listen on port %d...", newPort))
+	portOut, stderr, err := target.runRoot(ctx, sshdPortScript(newPort), "")
 	if err != nil {
 		emit("fail", "sshd port change: "+stderr)
 		return err
@@ -929,21 +951,28 @@ func connectAndPrecheck(ctx context.Context, req Request, hostKeys *HostKeyStore
 // host:port. probeHostKey is the real one; tests substitute their own.
 type hostKeyProbe func(ctx context.Context, host string, port int) (string, error)
 
-// carryHostKeyToTargetPort records fp under host:targetSSHPort once
+// hostPortMove names a target whose sshd bootstrap moved: it was
+// dialed on from and now listens on to.
+type hostPortMove struct {
+	host     string
+	from, to int
+}
+
+// carryHostKeyToTargetPort records fp under host:<new port> once
 // bootstrapTarget has moved sshd there.
 //
 // The store is keyed by host:port, and until now only the port the
 // operator dialed got a record. But the product itself then moves the
-// listener: after a first bootstrap on :22 the box answers on :4242,
+// listener: after a first bootstrap on :22 the box answers on the new port,
 // the record says :22, and a second run — a retry after the inventory
-// step failed, say — dials :4242, finds nothing, and treats a machine
+// step failed, say — dials the new port, finds nothing, and treats a machine
 // ansbui has already verified as a first contact. Anyone answering on
-// :4242 at that moment received the password.
+// that port at that moment received the password.
 //
 // The key does not change when the port does — IF it is the same sshd
 // answering. That is not guaranteed: sshdPortScript returns success
 // without touching anything when something is already listening on
-// the target port, and behind a port-forward host:22 and host:4242 can
+// the target port, and behind a port-forward host:22 and host:<new> can
 // be different machines. So the new port is asked which key it
 // presents before the record is written:
 //
@@ -958,14 +987,15 @@ type hostKeyProbe func(ctx context.Context, host string, port int) (string, erro
 //     mismatch. With a different record already there, leave it.
 //
 // Nothing here is fatal: the box is already configured, and whatever
-// this leaves in the store, the next dial of :4242 is not opened up by
+// this leaves in the store, the next dial of the new port is not opened up by
 // it — hostKeyRecorder refuses to authenticate when it cannot record,
 // and a record that does not match the listener is a refusal too.
-func carryHostKeyToTargetPort(ctx context.Context, host string, dialedPort int, fp string, hostKeys *HostKeyStore, probe hostKeyProbe, emit func(string, string)) {
-	if hostKeys == nil || dialedPort == targetSSHPort || fp == "" {
+func carryHostKeyToTargetPort(ctx context.Context, mv hostPortMove, fp string, hostKeys *HostKeyStore, probe hostKeyProbe, emit func(string, string)) {
+	if hostKeys == nil || mv.from == mv.to || fp == "" {
 		return
 	}
-	moved := net.JoinHostPort(host, strconv.Itoa(targetSSHPort))
+	host := mv.host
+	moved := net.JoinHostPort(host, strconv.Itoa(mv.to))
 	existing, has, err := hostKeys.Get(moved)
 	if err != nil {
 		emit("meta", "could not record the host key fingerprint for "+moved+" ("+err.Error()+") — the next bootstrap of that address will be treated as a first contact")
@@ -974,7 +1004,7 @@ func carryHostKeyToTargetPort(ctx context.Context, host string, dialedPort int, 
 	if has && existing == fp {
 		return // already on record
 	}
-	seen, probeErr := probe(ctx, host, targetSSHPort)
+	seen, probeErr := probe(ctx, host, mv.to)
 	switch {
 	case probeErr == nil && seen != fp:
 		msg := "⚠ " + moved + " presents a different host key (" + seen + ") than the session this run verified (" + fp + ") — something other than this sshd is answering there, so no record was written for it"
@@ -1196,7 +1226,7 @@ func looksLikePublicKey(s string) bool {
 // result back atomically via the same hardened helper that
 // inline-vault edits use (symlink guard, mode preservation,
 // tempfile + rename, EXIT trap).
-func updateInventoryFile(ctx context.Context, pool *sshpool.Pool, srv config.Server, provider, fqdn string) error {
+func updateInventoryFile(ctx context.Context, pool *sshpool.Pool, srv config.Server, provider, fqdn string, sshPort int) error {
 	if srv.Inventory == "" {
 		return errors.New("server has no inventory path configured — set it before bootstrap so the new host can be registered")
 	}
@@ -1222,7 +1252,7 @@ func updateInventoryFile(ctx context.Context, pool *sshpool.Pool, srv config.Ser
 		}
 		return fmt.Errorf("read %s: %s", srv.Inventory, msg)
 	}
-	updated, err := addHostToInventoryYAML([]byte(so), provider, fqdn)
+	updated, err := addHostToInventoryYAML([]byte(so), provider, fqdn, sshPort)
 	if err != nil {
 		return err
 	}
@@ -1383,7 +1413,7 @@ func sshdPortScript(target int) string {
 		// Trust nothing above: reload/restart exiting 0 doesn't prove the
 		// listener moved (a leftover socket unit, a second override file,
 		// a distro quirk). Poll the actual sockets so "success on port
-		// 4242 while still bound to 22" can't be reported again. Boxes
+		// the new port while still bound to 22" can't be reported again. Boxes
 		// without ss (minimal alpine) skip the check rather than fail.
 		`[ -n "$HAVE_SS" ] || exit 0`,
 		`i=0`,

@@ -32,7 +32,7 @@ import (
 //
 //  1. download reinstall.sh (sha256-verified against the pinned
 //     commit) and repoint its helper downloads at the same commit
-//  2. run reinstall.sh <os> <version> --ssh-port 4242 --ssh-key
+//  2. run reinstall.sh <os> <version> --ssh-port <new port> --ssh-key
 //     <pub> --hold 2 (hold = don't auto-reboot out of the installer)
 //  3. cross-check the network config reinstall.sh detected against
 //     the bootstrap target address — abort BEFORE the reboot if the
@@ -45,13 +45,13 @@ import (
 //     rendered network config under /os mentions the detected
 //     address, persist the install log into the new system, and
 //     trigger the final reboot ourselves
-//  6. poll-dial :4242 with key auth until the freshly-installed
+//  6. poll-dial the new port with key auth until the freshly-installed
 //     system answers with the right os-release, a changed
 //     machine-id, and a settled systemd
 //
 // On success, bootstrap.Run swaps the original password-auth target
 // for the new key-auth target and continues the rest of the
-// workflow (ansible user, sshd-port no-op-if-already-4242, inventory).
+// workflow (ansible user, sshd-port no-op-if-already-there, inventory).
 type ReinstallOpts struct {
 	Enabled bool   `json:"enabled"`
 	OS      string `json:"os"`
@@ -168,12 +168,6 @@ var (
 	reinstallScriptURL   = reinstallConfhomeURL + "/reinstall.sh"
 )
 
-// reinstallSSHPort is the port reinstall.sh is told to bake into
-// the new system's sshd_config. Matches the port targetSSHPort
-// uses for the rest of the bootstrap workflow so the rest of
-// the steps see "already on 4242" and no-op the flip script.
-const reinstallSSHPort = targetSSHPort
-
 // validateReinstall checks that opts is consistent with the
 // curated matrix. We allowlist rather than passing the values
 // through to the shell because they get spliced into a remote
@@ -271,7 +265,12 @@ func runReinstall(ctx context.Context, target *targetSession, req Request, pubKe
 		emit("meta", "⚠ operator acknowledged that this reinstall's replacement host key cannot be verified — proceeding despite "+requireHostKeyEnv)
 	}
 
-	stdout, err := runReinstallPrep(ctx, target, opts, pubKey, emit)
+	// The port the installer and the installed system are given
+	// (Request.NewSSHPort). The old system is still reached on
+	// req.Port until it goes down.
+	newPort := req.newSSHPort()
+
+	stdout, err := runReinstallPrep(ctx, target, opts, pubKey, newPort, emit)
 	if err != nil {
 		return nil, err
 	}
@@ -296,7 +295,7 @@ func runReinstall(ctx context.Context, target *targetSession, req Request, pubKe
 	// wait loop uses "machine-id changed" as proof the box really
 	// was reinstalled — without it, a box that boots back into its
 	// OLD system (failed grub entry) while already having key auth
-	// on :4242 from a previous bootstrap would pass the os-release
+	// on the new port from a previous bootstrap would pass the os-release
 	// check and be reported as freshly installed. Read failures
 	// degrade to "" (the proof is skipped), never abort the run.
 	oldMachineID := ""
@@ -313,24 +312,24 @@ func runReinstall(ctx context.Context, target *targetSession, req Request, pubKe
 	}
 	emit("ok", "old system went down — reboot confirmed")
 
-	emit("meta", fmt.Sprintf("Waiting for the installer on :%d to finish writing %s %s to disk (--hold 2 parks it there for verification; timeout %s)...", reinstallSSHPort, opts.OS, opts.Version, friendly(reinstallWaitBudget)))
-	verifiedInstall, err := runInstallerHoldStage(ctx, req.IP, privKey, netInfo, opts.OS, emit)
+	emit("meta", fmt.Sprintf("Waiting for the installer on :%d to finish writing %s %s to disk (--hold 2 parks it there for verification; timeout %s)...", newPort, opts.OS, opts.Version, friendly(reinstallWaitBudget)))
+	verifiedInstall, err := runInstallerHoldStage(ctx, heldInstaller{host: req.IP, port: newPort}, privKey, netInfo, opts.OS, emit)
 	if err != nil {
 		return nil, err
 	}
 
-	emit("meta", fmt.Sprintf("Waiting for the first boot of %s %s on :%d (timeout %s)...", opts.OS, opts.Version, reinstallSSHPort, friendly(reinstallBootBudget)))
+	emit("meta", fmt.Sprintf("Waiting for the first boot of %s %s on :%d (timeout %s)...", opts.OS, opts.Version, newPort, friendly(reinstallBootBudget)))
 	probe := reinstallReadyProbe{
 		expectedOS:             opts.OS,
 		expectedVersion:        opts.Version,
 		oldMachineID:           oldMachineID,
 		requireMachineIDChange: !verifiedInstall,
 	}
-	newTarget, err := waitForReinstallTarget(ctx, req.IP, reinstallSSHPort, privKey, probe, reinstallBootBudget, emit)
+	newTarget, err := waitForReinstallTarget(ctx, req.IP, newPort, privKey, probe, reinstallBootBudget, emit)
 	if err != nil {
 		return nil, err
 	}
-	emit("ok", fmt.Sprintf("connected to freshly-installed %s %s on :%d", opts.OS, opts.Version, reinstallSSHPort))
+	emit("ok", fmt.Sprintf("connected to freshly-installed %s %s on :%d", opts.OS, opts.Version, newPort))
 	// The reinstall regenerated the box's host keys, so no pre-run pin
 	// can cover this connection — surface what we accepted, and record
 	// it under the NEW port so future bootstraps/reconnects of this
@@ -339,7 +338,7 @@ func runReinstall(ctx context.Context, target *targetSession, req Request, pubKe
 	// and a fresh box reusing that port gets the mismatch-remediation
 	// message.)
 	emit("meta", "⚠ new system's host key accepted on first use (NOT verifiable — keys were regenerated by the reinstall): "+newTarget.fingerprint())
-	newHostport := net.JoinHostPort(req.IP, fmt.Sprintf("%d", reinstallSSHPort))
+	newHostport := net.JoinHostPort(req.IP, fmt.Sprintf("%d", newPort))
 	if perr := hostKeys.Put(newHostport, newTarget.fingerprint()); perr != nil {
 		emit("meta", "could not record the new host key fingerprint ("+perr.Error()+") — the next bootstrap of "+newHostport+" will be treated as a first contact")
 	} else if hostKeys != nil {
@@ -355,7 +354,7 @@ func runReinstall(ctx context.Context, target *targetSession, req Request, pubKe
 // the prep stdout (a tail — see resolvePrepNetInfo) for the network
 // cross-check. Extracted from runReinstall to keep the orchestrator
 // under the cognitive-complexity ceiling (S3776).
-func runReinstallPrep(ctx context.Context, target *targetSession, opts ReinstallOpts, pubKey string, emit func(typ, text string)) (string, error) {
+func runReinstallPrep(ctx context.Context, target *targetSession, opts ReinstallOpts, pubKey string, newPort int, emit func(typ, text string)) (string, error) {
 	emit("meta", "Ensuring curl is available on target (needed by reinstall.sh)...")
 	if _, stderr, err := target.runRoot(ctx, ensureCurlScript(), ""); err != nil {
 		return "", fmt.Errorf("prepare reinstall curl dependency: %s: %w", strings.TrimSpace(stderr), err)
@@ -367,7 +366,7 @@ func runReinstallPrep(ctx context.Context, target *targetSession, opts Reinstall
 	heartbeat := startHeartbeat(ctx, "reinstall.sh still running", emit)
 	defer heartbeat()
 	prepCtx, cancelPrep := context.WithTimeout(ctx, reinstallPrepBudget)
-	stdout, stderr, err := target.runRoot(prepCtx, reinstallPrepScript(opts, pubKey), "")
+	stdout, stderr, err := target.runRoot(prepCtx, reinstallPrepScript(opts, pubKey, newPort), "")
 	cancelPrep()
 	heartbeat()
 	if err != nil {
@@ -760,7 +759,7 @@ func ensureCurlScript() string {
 // Everything happens inside reinstallPrepDir (root-owned, 0700,
 // recreated per run, umask 077) — see that constant for why /tmp
 // is off limits for root-written predictable filenames.
-func reinstallPrepScript(opts ReinstallOpts, pubKey string) string {
+func reinstallPrepScript(opts ReinstallOpts, pubKey string, newPort int) string {
 	// --ci forces cloud-image mode for both matrix distros. Upstream
 	// already forces it for ubuntu, but debian otherwise defaults to
 	// the full debian-installer netboot: slower (can outlive even
@@ -784,7 +783,7 @@ func reinstallPrepScript(opts ReinstallOpts, pubKey string) string {
 		// read sees EOF and set -e exits immediately unless this is
 		// explicit. The reconnect contract below is root key auth.
 		` --user root` +
-		` --ssh-port ` + fmt.Sprintf("%d", reinstallSSHPort) +
+		` --ssh-port ` + fmt.Sprintf("%d", newPort) +
 		` --ssh-key ` + shellQuote(pubKey) +
 		` 2>&1 | tee ` + reinstallPrepLog
 	return strings.Join([]string{
@@ -895,8 +894,9 @@ func evalInstallerProbe(out, expectedOS string) (int, string) {
 // trigger the reboot into the new system. Failing here leaves the
 // box HELD and reachable for inspection instead of rebooting it
 // into a possibly-unreachable first boot.
-func runInstallerHoldStage(ctx context.Context, host string, privKey []byte, netInfo reinstallNetInfo, expectedOS string, emit func(typ, text string)) (bool, error) {
-	held, err := waitForInstallerDone(ctx, host, reinstallSSHPort, privKey, expectedOS, emit)
+func runInstallerHoldStage(ctx context.Context, at heldInstaller, privKey []byte, netInfo reinstallNetInfo, expectedOS string, emit func(typ, text string)) (bool, error) {
+	host := at.host
+	held, err := waitForInstallerDone(ctx, host, at.port, privKey, expectedOS, emit)
 	if err != nil {
 		return false, err
 	}
@@ -1243,7 +1243,7 @@ var reinstallProbeScript = strings.Join([]string{
 // answers with key auth AND evalReinstallProbe's checks all pass,
 // or until ctx is cancelled / budget elapses. The probe is what
 // distinguishes the reinstaller's live environment (where
-// reinstall.sh exposes SSH on :4242 with the same key for
+// reinstall.sh exposes SSH on the new port with the same key for
 // `screen -r` monitoring) — and a box that wrongly booted back
 // into its old system — from the freshly-installed target OS.
 // Without it we'd attach to the live env mid-install and run

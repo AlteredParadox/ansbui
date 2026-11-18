@@ -119,8 +119,10 @@ The **Bootstrap** view takes a fresh machine (Debian or Ubuntu) and its root or 
 1. If the target was given as an IP address, creates or updates the DNS record for the new hostname at Porkbun. The API key and secret are read from the vault on the control node (`porkbun_api_key` / `porkbun_secret_key` in `inventory/group_vars/all/vault.yml`) using the vault password typed into the form. A target given as a hostname skips this step.
 2. Connects to the target over SSH **from the ansbui host** with the password from the form, and installs `sudo` and `python3`.
 3. Creates an `ansible` user with passwordless sudo and the control node's public key (`~/.ssh/ansible_ed25519.pub` there) in its `authorized_keys`.
-4. Moves `sshd` to port `4242`.
-5. Adds the host to the inventory file on the control node, under a group named after the provider.
+4. Moves `sshd` to the **New SSH port** from the form (4242 unless you change it; set it to the current port to leave sshd where it is).
+5. Adds the host to the inventory file on the control node, under a group named after the provider, with that port as its `ansible_port`.
+
+The new port has to be reachable from the ansbui host, so open it in any firewall or security group in front of the target before you start: bootstrap moves sshd there and then expects to find it. An inventory entry that already exists for the host is left as it is, port included.
 
 The passwords typed into the form are used for that job and are not stored. The target's SSH host key is recorded on first contact and enforced on later runs; `ANSBUI_BOOTSTRAP_REQUIRE_HOSTKEY` makes a pinned fingerprint mandatory instead.
 
