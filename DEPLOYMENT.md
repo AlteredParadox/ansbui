@@ -656,6 +656,12 @@ in ansbui having changed. Two things to do:
   lookup, the installer files and the OS images still answer. It runs
   nothing from the script. A failure names what broke. A pass means
   the pin is intact, **not** that a reinstall works.
+- If the job log says the installer was found on `:22` and not on the
+  port it was given, that is a known quirk and not a failure: the
+  installer has been seen starting its sshd before it wrote its port
+  setting, so it stays on 22 for the length of the install. ansbui
+  checks both ports and carries on over 22; the installed system
+  still comes up on the port you asked for.
 - If it passes and reinstalls still fail, the pin is probably too old
   for today's installer and images. Compare with upstream: if the
   current upstream script reinstalls the same machine by hand, update

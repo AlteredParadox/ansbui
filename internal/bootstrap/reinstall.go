@@ -943,18 +943,21 @@ func waitForInstallerDone(ctx context.Context, host string, port int, privKey []
 			}
 			return nil, false, fmt.Errorf("timeout after %s waiting for the installer to finish writing %s: %s", friendly(reinstallWaitBudget), expectedOS, hint)
 		}
-		target, verdict, detail := tryInstallerDone(ctx, host, port, privKey, expectedOS)
-		switch verdict {
+		p := tryInstallerDone(ctx, host, port, privKey, expectedOS)
+		switch p.verdict {
 		case installerHoldDone:
-			return target, false, nil
+			if note := installerPortNote(p.port, port); note != "" {
+				emit("meta", note)
+			}
+			return p.target, false, nil
 		case installerFinalOS:
 			return nil, true, nil
 		case installerErrored:
-			return nil, false, fmt.Errorf("the installer reported an error and is holding the box in its live env — ssh root@%s -p %d (bootstrap key) to inspect /reinstall.log and /os, then re-run bootstrap. Last log: %s", host, port, detail)
+			return nil, false, fmt.Errorf("the installer reported an error and is holding the box in its live env — ssh root@%s -p %d (bootstrap key) to inspect /reinstall.log and /os, then re-run bootstrap. Last log: %s", host, p.port, p.detail)
 		}
-		lastStatus = detail
+		lastStatus = p.detail
 		if time.Since(lastBeat) >= heartbeatPeriod {
-			emit("meta", fmt.Sprintf("installer still writing %s (%s elapsed) — %s", expectedOS, friendly(time.Since(startedAt)), detail))
+			emit("meta", fmt.Sprintf("installer still writing %s (%s elapsed) — %s", expectedOS, friendly(time.Since(startedAt)), p.detail))
 			lastBeat = time.Now()
 		}
 		if err := sleepCtx(ctx, retryInterval); err != nil {
@@ -963,10 +966,94 @@ func waitForInstallerDone(ctx context.Context, host string, port int, privKey []
 	}
 }
 
-// tryInstallerDone performs one dial + installer probe. The session
-// is returned open ONLY on the hold-done verdict; every other path
-// closes it.
-func tryInstallerDone(ctx context.Context, host string, port int, privKey []byte, expectedOS string) (*targetSession, int, string) {
+// installerDefaultPort is where the installer environment's sshd
+// listens when it has not applied the port it was given.
+//
+// That happens. trans.sh writes "Port <n>" into the live
+// environment's sshd config and only afterwards runs setup-sshd,
+// which is meant to start sshd on that port. On a real target sshd
+// has been seen running before the port file was written (pid file
+// 66 ms older than the file, on a box that then sat at hold 2 with
+// sshd on :22 while its own `sshd -G` reported port 4242). Nothing
+// restarts it, so the installer answers on 22 for the whole install
+// and a poll of the requested port alone waits out the full budget
+// on a machine that finished long ago. The same sequence run in an
+// Alpine 3.24 container ends on the requested port, so what starts
+// sshd early on the real installer is not known; the installer is
+// upstream's and not ours to fix.
+//
+// Only the installer is affected: the installed system gets its port
+// in a config file read at first boot.
+//
+// A variable only so a test can point it at a local listener.
+var installerDefaultPort = 22
+
+// installerPortNote is the job-log line for an installer that was
+// reached on a port other than the one it was given, or "" when it
+// answered where it should.
+func installerPortNote(answeredOn, requested int) string {
+	if answeredOn == requested {
+		return ""
+	}
+	return fmt.Sprintf("⚠ the installer finished, but its sshd is listening on :%d, not on :%d as it was told — its port setting was written after sshd had started, and sshd was not restarted. Continuing over :%d; the installed system is configured for :%d", answeredOn, requested, answeredOn, requested)
+}
+
+// installerProbe is the outcome of one attempt to reach the
+// installer on one port.
+type installerProbe struct {
+	// target is open only on the hold-done verdict.
+	target  *targetSession
+	verdict int
+	detail  string
+	port    int
+	// reached reports that an SSH session was established and the
+	// probe script ran — as opposed to a dial or command failure,
+	// which says nothing about what is on that port.
+	reached bool
+}
+
+// tryInstallerDone probes the installer on the port it was told to
+// use and, when nothing usable answers there, on installerDefaultPort
+// (see that constant for why).
+func tryInstallerDone(ctx context.Context, host string, port int, privKey []byte, expectedOS string) installerProbe {
+	primary := probeInstaller(ctx, host, port, privKey, expectedOS)
+	if primary.reached || port == installerDefaultPort {
+		return primary
+	}
+	return chooseInstallerProbe(primary, probeInstaller(ctx, host, installerDefaultPort, privKey, expectedOS))
+}
+
+// chooseInstallerProbe decides between the probe of the requested
+// port, which did not reach the installer, and the probe of
+// installerDefaultPort.
+//
+// The fallback is believed only for what the installer alone can
+// say: that it is installing, has finished (hold marker in
+// /reinstall.log) or has failed. A "this is already the final OS"
+// answer on the fallback port is not: before the reboot that port
+// may have been the old system's, and an old system of the same
+// distribution that accepts the bootstrap key would give that
+// answer. It is reported as still waiting, so the run goes on
+// polling the port the new system was actually given.
+func chooseInstallerProbe(primary, fallback installerProbe) installerProbe {
+	if !fallback.reached {
+		return primary
+	}
+	if fallback.verdict == installerFinalOS {
+		fallback.verdict = installerInstalling
+		fallback.detail = fmt.Sprintf(":%d does not answer; :%d answers as the target OS, which is either the system from before the reinstall or the new one on the wrong port — still waiting for :%d", primary.port, fallback.port, primary.port)
+		return fallback
+	}
+	if fallback.verdict == installerInstalling {
+		fallback.detail = fmt.Sprintf("answering on :%d, not :%d: %s", fallback.port, primary.port, fallback.detail)
+	}
+	return fallback
+}
+
+// probeInstaller performs one dial + installer probe on one port. The
+// session is returned open ONLY on the hold-done verdict; every other
+// path closes it.
+func probeInstaller(ctx context.Context, host string, port int, privKey []byte, expectedOS string) installerProbe {
 	// No expectation is available: the installer environment
 	// generates its own ephemeral host key, distinct from both the
 	// pre-reinstall system's and the one the installed OS will
@@ -976,19 +1063,21 @@ func tryInstallerDone(ctx context.Context, host string, port int, privKey []byte
 	// than relying on a pin that cannot exist here.
 	target, err := dialKeyTarget(ctx, host, port, privKey, hostKeyExpectation{})
 	if err != nil {
-		return nil, installerInstalling, "dial: " + err.Error()
+		return installerProbe{verdict: installerInstalling, detail: "dial: " + err.Error(), port: port}
 	}
 	out, _, err := target.runRoot(ctx, installerProbeScript, "")
 	if err != nil {
 		_ = target.Close()
-		return nil, installerInstalling, "installer probe: " + err.Error()
+		return installerProbe{verdict: installerInstalling, detail: "installer probe: " + err.Error(), port: port}
 	}
 	verdict, detail := evalInstallerProbe(out, expectedOS)
+	p := installerProbe{verdict: verdict, detail: detail, port: port, reached: true}
 	if verdict == installerHoldDone {
-		return target, verdict, detail
+		p.target = target
+		return p
 	}
 	_ = target.Close()
-	return nil, verdict, detail
+	return p
 }
 
 // persistInstallLogScript copies the installer's full log into the
