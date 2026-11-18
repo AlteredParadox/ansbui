@@ -24,12 +24,19 @@
   api.setUnauthorizedHandler = (fn) => { onUnauthorized = fn; };
   const AUTH_PATHS = new Set(['/api/login', '/api/logout', '/api/auth/status']);
 
+  // Every call carries X-Ansbui-Request. The server requires it on the
+  // reads that make it contact the control node (withOriginGuard in
+  // internal/api/api.go): those are GETs with no Origin header, which
+  // a page on another site could otherwise fire blind through an
+  // <img> or a link. Such a page cannot add a custom header, so its
+  // presence is what tells the server the request is ours. Sent on
+  // every call so a new endpoint needs nothing done here.
   const json = async (path, opts) => {
     const options = opts || {};
     const headers = options.headers || {};
     const res = await fetch(path, {
       ...options,
-      headers: { 'Content-Type': 'application/json', ...headers }
+      headers: { 'Content-Type': 'application/json', 'X-Ansbui-Request': '1', ...headers }
     });
     if (!res.ok) {
       if (res.status === 401 && !AUTH_PATHS.has(path) && onUnauthorized) {

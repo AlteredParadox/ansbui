@@ -132,15 +132,29 @@ func (s *Server) handleAuthStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 // requestIsHTTPS reports whether the browser's connection to us (or
-// to the TLS-terminating proxy in front of us) is HTTPS. Used to set
-// the cookie Secure attribute: direct TLS shows up as r.TLS, and a
-// reverse proxy signals it via X-Forwarded-Proto. Local plain-HTTP
-// dev gets a non-Secure cookie so login still works there.
+// to the TLS-terminating proxy in front of us) is HTTPS. Direct TLS
+// shows up as r.TLS, and a reverse proxy signals it via
+// X-Forwarded-Proto. Three things hang off it: the cookie Secure
+// attribute (local plain-HTTP dev gets a non-Secure cookie so login
+// still works there), the scheme the Origin header must carry
+// (checkSameOrigin), and whether HSTS is sent (withSecurityHeaders).
+//
+// A chain of proxies may send a list ("https, http"); the first entry
+// is the hop the browser itself made, which is the one that matters.
 func requestIsHTTPS(r *http.Request) bool {
 	if r.TLS != nil {
 		return true
 	}
-	return strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
+	first, _, _ := strings.Cut(r.Header.Get("X-Forwarded-Proto"), ",")
+	return strings.EqualFold(strings.TrimSpace(first), "https")
+}
+
+// requestScheme is requestIsHTTPS as the URL scheme the browser used.
+func requestScheme(r *http.Request) string {
+	if requestIsHTTPS(r) {
+		return "https"
+	}
+	return "http"
 }
 
 func setSessionCookie(w http.ResponseWriter, r *http.Request, token string) {

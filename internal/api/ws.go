@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -59,20 +60,72 @@ func wsWriteJSON(conn *websocket.Conn, v any) error {
 	return conn.WriteJSON(v)
 }
 
-// sameOriginCheck compares the parsed Origin header host:port to the
-// request's Host. url.Parse makes the match resistant to the
-// HasSuffix-bypass trick ("http://evil.com//legit.host:8787"). A
-// missing Origin is allowed (non-browser / curl clients).
+// sameOriginCheck is the WebSocket upgrader's CheckOrigin. It is
+// checkSameOrigin reduced to a yes/no, so the upgrader and
+// withOriginGuard (which wants the reason for its 403) can't drift.
 func sameOriginCheck(r *http.Request) bool {
+	return checkSameOrigin(r) == nil
+}
+
+// errCrossOrigin is the deliberately terse refusal for a request that
+// some other origin's page produced.
+var errCrossOrigin = errors.New("cross-origin request rejected")
+
+// checkSameOrigin decides whether r can have come from the page this
+// server serves. It returns nil when it can, and the reason when it
+// cannot. Two independent signals, both set by the browser and both
+// out of reach of page script:
+//
+//   - Sec-Fetch-Site. Browsers attach it to every request for an
+//     https or loopback URL, including the ones that carry no Origin
+//     at all (image, script and other no-cors GETs, top-level
+//     navigations). Anything other than same-origin or none (the user
+//     typed the URL) is another origin's page. "same-site" is refused
+//     too: a sibling subdomain, or another port on this host, is not
+//     this page.
+//
+//   - Origin, compared on scheme AND host:port. url.Parse makes the
+//     host match resistant to the HasSuffix-bypass trick
+//     ("http://evil.com//legit.host:8787"). The scheme matters as much
+//     as the host: behind a TLS-terminating proxy that forwards the
+//     public Host, https://host and http://host produce the same Host
+//     header, so a host-only comparison let a plaintext page for the
+//     deployment's own name — which a network attacker can serve —
+//     pass as same-origin and drive the run WebSockets with whatever
+//     credential the browser attaches across schemes (proxy basic
+//     auth, or none on a network-restricted pass-through instance).
+//
+// A request with neither header is not a browser on a secure origin:
+// curl, a script, or a browser on plain-HTTP non-loopback, where
+// Sec-Fetch-Site is not sent. This check lets it through; the routes
+// where a blind trigger matters are covered by the client-marker rule
+// in withOriginGuard.
+func checkSameOrigin(r *http.Request) error {
+	switch r.Header.Get("Sec-Fetch-Site") {
+	case "", "same-origin", "none":
+	default: // cross-site, same-site, or a value this code doesn't know
+		return errCrossOrigin
+	}
 	origin := r.Header.Get("Origin")
 	if origin == "" {
-		return true
+		return nil
 	}
 	u, err := url.Parse(origin)
-	if err != nil || u.Host == "" {
-		return false
+	if err != nil || u.Host == "" || u.Host != r.Host {
+		return errCrossOrigin
 	}
-	return u.Host == r.Host
+	want := requestScheme(r)
+	if strings.EqualFold(u.Scheme, want) {
+		return nil
+	}
+	if want == "http" && strings.EqualFold(u.Scheme, "https") {
+		// The one mismatch a legitimate deployment produces: the page
+		// was loaded over HTTPS through a proxy that did not say so.
+		// Name the fix, since otherwise the UI loads and every action
+		// fails with an unexplained 403.
+		return errors.New("cross-origin request rejected: the page was loaded over https but this request reached ansbui as plain http — a TLS-terminating reverse proxy must send X-Forwarded-Proto: https")
+	}
+	return errCrossOrigin
 }
 
 // runnerFunc is the shape of ansible.RunAdhoc / ansible.RunPlaybook:

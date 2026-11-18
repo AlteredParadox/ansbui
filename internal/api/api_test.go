@@ -19,6 +19,9 @@ func TestUnknownAPIRouteReturnsJSON404(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/api/does-not-exist", nil)
 	req.Host = selfHost
+	// As the SPA sends it: without the marker an unlisted read is
+	// refused before routing (see clientMarkerRequired).
+	req.Header.Set(clientMarkerHeader, "1")
 	w := httptest.NewRecorder()
 	s.Handler().ServeHTTP(w, req)
 
