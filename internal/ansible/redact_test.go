@@ -1,6 +1,8 @@
 package ansible
 
 import (
+	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -72,6 +74,34 @@ func TestRedactTextSecretKeyShapes(t *testing.T) {
 		{"escaped quote in json value", `{"password":"SHHHtail\"more"}`},
 		{"single quoted", `password='SHHH'`},
 		{"multi-word passphrase", `passphrase: SHHH is a long one`},
+		// Ansible's own spellings, and the *_pass convention generally.
+		{"ansible_become_pass", `ansible_become_pass: SHHH`},
+		{"ansible_ssh_pass json", `{"ansible_ssh_pass":"SHHH"}`},
+		{"ansible_sudo_pass shell arg", `ansible_sudo_pass=SHHH`},
+		{"ansible_su_pass", `ansible_su_pass: "SHHH"`},
+		{"camel case", `dbPass=SHHH`},
+		{"bare pass", `pass: SHHH`},
+		{"passwd", `mysql_root_passwd: SHHH`},
+		// List and object values: every element goes, not just the
+		// part before the first quote.
+		{"json list", `"api_tokens": ["SHHH-a","SHHH-b"]`},
+		{"yaml flow list", `deploy_tokens: [SHHH-a, SHHH-b]`},
+		{"json object", `"registry_credential": {"user":"ci","key":"SHHH"}`},
+		{"list after other keys", `{"region":"eu","db_password":["SHHH"],"zone":"a"}`},
+		// A closing bracket inside a quoted string does not end the
+		// value. Stopping there left the rest of the string behind
+		// AND put the scan out of step with the quotes, so the
+		// secret-named key inside was never matched either.
+		{"brace inside a nested secret", `{"credentials":{"password":"abc},SHHH"}}`},
+		{"bracket inside a list element", `"api_tokens": ["a]b","SHHH"]`},
+		{"brace inside a single-quoted value", `registry_credential: {'a}b': 'SHHH'}`},
+		{"escaped quote then a brace", `{"secret":{"k":"a\"},SHHH"}}`},
+		{"nested object, secret after it", `{"credentials":{"a":{"b":1},"password":"SHHH"}}`},
+		{"nested list, secret after it", `"tokens": [["x"],"SHHH"], "api_token": "SHHH"`},
+		{"object in object, unnamed key after it", `"registry_credential": {"a":{"b":1},"k":"SHHH"}`},
+		{"yaml list in list", `deploy_tokens: [[a, b], SHHH]`},
+		{"list of objects", `"api_tokens": [{"v":"SHHH"},{"v":"SHHH"}]`},
+		{"object holding lists", `secret: {"keys":["SHHH","SHHH"],"n":[1,2]}`},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -110,6 +140,18 @@ func TestRedactTextPreservesNonSecrets(t *testing.T) {
 		// The value here is a file descriptor path, not a credential;
 		// redacting it would make the vault command preview useless.
 		`ansible-vault view x --vault-password-file=/dev/fd/3`,
+		// "pass" inside or at the start of a longer word is not a
+		// key that ends in pass.
+		`passed: 3`,
+		`ok: all 12 assertions passed`,
+		`pass_through_mode: transparent`,
+		`passenger_count: 4`,
+		`sshpass -p x ssh host`,
+		`TASK [Check the bypass rule is present] ***`,
+		// A list or object under an ordinary key is left alone.
+		`"tags": ["a","b"]`,
+		`ok: [web1] => {"ports": [80, 443]}`,
+		`"matrix": [[1,2],[3,4]], "meta": {"a":{"b":"c"}}`,
 	}
 	for _, s := range keep {
 		if got := RedactText(s); got != s {
@@ -127,6 +169,9 @@ func TestRedactKeyDefinitionsAgree(t *testing.T) {
 		"password", "db_password", "passphrase", "token", "api_token",
 		"secret", "client_secret", "aws_secret_access_key",
 		"api_key", "apikey", "api-key", "private_key", "credential",
+		"ansible_become_pass", "ansible_ssh_pass", "ansible_sudo_pass",
+		"ansible_su_pass", "db_pass", "dbPass", "pass", "passwd",
+		"ansible_become_passwd",
 	}
 	for _, k := range keys {
 		if !sensitiveKeyRE.MatchString(k) {
@@ -135,5 +180,67 @@ func TestRedactKeyDefinitionsAgree(t *testing.T) {
 		if got := RedactText(k + ": SHHH"); strings.Contains(got, "SHHH") {
 			t.Errorf("RedactText left %q value in the clear: %s", k, got)
 		}
+	}
+}
+
+// TestRedactNotSensitiveKeys: the structured-key matcher decides
+// whether a whole extra-var or module argument is replaced, so a false
+// positive hides an ordinary setting from the operator's own history.
+func TestRedactNotSensitiveKeys(t *testing.T) {
+	for _, k := range []string{
+		"passed", "pass_through_mode", "passenger_count", "password_less_login_ok_count_passes",
+		"compass_heading_deg", "region", "state", "user", "become", "path",
+	} {
+		if k == "password_less_login_ok_count_passes" {
+			continue // contains "password": sensitive by the older rule, listed for the reader
+		}
+		if sensitiveKeyRE.MatchString(k) {
+			t.Errorf("sensitiveKeyRE treats %q as a secret", k)
+		}
+	}
+}
+
+// TestRedactLaterPassesRevealNothing: a stored record is redacted
+// when it is appended and then served as stored (Recorder.List / Get);
+// it is scrubbed again at every start, to pick up new rules. A later
+// pass is allowed to trim more — the unquoted-value rule runs to the
+// end of the line, so text after an earlier marker can be absorbed —
+// but it must never bring a value back, and it must settle.
+func TestRedactLaterPassesRevealNothing(t *testing.T) {
+	rec := RunRecord{
+		Args:      map[string]string{"password": "SHHH'SHHH", "cmd": `echo api_tokens=["SHHH","SHHH"] ansible_become_pass=SHHH`},
+		ExtraVars: map[string]any{"ansible_ssh_pass": "SHHH", "list": []any{"token: SHHH", map[string]any{"db_pass": "SHHH"}}},
+		Command:   `ansible-playbook x --extra-vars '{"deploy_tokens":["SHHH","SHHH"],"n":1}'`,
+		Log: []Event{
+			{Type: "line", Text: `"registry_credential": {"user":"ci","key":"SHHH"}, "x": 1`},
+			{Type: "line", Text: `ansible_become_pass: SHHH`},
+			{Type: "meta", Text: `$ ansible all -a 'password="SHHH"'`},
+		},
+	}
+	texts := func(r RunRecord) []string {
+		out := []string{r.Command, r.Args["cmd"], r.Args["password"]}
+		for _, e := range r.Log {
+			out = append(out, e.Text)
+		}
+		data, err := json.Marshal(r.ExtraVars)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return append(out, string(data))
+	}
+	cur := rec
+	var prev []string
+	for pass := 1; pass <= 4; pass++ {
+		cur = RedactRunRecord(cur)
+		now := texts(cur)
+		for _, s := range now {
+			if strings.Contains(s, "SHHH") {
+				t.Errorf("pass %d left a value in: %s", pass, s)
+			}
+		}
+		if pass == 4 && !reflect.DeepEqual(prev, now) {
+			t.Errorf("redaction had not settled after three passes:\n3: %q\n4: %q", prev, now)
+		}
+		prev = now
 	}
 }

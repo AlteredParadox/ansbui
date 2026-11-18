@@ -410,3 +410,38 @@ but both are good hygiene for a prod binary.
   ansbui redacts common password/token/key shapes, but arbitrary
   module output can still contain sensitive material under unusual
   names.
+
+  What is redacted: any extra-var or module argument whose **name**
+  contains `password`, `passphrase`, `passwd`, `token`, `secret`,
+  `api_key`, `private_key` or `credential`, or **ends in** `pass`
+  (`ansible_become_pass`, `ansible_ssh_pass`, …) — the whole value,
+  whatever its type, in the saved inputs and in the `$ …` command
+  line at the top of the run. The same names followed by `:` or `=`
+  are scrubbed from output lines, best effort. A secret passed under
+  any other name (`db_pw`, `auth`) is stored as typed.
+
+  **Upgrading from a release without the `pass` / `passwd` rules.**
+  Those releases stored `ansible_become_pass` and friends in the
+  clear. They also saved each run's `$ …` command line by scrubbing
+  the text of the executed command, which left the tail of any secret
+  containing a single quote, and every element of a list-valued one,
+  right after the `<REDACTED>` marker. The first start after the
+  upgrade repairs the live `runs.json`:
+
+  - every stored value under a secret-looking name is replaced, by
+    the current rules;
+  - each older run's command line is **cut after its first redacted
+    value** and marked as such. A leftover tail cannot be told apart
+    from the rest of the command, so the rest goes. The run's limit,
+    tags and other settings are still on the record. Command lines
+    with nothing redacted in them are left whole, and runs recorded
+    from now on are not cut.
+
+  What the upgrade cannot reach is copies ansbui does not own:
+  backups of the data directory, and the `runs.json.bad-<timestamp>`
+  files left when a corrupt history was set aside. If such values
+  were ever supplied through the UI, treat those copies as holding
+  them: delete what you do not need, and rotate the passwords if a
+  copy left the host. Rotate them too if the history API was
+  reachable by anyone who should not have had them — the repair
+  removes the values from now on, not from what was already read.

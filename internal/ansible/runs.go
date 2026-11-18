@@ -64,6 +64,13 @@ type RunRecord struct {
 	Limit     string            `json:"limit,omitempty"`
 	Tags      []string          `json:"tags,omitempty"`
 	ExtraVars map[string]any    `json:"extraVars,omitempty"`
+
+	// Redaction is the generation of redaction rules this record's
+	// saved command line was produced under (see redactionCurrent).
+	// Set by the Recorder, not by callers. Absent on records written
+	// before the field existed, which is how they are recognised and
+	// repaired when the history is loaded.
+	Redaction int `json:"redaction,omitempty"`
 }
 
 // Recorder is a thread-safe on-disk list of RunRecords plus a small
@@ -135,10 +142,24 @@ func NewRecorder(path string) (*Recorder, error) {
 	return r, nil
 }
 
+// scrubLoadedRuns brings every loaded record up to the current
+// redaction rules and reports whether anything changed (so the caller
+// rewrites the file). Two steps:
+//
+//   - the key and pattern rules are applied again, to every record at
+//     every start, so a rule added in an upgrade reaches history that
+//     was stored before it;
+//   - a record whose command line was produced the old way is cut
+//     where it stops being trustworthy (cutLegacyPreviews), once, and
+//     stamped so it is not cut again.
 func (r *Recorder) scrubLoadedRuns() bool {
 	changed := false
 	for i, run := range r.runs {
 		redacted := RedactRunRecord(run)
+		if redacted.Redaction < redactionCurrent {
+			redacted = cutLegacyPreviews(redacted)
+			redacted.Redaction = redactionCurrent
+		}
 		if !reflect.DeepEqual(redacted, run) {
 			changed = true
 		}
@@ -160,6 +181,9 @@ func (r *Recorder) Append(rec RunRecord) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	rec = RedactRunRecord(rec)
+	// A record arriving here was produced by this binary, so its
+	// command line is the redacted-by-value rendering.
+	rec.Redaction = redactionCurrent
 	// Build the prospective list in a local, attempt to persist it,
 	// then commit to memory REGARDLESS of the write outcome. A run that
 	// actually executed should stay visible in History for this process
@@ -263,25 +287,38 @@ func fsyncDir(dir string) error {
 	return nil
 }
 
-// List returns a copy of the current run records (already sorted newest
-// first).
+// List returns the run records, newest first, WITHOUT their logs: one
+// record's log is fetched with Get.
+//
+// Nothing is redacted here. Every record in r.runs already is — Append
+// redacts before storing and NewRecorder scrubs what it loads — and
+// that is the only place it can be done once. List used to run the
+// redaction pattern over every event of every retained log on each
+// call, under the mutex, and then its only caller threw the logs away:
+// about half a second per retained MiB during which run completion
+// (Append) and every inventory poll (LastPlayPerHost) waited. The
+// critical section is now O(number of runs).
 func (r *Recorder) List() []RunRecord {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	out := make([]RunRecord, len(r.runs))
 	for i, run := range r.runs {
-		out[i] = RedactRunRecord(run)
+		run.Log = nil
+		out[i] = run
 	}
 	return out
 }
 
-// Get fetches a single run record by id.
+// Get fetches a single run record by id, log included. The stored
+// record is already redacted (see List). The returned record shares
+// its log and replay-input maps with the store: read it, encode it,
+// don't modify it.
 func (r *Recorder) Get(id string) (RunRecord, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for _, run := range r.runs {
 		if run.ID == id {
-			return RedactRunRecord(run), true
+			return run, true
 		}
 	}
 	return RunRecord{}, false

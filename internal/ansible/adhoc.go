@@ -10,6 +10,7 @@ import (
 	"log"
 	"regexp"
 	"runtime/debug"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -61,12 +62,12 @@ type Event struct {
 func RunAdhoc(ctx context.Context, pool *sshpool.Pool, srv config.Server, req AdhocRequest, out chan<- Event) (err error) {
 	defer close(out)
 	defer func() { err = recoverRunner(recover(), out, err) }()
-	cmd, berr := buildAdhocCmd(srv, req)
+	cmd, preview, berr := buildAdhocCmd(srv, req)
 	if berr != nil {
 		out <- Event{Type: "error", Text: berr.Error()}
 		return berr
 	}
-	return runStreaming(ctx, pool, srv, cmd, "", out)
+	return runStreaming(ctx, pool, srv, cmd, preview, "", out)
 }
 
 // RunPlaybook streams events from `ansible-playbook`. If
@@ -88,12 +89,12 @@ func RunPlaybook(ctx context.Context, pool *sshpool.Pool, srv config.Server, req
 			return verr
 		}
 	}
-	cmd, berr := buildPlaybookCmd(srv, req)
+	cmd, preview, berr := buildPlaybookCmd(srv, req)
 	if berr != nil {
 		out <- Event{Type: "error", Text: berr.Error()}
 		return berr
 	}
-	return runStreaming(ctx, pool, srv, cmd, req.VaultPassword, out)
+	return runStreaming(ctx, pool, srv, cmd, preview, req.VaultPassword, out)
 }
 
 // recoverRunner converts a panic in RunAdhoc/RunPlaybook into a
@@ -115,7 +116,16 @@ func recoverRunner(r any, out chan<- Event, prev error) error {
 	return errors.New("internal error in ansible runner")
 }
 
-func runStreaming(ctx context.Context, pool *sshpool.Pool, srv config.Server, cmd, stdin string, out chan<- Event) error {
+// runStreaming executes cmd on the control node and streams its
+// output as events. preview is what the operator is shown, and what
+// is saved, as the command that ran: the same command line built from
+// inputs whose secrets were already removed by key (see
+// buildPlaybookCmd). It is never derived from cmd. cmd is shell-quoted
+// and JSON-encoded, and no pattern can reliably find the end of a
+// secret in that — a single quote in a password becomes '"'"', a list
+// of tokens has no closing quote where the pattern expects one — so
+// redacting cmd's text left the tail of the value in history.
+func runStreaming(ctx context.Context, pool *sshpool.Pool, srv config.Server, cmd, preview, stdin string, out chan<- Event) error {
 	cli, err := pool.Client(ctx, srv)
 	if err != nil {
 		// Every early return must leave an error event behind —
@@ -124,7 +134,10 @@ func runStreaming(ctx context.Context, pool *sshpool.Pool, srv config.Server, cm
 		out <- Event{Type: "error", Text: "connect to control node: " + err.Error()}
 		return err
 	}
-	out <- Event{Type: "meta", Text: fmt.Sprintf("$ %s", RedactText(cmd))}
+	// RedactText is a second pass over text that is already clean of
+	// structured secrets: it catches key=value shapes inside free-text
+	// inputs (a --limit, a tag) that have no key to redact by.
+	out <- Event{Type: "meta", Text: fmt.Sprintf("$ %s", RedactText(preview))}
 
 	stdoutR, stdoutW := io.Pipe()
 	stderrR, stderrW := io.Pipe()
@@ -277,13 +290,36 @@ func classify(line, stream string) Event {
 	return Event{Type: "line", Text: line, Stream: stream}
 }
 
-func buildAdhocCmd(srv config.Server, req AdhocRequest) (string, error) {
+// buildAdhocCmd returns the command to execute and its preview: the
+// same command line with every module argument under a secret-looking
+// name replaced before quoting (see runStreaming for why the preview
+// is built separately and not redacted from cmd).
+func buildAdhocCmd(srv config.Server, req AdhocRequest) (cmd, preview string, err error) {
 	if strings.TrimSpace(req.Target) == "" {
-		return "", errors.New("target is required")
+		return "", "", errors.New("target is required")
 	}
 	if strings.TrimSpace(req.Module) == "" {
-		return "", errors.New("module is required")
+		return "", "", errors.New("module is required")
 	}
+	return adhocCommandLine(srv, req, req.Args), adhocCommandLine(srv, req, redactedArgs(req.Args)), nil
+}
+
+// redactedArgs is RedactStringMap, except that an empty value stays
+// empty: buildArgString drops empty arguments, and the preview must
+// not show one the real command does not carry.
+func redactedArgs(args map[string]string) map[string]string {
+	red := RedactStringMap(args)
+	for k, v := range args {
+		if v == "" {
+			red[k] = ""
+		}
+	}
+	return red
+}
+
+// adhocCommandLine renders the `ansible` invocation for req with the
+// given module arguments.
+func adhocCommandLine(srv config.Server, req AdhocRequest, args map[string]string) string {
 	var b strings.Builder
 	if srv.WorkDir != "" {
 		fmt.Fprintf(&b, "cd %s && ", shellQuote(srv.WorkDir))
@@ -296,9 +332,9 @@ func buildAdhocCmd(srv config.Server, req AdhocRequest) (string, error) {
 		b.WriteString(" -i ")
 		b.WriteString(shellQuote(srv.Inventory))
 	}
-	if args := buildArgString(req.Args); args != "" {
+	if argStr := buildArgString(args); argStr != "" {
 		b.WriteString(" -a ")
-		b.WriteString(shellQuote(args))
+		b.WriteString(shellQuote(argStr))
 	}
 	if req.Become {
 		b.WriteString(" --become")
@@ -313,13 +349,57 @@ func buildAdhocCmd(srv config.Server, req AdhocRequest) (string, error) {
 		fmt.Fprintf(&b, " --timeout %d", req.Timeout)
 	}
 	b.WriteString(" 2>&1")
-	return b.String(), nil
+	return b.String()
 }
 
-func buildPlaybookCmd(srv config.Server, req PlaybookRequest) (string, error) {
+// buildPlaybookCmd returns the command to execute and its preview.
+//
+// The preview is the ansible-playbook command line rendered from
+// extra-vars whose secret-named entries were replaced BEFORE the JSON
+// encoding and shell quoting (RedactAnyMap), so a whole value goes —
+// a password containing a quote, a list of tokens, a nested object —
+// whatever it looks like once encoded. See runStreaming.
+//
+// The preview also leaves out the bash wrapper that feeds the vault
+// password on fd 3. That is plumbing, it contains the text
+// `PASS=$(cat)` which reads as a secret assignment, and the flag that
+// matters to the operator (--vault-password-file=/dev/fd/3) is on the
+// command line itself.
+func buildPlaybookCmd(srv config.Server, req PlaybookRequest) (cmd, preview string, err error) {
 	if err := validateRelPath(req.Path); err != nil {
-		return "", err
+		return "", "", err
 	}
+	vars, err := cleanExtraVars(req.ExtraVars)
+	if err != nil {
+		return "", "", err
+	}
+	line, err := playbookCommandLine(srv, req, vars)
+	if err != nil {
+		return "", "", err
+	}
+	preview, err = playbookCommandLine(srv, req, RedactAnyMap(vars))
+	if err != nil {
+		return "", "", err
+	}
+	cmd = line
+	if req.VaultPassword != "" {
+		// PASS=$(cat) reads the password from stdin into a shell var,
+		// then exec 3< <(printf '%s' "$PASS") exposes it on FD 3 so
+		// ansible-playbook's --vault-password-file=/dev/fd/3 can read
+		// it. printf is a bash builtin (no exec) writing into the FIFO
+		// from process substitution — keeps the value entirely in
+		// pipes, with no chance of a /tmp window even on older bash
+		// where here-strings (<<<) could spill to disk. The password
+		// never appears in argv or in the saved log.
+		script := `PASS=$(cat) && exec 3< <(printf '%s' "$PASS") && ` + line
+		cmd = "/usr/bin/env bash -c " + shellQuote(script)
+	}
+	return cmd, preview, nil
+}
+
+// playbookCommandLine renders the `ansible-playbook` invocation for
+// req with the given (already cleaned) extra-vars.
+func playbookCommandLine(srv config.Server, req PlaybookRequest, vars map[string]any) (string, error) {
 	var b strings.Builder
 	if srv.WorkDir != "" {
 		fmt.Fprintf(&b, "cd %s && ", shellQuote(srv.WorkDir))
@@ -338,7 +418,7 @@ func buildPlaybookCmd(srv config.Server, req PlaybookRequest) (string, error) {
 		b.WriteString(" --tags ")
 		b.WriteString(shellQuote(strings.Join(req.Tags, ",")))
 	}
-	if extra, err := buildExtraVarsArg(req.ExtraVars); err != nil {
+	if extra, err := encodeExtraVars(vars); err != nil {
 		return "", err
 	} else if extra != "" {
 		b.WriteString(" --extra-vars ")
@@ -354,40 +434,26 @@ func buildPlaybookCmd(srv config.Server, req PlaybookRequest) (string, error) {
 		b.WriteString(" --vault-password-file=/dev/fd/3")
 	}
 	b.WriteString(" 2>&1")
-	cmd := b.String()
-	if req.VaultPassword != "" {
-		// PASS=$(cat) reads the password from stdin into a shell var,
-		// then exec 3< <(printf '%s' "$PASS") exposes it on FD 3 so
-		// ansible-playbook's --vault-password-file=/dev/fd/3 can read
-		// it. printf is a bash builtin (no exec) writing into the FIFO
-		// from process substitution — keeps the value entirely in
-		// pipes, with no chance of a /tmp window even on older bash
-		// where here-strings (<<<) could spill to disk. The password
-		// never appears in argv or in the saved log.
-		script := `PASS=$(cat) && exec 3< <(printf '%s' "$PASS") && ` + cmd
-		cmd = "/usr/bin/env bash -c " + shellQuote(script)
-	}
-	return cmd, nil
+	return b.String(), nil
 }
 
 var argKeyRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
-// buildExtraVarsArg serialises a typed key/value map to the JSON form
-// that ansible-playbook accepts with `--extra-vars`. Keys are
-// validated against the same safe-name regex we use for ad-hoc args so
-// we don't splice arbitrary shell tokens; values are passed through as
-// whatever JSON type the caller supplied (string, number, bool, list,
-// nested object) and re-encoded with json.Marshal, which handles all
-// escaping. nil values are dropped so a half-filled row doesn't send
-// `"key": null` unless the user explicitly typed it.
-func buildExtraVarsArg(vars map[string]any) (string, error) {
+// cleanExtraVars validates the extra-var names and drops the entries
+// that are not sent. Keys are validated against the same safe-name
+// regex we use for ad-hoc args so we don't splice arbitrary shell
+// tokens. nil and empty-string values are dropped so a half-filled row
+// doesn't send `"key": null` unless the user explicitly typed it.
+// Split from the encoding so the command and its preview are rendered
+// from the same set of entries.
+func cleanExtraVars(vars map[string]any) (map[string]any, error) {
 	if len(vars) == 0 {
-		return "", nil
+		return nil, nil
 	}
 	clean := make(map[string]any, len(vars))
 	for k, v := range vars {
 		if !argKeyRE.MatchString(k) {
-			return "", fmt.Errorf("invalid extra-var name %q (must match %s)", k, argKeyRE)
+			return nil, fmt.Errorf("invalid extra-var name %q (must match %s)", k, argKeyRE)
 		}
 		if v == nil {
 			continue
@@ -397,6 +463,15 @@ func buildExtraVarsArg(vars map[string]any) (string, error) {
 		}
 		clean[k] = v
 	}
+	return clean, nil
+}
+
+// encodeExtraVars serialises cleaned extra-vars to the JSON form that
+// ansible-playbook accepts with `--extra-vars`. Values are whatever
+// JSON type the caller supplied (string, number, bool, list, nested
+// object), re-encoded with json.Marshal, which handles all escaping
+// and writes keys in sorted order.
+func encodeExtraVars(clean map[string]any) (string, error) {
 	if len(clean) == 0 {
 		return "", nil
 	}
@@ -411,8 +486,16 @@ func buildArgString(args map[string]string) string {
 	if len(args) == 0 {
 		return ""
 	}
+	// Sorted, so the command and its preview list the arguments in the
+	// same order (map iteration would shuffle each independently).
+	keys := make([]string, 0, len(args))
+	for k := range args {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
 	parts := make([]string, 0, len(args))
-	for k, v := range args {
+	for _, k := range keys {
+		v := args[k]
 		if !argKeyRE.MatchString(k) {
 			continue
 		}

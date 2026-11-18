@@ -3,20 +3,11 @@ package api
 import (
 	"fmt"
 	"net/http"
-
-	"github.com/AlteredParadox/ansbui/internal/ansible"
 )
 
 func (s *Server) listRuns(w http.ResponseWriter, _ *http.Request) {
-	runs := s.Runs.List()
-	// Strip the log from list responses — clients fetch it via /api/runs/{id}.
-	out := make([]ansible.RunRecord, len(runs))
-	for i, r := range runs {
-		clone := r
-		clone.Log = nil
-		out[i] = clone
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"runs": out})
+	// List carries no logs — clients fetch one via /api/runs/{id}.
+	writeJSON(w, http.StatusOK, map[string]any{"runs": s.Runs.List()})
 }
 
 func (s *Server) getRun(w http.ResponseWriter, r *http.Request) {

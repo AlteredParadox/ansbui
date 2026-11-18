@@ -63,7 +63,7 @@ func TestRunStreamingCancelDoesNotDeadlock(t *testing.T) {
 
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- runStreaming(ctx, pool, srv, "yes-i-am-fake", "", out)
+		errCh <- runStreaming(ctx, pool, srv, "yes-i-am-fake", "yes-i-am-fake", "", out)
 		close(out)
 	}()
 
