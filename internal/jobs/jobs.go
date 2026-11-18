@@ -75,15 +75,15 @@ const (
 	maxLateVerdicts = 8
 )
 
-// clipMiddle shortens s to about max bytes by cutting out the middle
+// clipMiddle shortens s to about limit bytes by cutting out the middle
 // and saying how much was removed. Both ends are kept because both
 // carry meaning in a failure message: the head names the step, the
 // tail holds the last lines the command printed.
-func clipMiddle(s string, max int) string {
-	if len(s) <= max {
+func clipMiddle(s string, limit int) string {
+	if len(s) <= limit {
 		return s
 	}
-	half := max / 2
+	half := limit / 2
 	head := strings.ToValidUTF8(s[:half], "")
 	tail := strings.ToValidUTF8(s[len(s)-half:], "")
 	return fmt.Sprintf("%s\n… [%d bytes omitted] …\n%s", head, len(s)-len(head)-len(tail), tail)

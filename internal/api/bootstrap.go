@@ -255,9 +255,15 @@ func BootstrapRunRecord(job *jobs.Job) (ansible.RunRecord, bool) {
 	for _, e := range events {
 		all = append(all, ansible.Event{Type: e.Type, Text: e.Text})
 	}
-	// Counted over everything the job kept, before the history caps.
+	// Order matters. The verdict is added first, so a job that ended
+	// without emitting one (cancelled, panicked, returned an error
+	// silently) has its synthesized "fail" counted like an emitted
+	// one. The tally then runs over everything the job kept, before
+	// the history caps drop any of it; cappedHistory keeps the closing
+	// verdict even when it truncates.
+	all = ensureTerminalEvent(all, snap)
 	okCount, failCount := tallyOkFail(all)
-	logEvents := ensureTerminalEvent(cappedHistory(all), snap)
+	logEvents := cappedHistory(all)
 	status := "err"
 	if snap.Status == jobs.StatusSucceeded {
 		status = "ok"

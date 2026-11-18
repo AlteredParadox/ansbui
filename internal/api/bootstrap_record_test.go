@@ -104,6 +104,82 @@ func TestBootstrapRunRecordSynthesizesTerminal(t *testing.T) {
 	if last.Type != "fail" || last.Text != "cancelled" {
 		t.Fatalf("last log event = %+v, want synthesized fail/cancelled", last)
 	}
+	// The synthesized verdict is a failure like any other: History
+	// shows the Failed count next to the status.
+	if run.Failed != 1 || run.OK != 0 {
+		t.Fatalf("ok/failed = %d/%d, want 0/1 (the synthesized fail must be counted)", run.OK, run.Failed)
+	}
+}
+
+// TestBootstrapRunRecordCountsVerdictOnce covers the ways a job can
+// end and what the summary counts for each: a verdict the converter
+// had to synthesize counts once, and one the job emitted itself is
+// not counted a second time.
+func TestBootstrapRunRecordCountsVerdictOnce(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		fn         jobs.Func
+		wantStatus string
+		wantOK     int
+		wantFailed int
+		wantLast   ansible.Event
+	}{
+		{
+			name: "error returned without a fail event",
+			fn: func(_ context.Context, emit func(string, string)) error {
+				emit("ok", "connected.")
+				return errors.New("inventory edit: exit status 1")
+			},
+			wantStatus: "err", wantOK: 1, wantFailed: 1,
+			wantLast: ansible.Event{Type: "fail", Text: "inventory edit: exit status 1"},
+		},
+		{
+			name: "panic",
+			fn: func(_ context.Context, emit func(string, string)) error {
+				emit("ok", "connected.")
+				panic("boom")
+			},
+			wantStatus: "err", wantOK: 1, wantFailed: 1,
+			wantLast: ansible.Event{Type: "fail", Text: "orchestrator panic — check server log for details"},
+		},
+		{
+			name: "fail event emitted by the job",
+			fn: func(_ context.Context, emit func(string, string)) error {
+				emit("ok", "connected.")
+				emit("fail", "apt install: exit status 100")
+				return errors.New("apt install: exit status 100")
+			},
+			wantStatus: "err", wantOK: 1, wantFailed: 1,
+			wantLast: ansible.Event{Type: "fail", Text: "apt install: exit status 100"},
+		},
+		{
+			name: "success without a done event",
+			fn: func(_ context.Context, emit func(string, string)) error {
+				emit("ok", "connected.")
+				return nil
+			},
+			wantStatus: "ok", wantOK: 1, wantFailed: 0,
+			wantLast: ansible.Event{Type: "done", Text: "complete"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			job, err := jobs.New().Start("bootstrap", nil, tc.fn)
+			if err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			<-job.Done()
+			run, ok := BootstrapRunRecord(job)
+			if !ok {
+				t.Fatal("BootstrapRunRecord returned ok=false")
+			}
+			if run.Status != tc.wantStatus || run.OK != tc.wantOK || run.Failed != tc.wantFailed {
+				t.Fatalf("status/ok/failed = %s/%d/%d, want %s/%d/%d", run.Status, run.OK, run.Failed, tc.wantStatus, tc.wantOK, tc.wantFailed)
+			}
+			if last := run.Log[len(run.Log)-1]; last.Type != tc.wantLast.Type || last.Text != tc.wantLast.Text {
+				t.Fatalf("last log event = %+v, want %+v", last, tc.wantLast)
+			}
+		})
+	}
 }
 
 // TestBootstrapRunRecordSkipsOtherKinds guards the OnFinish hook
