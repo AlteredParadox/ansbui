@@ -460,6 +460,12 @@ func TestSecurityHeaders(t *testing.T) {
 		if got := w.Header().Get("Content-Security-Policy"); !strings.Contains(got, "frame-ancestors 'none'") {
 			t.Errorf("GET %s: Content-Security-Policy %q lacks frame-ancestors 'none'", c.path, got)
 		}
+		if got := w.Header().Get("Content-Security-Policy"); got != contentSecurityPolicy {
+			t.Errorf("GET %s: Content-Security-Policy %q, want the full policy", c.path, got)
+		}
+		if got := w.Header().Get("Referrer-Policy"); got != "no-referrer" {
+			t.Errorf("GET %s: Referrer-Policy %q, want no-referrer", c.path, got)
+		}
 		if got := w.Header().Get("X-Frame-Options"); got != "DENY" {
 			t.Errorf("GET %s: X-Frame-Options %q, want DENY", c.path, got)
 		}

